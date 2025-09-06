@@ -9,6 +9,7 @@
 #     "evdev",
 #     "python-dotenv",
 #     "platformdirs",
+#     "python-ydotool",
 # ]
 # ///
 
@@ -18,7 +19,6 @@ import json
 import asyncio
 import base64
 import argparse
-import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -30,6 +30,7 @@ import evdev
 from evdev import ecodes
 from dotenv import load_dotenv
 from platformdirs import user_config_dir
+from pydotool import init as pydotool_init, key_combination, KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V
 
 # Load .env from script's directory first
 script_dir = Path(__file__).parent
@@ -222,10 +223,12 @@ class AudioTranscriber:
             active_keys = self.keyboard.active_keys()
             shift_pressed = ecodes.KEY_LEFTSHIFT in active_keys or ecodes.KEY_RIGHTSHIFT in active_keys
             if shift_pressed:
-                subprocess.run(['ydotool', 'key', '29:1', '42:1', '47:1', '29:0', '42:0', '47:0'], check=True)
+                # Ctrl+Shift+V
+                key_combination([KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V])
             else:
-                subprocess.run(['ydotool', 'key', '29:1', '47:1', '29:0', '47:0'], check=True)
-        except subprocess.CalledProcessError as e:
+                # Ctrl+V
+                key_combination([KEY_LEFTCTRL, KEY_V])
+        except Exception as e:
             print(f"ydotool error: {e}", file=sys.stderr)
             print("Text is in clipboard, use Ctrl+V to paste.", file=sys.stderr)
 
@@ -326,6 +329,7 @@ async def main():
   
   Each option can be set via environment variable using the TWISTT_ prefix.
   API key can also use OPENAI_API_KEY (without prefix).
+  YDOTOOL_SOCKET can be set to specify the ydotool socket path.
   """
     
     parser = argparse.ArgumentParser(
@@ -341,7 +345,9 @@ async def main():
     default_gain = float(os.getenv(f"{ENV_PREFIX}GAIN", "1.0"))
     # API key priority: TWISTT_OPENAI_API_KEY > OPENAI_API_KEY
     default_api_key = os.getenv(f"{ENV_PREFIX}OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-    
+    # ydotool socket priority: TWISTT_YDOTOOL_SOCKET > YDOTOOL_SOCKET
+    ydotool_socket = os.getenv(f"{ENV_PREFIX}YDOTOOL_SOCKET") or os.getenv("YDOTOOL_SOCKET")
+
     parser.add_argument("--hotkey", default=default_hotkey, 
                        help="Push-to-talk key, F1-F12 (env: TWISTT_HOTKEY)")
     parser.add_argument("--model", default=default_model,
@@ -353,7 +359,18 @@ async def main():
                        help="Microphone amplification factor, 1.0=normal, 2.0=double (env: TWISTT_GAIN)")
     parser.add_argument("--api-key", default=default_api_key,
                        help="OpenAI API key (env: TWISTT_OPENAI_API_KEY or OPENAI_API_KEY)")
+    parser.add_argument("--ydotool-socket", default=ydotool_socket,
+                       help="Path to ydotool socket (env: TWISTT_YDOTOOL_SOCKET or YDOTOOL_SOCKET)")
     args = parser.parse_args()
+
+    # Re-initialize ydotool if socket was provided via CLI
+    # Initialize ydotool with socket if provided
+    if ydotool_socket:
+        # doc says we can pass the path to `init` bug it craches or says a string is expected
+        # thankfully it also checks the YDOTOOL_SOCKET env variable
+        os.environ["YDOTOOL_SOCKET"] = ydotool_socket
+
+    pydotool_init()
 
     # Check API key
     if not args.api_key:
@@ -398,4 +415,5 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
+        print("")
         sys.exit(0)

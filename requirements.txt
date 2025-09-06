@@ -5,3 +5,4 @@ pyperclipfix
 evdev
 python-dotenv
 platformdirs
+python-ydotool

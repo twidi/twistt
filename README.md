@@ -78,6 +78,10 @@ RestartSec=2
 WantedBy=multi-user.target
 ```
 
+**Note**: If you use a custom socket path (as shown above with `/run/user/1000/.ydotool_socket`), you'll need to specify it when running twistt:
+- Via environment variable: `YDOTOOL_SOCKET=/run/user/1000/.ydotool_socket ./twistt.py`
+- Or via argument: `./twistt.py --ydotool-socket /run/user/1000/.ydotool_socket`
+
 ## Configuration
 
 ### API Key Setup
@@ -101,6 +105,7 @@ TWISTT_HOTKEY=F9
 TWISTT_MODEL=gpt-4o-transcribe
 TWISTT_LANGUAGE=en  # Leave empty or omit for auto-detect
 TWISTT_GAIN=1.0
+TWISTT_YDOTOOL_SOCKET=/run/user/1000/.ydotool_socket  # Optional, auto-detected by default
 ```
 
 ### Available Options
@@ -112,6 +117,7 @@ TWISTT_GAIN=1.0
 | `--language` | `TWISTT_LANGUAGE` | Auto-detect | Transcription language (ISO 639-1) |
 | `--gain` | `TWISTT_GAIN` | 1.0 | Microphone amplification |
 | `--api-key` | `TWISTT_OPENAI_API_KEY` or `OPENAI_API_KEY` | - | OpenAI API key |
+| `--ydotool-socket` | `TWISTT_YDOTOOL_SOCKET` or `YDOTOOL_SOCKET` | Auto-detect | Path to ydotool socket |
 
 ## Usage
 
@@ -177,6 +183,7 @@ Leave the language parameter empty to use auto-detection.
 
 ### "ydotool error"
 - Ensure ydotool daemon is running: `sudo ydotoold &`
+- If using a custom socket path, set it via `YDOTOOL_SOCKET` environment variable or `--ydotool-socket` argument
 - Text will still be copied to clipboard, use Ctrl+V to paste manually
 
 ### "Permission denied on /dev/input/eventX"
