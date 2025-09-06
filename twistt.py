@@ -81,6 +81,12 @@ class AudioTranscriber:
         self.stream_task = None
         self.current_transcription = []
         self.speech_started = False
+        self.output_queue = asyncio.Queue()
+        self.output_processor_task = None
+        # Health flags for the current stream
+        self.ws_open = False
+        self.sender_running = False
+        self.receiver_running = False
 
         self.headers = {
             "Authorization": f"Bearer {self.openai_api_key}",
@@ -121,6 +127,10 @@ class AudioTranscriber:
         loop = asyncio.get_running_loop()
         self.recording = True
         self.speech_started = False
+        # Reset health flags at start
+        self.ws_open = False
+        self.sender_running = False
+        self.receiver_running = False
 
         def cb(indata, frames, timeinfo, status):
             if self.recording or self.speech_started:
@@ -133,8 +143,8 @@ class AudioTranscriber:
                         audio_bytes = bytes(indata)
                     
                     loop.call_soon_threadsafe(q.put_nowait, audio_bytes)
-                except:
-                    pass
+                except Exception as e:
+                    print(f"Error in microphone callback: {e}", file=sys.stderr)
 
         with sd.RawInputStream(samplerate=SR, blocksize=BLOCK_SIZE,
                                dtype="int16", channels=1, callback=cb):
@@ -142,84 +152,102 @@ class AudioTranscriber:
                 await ws.send(self.session_json)
 
                 self.current_transcription = []
+                self.ws_open = True
 
                 async def sender():
-                    while self.recording or self.speech_started:
-                        try:
+                    self.sender_running = True
+                    try:
+                        while self.recording or self.speech_started:
                             try:
-                                raw = await asyncio.wait_for(q.get(), timeout=0.1)
-                            except asyncio.TimeoutError:
-                                continue
-                            try:
-                                b64 = base64.b64encode(raw).decode("ascii")
-                                await ws.send(json.dumps({
-                                    "type": "input_audio_buffer.append",
-                                    "audio": b64
-                                }))
-                            except Exception as e:
-                                print(f"Error in sender: {e}", file=sys.stderr)
-                                break
-
-                        except asyncio.CancelledError:
-                            break
-
-                async def receiver():
-                    while self.recording or self.speech_started:
-                        try:
-                            raw = await asyncio.wait_for(ws.recv(), timeout=0.1)
-                        except asyncio.TimeoutError:
-                            continue
-                        except asyncio.CancelledError:
-                            break
-
-                        try:
-                            ev = json.loads(raw)
-                            ev_type = ev.get("type", "")
-
-                            if ev_type == EV_SPEECH_STARTED:
-                                self.speech_started = True
-
-                            elif ev_type == EV_DELTA:
-                                d = ev.get("delta")
-                                if d:
-                                    self.current_transcription.append(d)
-                                    self.speech_started = True
-                                    print(d, end="", flush=True)
-
-                            elif ev_type == EV_DONE:
-                                self.speech_started = False
-
-                                if self.current_transcription:
-                                    full_text = "".join(self.current_transcription)
-                                    if self.recording:
-                                        full_text += " "
-                                    self.copy(full_text)
-                                    self.paste()
-                                    self.current_transcription.clear()
-
-                                if not self.recording:
+                                try:
+                                    raw = await asyncio.wait_for(q.get(), timeout=0.1)
+                                except asyncio.TimeoutError:
+                                    continue
+                                try:
+                                    b64 = base64.b64encode(raw).decode("ascii")
+                                    await ws.send(json.dumps({
+                                        "type": "input_audio_buffer.append",
+                                        "audio": b64
+                                    }))
+                                except Exception as e:
+                                    print(f"Error in sender: {e}", file=sys.stderr)
                                     break
 
-                                print(" ", end="", flush=True)
+                            except asyncio.CancelledError:
+                                break
+                    finally:
+                        self.sender_running = False
 
-                        except Exception as e:
-                            print(f"Error in receiver: {e}", file=sys.stderr)
-                            break
+                async def receiver():
+                    self.receiver_running = True
+                    try:
+                        while self.recording or self.speech_started:
+                            try:
+                                raw = await asyncio.wait_for(ws.recv(), timeout=0.1)
+                            except asyncio.TimeoutError:
+                                continue
+                            except asyncio.CancelledError:
+                                break
 
-                        except asyncio.CancelledError:
-                            break
+                            try:
+                                ev = json.loads(raw)
+                                ev_type = ev.get("type", "")
+
+                                if ev_type == EV_SPEECH_STARTED:
+                                    self.speech_started = True
+
+                                elif ev_type == EV_DELTA:
+                                    d = ev.get("delta")
+                                    if d:
+                                        self.current_transcription.append(d)
+                                        self.speech_started = True
+                                        print(d, end="", flush=True)
+
+                                elif ev_type == EV_DONE:
+
+                                    if self.current_transcription:
+                                        full_text = "".join(self.current_transcription)
+                                        if self.recording:
+                                            full_text += " "
+                                        await self.output_queue.put(full_text)
+                                        self.current_transcription.clear()
+
+                                    self.speech_started = False
+
+                                    if not self.recording:
+                                        break
+
+                                    print(" ", end="", flush=True)
+
+                            except Exception as e:
+                                print(f"Error in receiver: {e}", file=sys.stderr)
+                                break
+
+                            except asyncio.CancelledError:
+                                break
+                    finally:
+                        self.receiver_running = False
 
                 await asyncio.gather(sender(), receiver(), return_exceptions=True)
+                print("")
+                self.ws_open = False
 
 
-    def copy(self, text):
+    async def process_output_queue(self):
+        """Process transcription outputs from the queue."""
+        while True:
+            try:
+                text = await self.output_queue.get()
+                self.output_transcription(text)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"Error processing output queue: {e}", file=sys.stderr)
+
+    def output_transcription(self, text):
+        """Render transcription output by copying to clipboard and pasting."""
         try:
             pyperclip.copy(text)
-        except Exception as e:
-            print(f"Error copying to clipboard: {e}", file=sys.stderr)
-
-    def paste(self):
-        try:
             active_keys = self.keyboard.active_keys()
             shift_pressed = ecodes.KEY_LEFTSHIFT in active_keys or ecodes.KEY_RIGHTSHIFT in active_keys
             if shift_pressed:
@@ -229,18 +257,48 @@ class AudioTranscriber:
                 # Ctrl+V
                 key_combination([KEY_LEFTCTRL, KEY_V])
         except Exception as e:
-            print(f"ydotool error: {e}", file=sys.stderr)
+            print(f"Error outputting transcription: {e}", file=sys.stderr)
             print("Text is in clipboard, use Ctrl+V to paste.", file=sys.stderr)
 
     async def start_recording(self):
-        if not self.recording:
+        """Start or resume recording within an existing stream.
+
+        Reuse the stream only if it's healthy (ws open + sender/receiver
+        running). Otherwise cancel/await the dying stream before starting a
+        fresh one to avoid double-opening the microphone.
+        """
+        # If a stream task exists but is completed, clear it first
+        if self.stream_task is not None and self.stream_task.done():
+            self.stream_task = None
+
+        if self.stream_task is not None and not self.stream_task.done():
+            if self.ws_open and self.sender_running and self.receiver_running:
+                # Healthy stream: just resume
+                self.recording = True
+                return
+            # Unhealthy/closing: cancel and await completion
+            self.stream_task.cancel()
+            try:
+                await self.stream_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+            finally:
+                self.stream_task = None
+
+        if not self.recording and (self.stream_task is None):
             self.stream_task = asyncio.create_task(self.stream_mic())
 
     async def stop_recording(self):
+        """Signal push-to-talk release without blocking the event loop.
+
+        We intentionally do not await the stream task here so that the
+        keyboard listener remains responsive. The active stream will finish
+        naturally when VAD completes the current segment.
+        """
         if self.recording:
             self.recording = False
-            if self.stream_task:
-                await self.stream_task
 
 def parse_hotkey_evdev(hotkey_str):
     hotkey_str = hotkey_str.lower().strip()
@@ -406,10 +464,21 @@ async def main():
     # Create transcriber and start listening
     transcriber = AudioTranscriber(openai_api_key=args.api_key, language=args.language, model=args.model, gain=args.gain, keyboard=keyboard)
     
+    # Start the output processor task that runs for the entire program duration
+    transcriber.output_processor_task = asyncio.create_task(transcriber.process_output_queue())
+    
     try:
         await keyboard_listener(keyboard, hotkey_code, transcriber)
     except KeyboardInterrupt:
         print("\nStopping program.")
+    finally:
+        # Clean up output processor task
+        if transcriber.output_processor_task:
+            transcriber.output_processor_task.cancel()
+            try:
+                await transcriber.output_processor_task
+            except asyncio.CancelledError:
+                pass
 
 if __name__ == "__main__":
     try:
