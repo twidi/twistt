@@ -1,0 +1,205 @@
+# Twistt - Push-to-Talk Transcription Tool
+
+A Linux speech-to-text transcription tool using OpenAI's API with push-to-talk functionality.
+
+## Features
+
+- **Push-to-Talk**: Hold a function key (F1-F12) to record and transcribe
+- **Smart transcription**: Text appears when you pause or stop speaking
+- **Auto-paste**: Automatically pastes transcribed text at cursor position
+- **Multi-language support**: Transcribe in any language supported by OpenAI
+- **Configurable audio gain**: Amplify microphone input if needed
+- **Multiple model support**: Choose between `gpt-4o-transcribe` and `gpt-4o-mini-transcribe`
+
+## Requirements
+
+- Linux (tested on X11 and Wayland)
+- Python 3.11+
+- `ydotool` for simulating keyboard input (paste functionality)
+- OpenAI API key
+- Microphone access
+
+## Installation
+
+### Using uv (Recommended)
+
+The script is designed to run with [uv](https://github.com/astral-sh/uv), which handles dependencies automatically:
+
+```bash
+# Install uv if you haven't already
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Run the script (dependencies will be auto-installed)
+./twistt.py --help
+```
+
+### Using pip
+
+If you prefer using pip:
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the script
+python twistt.py --help
+```
+
+### System Dependencies
+
+**ydotool** is required for paste functionality. It's a replacement for xdotool that works on both X11 and Wayland, used here to simulate Ctrl+V keyboard input.
+
+**Important**: The versions available in Debian/Ubuntu repositories are too old. You'll need to build from source.
+
+For installation instructions, see: https://docs.o-x-l.com/automation/ydotool.html
+
+Here's a simplified systemd service for single-user setup:
+
+```ini
+# /etc/systemd/system/ydotoold.service
+[Unit]
+Description=ydotoold (root) for user 1000
+# Ensure /run/user/1000 exists
+Requires=user-runtime-dir@1000.service
+After=user-runtime-dir@1000.service
+# Start after display/user session
+After=display-manager.service user@1000.service
+BindsTo=user@1000.service
+
+[Service]
+Type=simple
+# Avoid stale socket -> "Connection refused"
+ExecStartPre=/usr/bin/rm -f /run/user/1000/.ydotool_socket
+ExecStart=/usr/local/sbin/ydotoold --socket-path=/run/user/1000/.ydotool_socket --socket-own=1000:0
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## Configuration
+
+### API Key Setup
+
+Set your OpenAI API key using one of these methods (in order of priority):
+
+1. **Command line argument**: `--api-key YOUR_KEY`
+2. **User config file**: `~/.config/twistt/config.env`
+3. **Local .env file**: Create `.env` in the script directory
+4. **Environment variable**: Export in your shell
+
+Example `.env` or `config.env` file:
+```env
+# OpenAI API key (required)
+TWISTT_OPENAI_API_KEY=sk-...
+# or
+OPENAI_API_KEY=sk-...
+
+# Optional settings
+TWISTT_HOTKEY=F9
+TWISTT_MODEL=gpt-4o-transcribe
+TWISTT_LANGUAGE=en  # Leave empty or omit for auto-detect
+TWISTT_GAIN=1.0
+```
+
+### Available Options
+
+| Option | Environment Variable | Default | Description |
+|--------|---------------------|---------|-------------|
+| `--hotkey` | `TWISTT_HOTKEY` | F9 | Push-to-talk key (F1-F12) |
+| `--model` | `TWISTT_MODEL` | gpt-4o-transcribe | Transcription model |
+| `--language` | `TWISTT_LANGUAGE` | Auto-detect | Transcription language (ISO 639-1) |
+| `--gain` | `TWISTT_GAIN` | 1.0 | Microphone amplification |
+| `--api-key` | `TWISTT_OPENAI_API_KEY` or `OPENAI_API_KEY` | - | OpenAI API key |
+
+## Usage
+
+### Basic Usage
+
+```bash
+# Start with default settings (F9 key, auto-detect language)
+./twistt.py
+
+# Use F5 key with English transcription
+./twistt.py --hotkey F5 --language en
+
+# Force French language
+./twistt.py --language fr
+
+# Increase microphone sensitivity
+./twistt.py --gain 2.0
+```
+
+### How It Works
+
+1. **Start the script**: Run `./twistt.py`
+2. **Position cursor**: Click where you want text to appear
+3. **Hold to record**: Press and hold your configured hotkey (default: F9)
+4. **Speak**: Talk while holding the key
+5. **Release to transcribe**: Let go of the key
+6. **Auto-paste**: Text is automatically pasted at cursor position
+
+The transcription appears in the terminal when you pause or stop speaking, and is automatically pasted when you release the key.
+
+### Tips
+
+- **Shift mode**: Hold Shift while speaking to paste with Ctrl+Shift+V when done (useful for terminals)
+- **Multiple sentences**: Keep holding the key to transcribe continuously
+- **Pause support**: Brief pauses are handled automatically
+- **Live feedback**: Watch the terminal to see transcription as it processes
+
+## Keyboard Detection
+
+The script automatically detects your physical keyboard. If multiple keyboards are found, you'll be prompted to select one. Virtual keyboards are automatically filtered out.
+
+## Language Support
+
+By default, the tool auto-detects the language you're speaking. You can also specify a language using ISO 639-1 codes:
+- `en` - English
+- `fr` - French  
+- `es` - Spanish
+- `de` - German
+- `it` - Italian
+- `pt` - Portuguese
+- `ja` - Japanese
+- `zh` - Chinese
+- And many more...
+
+Leave the language parameter empty to use auto-detection.
+
+## Troubleshooting
+
+### "No physical keyboard detected"
+- The script needs to monitor keyboard events
+- Run with appropriate permissions if needed
+- Select your keyboard manually from the list
+
+### "ydotool error"
+- Ensure ydotool daemon is running: `sudo ydotoold &`
+- Text will still be copied to clipboard, use Ctrl+V to paste manually
+
+### "Permission denied on /dev/input/eventX"
+- Add your user to the `input` group: `sudo usermod -a -G input $USER`
+- Log out and back in for changes to take effect
+- Or run with sudo (not recommended for regular use)
+
+### Audio issues
+- Check microphone permissions
+- Adjust `--gain` if audio is too quiet/loud
+- Ensure no other application is using the microphone
+
+## Security Notes
+
+- The API key is sent only to OpenAI's servers
+- Audio is processed in real-time and not stored locally
+- Transcriptions are only kept in memory during the session
+- Transcribed text remains in clipboard after paste (allows manual paste if needed)
+
+## Author
+
+Stephane "Twidi" Angel
+
+## License
+
+MIT License - See LICENSE file for details

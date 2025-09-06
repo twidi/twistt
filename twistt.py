@@ -86,7 +86,7 @@ class AudioTranscriber:
             "OpenAI-Beta": "realtime=v1",
         }
 
-        self.session_json = json.dumps({
+        session_config = {
             "type": "transcription_session.update",
             "session": {
                 "input_audio_format": "pcm16",
@@ -98,7 +98,6 @@ class AudioTranscriber:
                 },
                 "input_audio_transcription": {
                     "model": self.model,
-                    "language": self.language,
                 },
                 "input_audio_noise_reduction": {
                     "type": "near_field"  # "near_field" or "far_field" or null
@@ -107,7 +106,13 @@ class AudioTranscriber:
                     "item.input_audio_transcription.logprobs",
                 ],
             },
-        })
+        }
+        
+        # Only add language if specified
+        if self.language:
+            session_config["session"]["input_audio_transcription"]["language"] = self.language
+        
+        self.session_json = json.dumps(session_config)
 
     async def stream_mic(self):
         print(f"\n--- {datetime.now()} ---")
@@ -332,7 +337,7 @@ async def main():
     # Get values from environment variables or use defaults
     default_hotkey = os.getenv(f"{ENV_PREFIX}HOTKEY", "F9")
     default_model = os.getenv(f"{ENV_PREFIX}MODEL", "gpt-4o-transcribe")
-    default_language = os.getenv(f"{ENV_PREFIX}LANGUAGE", "fr")
+    default_language = os.getenv(f"{ENV_PREFIX}LANGUAGE", None)
     default_gain = float(os.getenv(f"{ENV_PREFIX}GAIN", "1.0"))
     # API key priority: TWISTT_OPENAI_API_KEY > OPENAI_API_KEY
     default_api_key = os.getenv(f"{ENV_PREFIX}OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
@@ -343,7 +348,7 @@ async def main():
                        choices=["gpt-4o-transcribe", "gpt-4o-mini-transcribe"],
                        help="OpenAI model to use for transcription (env: TWISTT_MODEL)")
     parser.add_argument("--language", default=default_language, 
-                       help="Transcription language (env: TWISTT_LANGUAGE)")
+                       help="Transcription language, leave empty for auto-detect (env: TWISTT_LANGUAGE)")
     parser.add_argument("--gain", type=float, default=default_gain, 
                        help="Microphone amplification factor, 1.0=normal, 2.0=double (env: TWISTT_GAIN)")
     parser.add_argument("--api-key", default=default_api_key,
@@ -371,7 +376,10 @@ async def main():
         return
 
     print(f"Transcription model: {args.model}")
-    print(f"Language: {args.language}")
+    if args.language:
+        print(f"Language: {args.language}")
+    else:
+        print(f"Language: Auto-detect")
     if args.gain != 1.0:
         print(f"Audio gain: {args.gain}x")
     print(f"Using key '{args.hotkey.upper()}' for push-to-talk (Listening on {keyboard.name}).")

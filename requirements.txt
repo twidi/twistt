@@ -1,0 +1,7 @@
+numpy
+sounddevice
+websockets
+pyperclipfix
+evdev
+python-dotenv
+platformdirs
