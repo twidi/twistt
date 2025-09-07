@@ -29,6 +29,7 @@
 - Never commit secrets. Prefer `TWISTT_OPENAI_API_KEY` (or `OPENAI_API_KEY`). `.env` is for local use only.
 - Avoid recommending `sudo`; prefer adding the user to the `input` group for `/dev/input/*` access.
 - If adding deps, update both the uv script header in `twistt.py` and `requirements.txt`.
+- When adding new features with env vars, update README.md options table and CLAUDE.md dependencies list.
 
 ## Agent-Specific Instructions
 - Keep changes minimal and focused. Do not reformat unrelated code.

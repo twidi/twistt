@@ -10,6 +10,7 @@ A Linux speech-to-text transcription tool using OpenAI's API with push-to-talk f
 - **Multi-language support**: Transcribe in any language supported by OpenAI
 - **Configurable audio gain**: Amplify microphone input if needed
 - **Multiple model support**: Choose between `gpt-4o-transcribe` and `gpt-4o-mini-transcribe`
+- **Post-treatment**: Optional AI-powered correction of transcribed text for improved accuracy
 
 ## Requirements
 
@@ -106,6 +107,11 @@ TWISTT_MODEL=gpt-4o-transcribe
 TWISTT_LANGUAGE=en  # Leave empty or omit for auto-detect
 TWISTT_GAIN=1.0
 TWISTT_YDOTOOL_SOCKET=/run/user/1000/.ydotool_socket  # Optional, auto-detected by default
+
+# Post-treatment settings (optional)
+TWISTT_POST_TREATMENT_PROMPT="Fix grammar and punctuation"
+TWISTT_POST_TREATMENT_PROMPT_FILE=/path/to/prompt.txt  # Alternative to direct prompt
+TWISTT_POST_TREATMENT_MODEL=gpt-4o-mini  # Model for post-treatment
 ```
 
 ### Available Options
@@ -118,6 +124,9 @@ TWISTT_YDOTOOL_SOCKET=/run/user/1000/.ydotool_socket  # Optional, auto-detected 
 | `--gain` | `TWISTT_GAIN` | 1.0 | Microphone amplification |
 | `--api-key` | `TWISTT_OPENAI_API_KEY` or `OPENAI_API_KEY` | - | OpenAI API key |
 | `--ydotool-socket` | `TWISTT_YDOTOOL_SOCKET` or `YDOTOOL_SOCKET` | Auto-detect | Path to ydotool socket |
+| `--post-prompt` | `TWISTT_POST_TREATMENT_PROMPT` | - | Post-treatment instructions |
+| `--post-prompt-file` | `TWISTT_POST_TREATMENT_PROMPT_FILE` | - | File containing post-treatment prompt |
+| `--post-model` | `TWISTT_POST_TREATMENT_MODEL` | gpt-4o-mini | Model for post-treatment |
 
 ## Usage
 
@@ -135,6 +144,15 @@ TWISTT_YDOTOOL_SOCKET=/run/user/1000/.ydotool_socket  # Optional, auto-detected 
 
 # Increase microphone sensitivity
 ./twistt.py --gain 2.0
+
+# Enable post-treatment to fix grammar and punctuation
+./twistt.py --post-prompt "Fix grammar, punctuation, and obvious errors"
+
+# Use a file for more complex post-treatment instructions
+./twistt.py --post-prompt-file instructions.txt
+
+# Specify a different model for post-treatment
+./twistt.py --post-prompt "Make the text more formal" --post-model gpt-4o
 ```
 
 ### How It Works
@@ -154,10 +172,55 @@ The transcription appears in the terminal when you pause or stop speaking, and i
 - **Multiple sentences**: Keep holding the key to transcribe continuously
 - **Pause support**: Brief pauses are handled automatically
 - **Live feedback**: Watch the terminal to see transcription as it processes
+- **Post-treatment**: Enable for improved accuracy, especially useful for:
+  - Fixing punctuation and capitalization
+  - Correcting common speech-to-text errors
+  - Adapting text style (formal, informal, technical)
+  - Language-specific corrections
 
 ## Keyboard Detection
 
 The script automatically detects your physical keyboard. If multiple keyboards are found, you'll be prompted to select one. Virtual keyboards are automatically filtered out.
+
+## Post-Treatment (Optional)
+
+Post-treatment uses AI to improve transcription accuracy by correcting errors, fixing punctuation, and applying custom transformations. It's activated automatically when you provide a prompt.
+
+### Creating a Post-Treatment Prompt
+
+You can provide instructions directly via command line or use a file for more complex prompts:
+
+**Example prompt file** (`corrections.txt`):
+```
+Fix any grammar and punctuation errors.
+Ensure proper capitalization.
+Expand common abbreviations.
+Remove filler words like "um" and "uh".
+Keep the conversational tone.
+```
+
+Then use it with:
+```bash
+./twistt.py --post-prompt-file corrections.txt
+```
+
+### Post-Treatment Examples
+
+```bash
+# Simple corrections
+./twistt.py --post-prompt "Fix grammar and punctuation"
+
+# Technical writing
+./twistt.py --post-prompt "Use technical vocabulary, expand acronyms on first use"
+
+# Formal style
+./twistt.py --post-prompt "Make the text more formal and professional"
+
+# Use a more powerful model for complex corrections
+./twistt.py --post-prompt-file complex_rules.txt --post-model gpt-4o
+```
+
+**Note**: Post-treatment adds a small delay (typically under 1 second) as it processes the text through the AI model.
 
 ## Language Support
 

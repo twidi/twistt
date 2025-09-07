@@ -6,3 +6,4 @@ evdev
 python-dotenv
 platformdirs
 python-ydotool
+openai

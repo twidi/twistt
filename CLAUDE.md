@@ -27,6 +27,7 @@ The project uses inline script dependencies (PEP 723) specified in `twistt.py`. 
 - evdev (keyboard event monitoring)
 - python-dotenv, platformdirs (configuration)
 - python-ydotool (keyboard simulation for paste)
+- openai (OpenAI SDK for post-treatment feature)
 
 ## Architecture
 
@@ -36,6 +37,7 @@ The application is a single-file Python script with the following key components
 2. **Keyboard monitoring**: Uses evdev to detect F-key presses for push-to-talk
 3. **Audio capture**: Uses sounddevice to record from microphone in real-time
 4. **Auto-paste**: Uses python-ydotool to simulate Ctrl+V for automatic text insertion
+5. **Post-treatment**: Optional AI-powered correction using OpenAI Chat API to improve transcription accuracy
 
 ## Configuration
 
@@ -45,7 +47,7 @@ Configuration priority (highest to lowest):
 3. Local `.env` file in script directory
 4. Environment variables
 
-Key environment variables use `TWISTT_` prefix (e.g., `TWISTT_OPENAI_API_KEY`, `TWISTT_HOTKEY`).
+Key environment variables use `TWISTT_` prefix (e.g., `TWISTT_OPENAI_API_KEY`, `TWISTT_HOTKEY`, `TWISTT_POST_TREATMENT_PROMPT`).
 
 ## Testing
 
@@ -53,3 +55,5 @@ No formal test suite exists. Testing is manual:
 1. Run the script with various hotkeys
 2. Test transcription in different languages
 3. Verify paste functionality works in different applications
+4. Test post-treatment with different prompts and models
+5. Verify post-treatment maintains transcription order
