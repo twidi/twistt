@@ -340,17 +340,31 @@ class AudioTranscriber:
                     current_text=text
                 )
 
+            # Prepare extra headers for OpenRouter
+            extra_headers = {}
+            if self.post_provider == "openrouter":
+                extra_headers = {
+                    "HTTP-Referer": "https://github.com/twidi/twistt/",
+                    "X-Title": "Twistt"
+                }
+            
             # Make the API call with streaming and timeout
+            create_kwargs = {
+                "model": self.post_model,
+                "messages": [
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": user_message}
+                ],
+                "temperature": 0.1,
+                "stream": True
+            }
+            
+            # Add extra headers only for OpenRouter
+            if extra_headers:
+                create_kwargs["extra_headers"] = extra_headers
+            
             stream = await asyncio.wait_for(
-                self.post_client.chat.completions.create(
-                    model=self.post_model,
-                    messages=[
-                        {"role": "system", "content": system_message},
-                        {"role": "user", "content": user_message}
-                    ],
-                    temperature=0.1,
-                    stream=True
-                ),
+                self.post_client.chat.completions.create(**create_kwargs),
                 timeout=10.0
             )
             
