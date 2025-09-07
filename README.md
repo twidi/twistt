@@ -5,6 +5,7 @@ A Linux speech-to-text transcription tool using OpenAI's API with push-to-talk f
 ## Features
 
 - **Push-to-Talk**: Hold a function key (F1-F12) to record and transcribe
+- **Toggle mode**: Double-tap the key to start recording, press again to stop
 - **Smart transcription**: Text appears when you pause or stop speaking
 - **Auto-paste**: Automatically pastes transcribed text at cursor position
 - **Multi-language support**: Transcribe in any language supported by OpenAI
@@ -106,6 +107,7 @@ TWISTT_HOTKEY=F9
 TWISTT_MODEL=gpt-4o-transcribe
 TWISTT_LANGUAGE=en  # Leave empty or omit for auto-detect
 TWISTT_GAIN=1.0
+TWISTT_DOUBLE_TAP_WINDOW=0.5  # Time window for double-tap detection
 TWISTT_YDOTOOL_SOCKET=/run/user/1000/.ydotool_socket  # Optional, auto-detected by default
 
 # Post-treatment settings (optional)
@@ -127,6 +129,7 @@ TWISTT_OUTPUT_MODE=batch  # batch (default) or full
 | Option | Environment Variable | Default | Description |
 |--------|---------------------|---------|-------------|
 | `--hotkey` | `TWISTT_HOTKEY` | F9 | Push-to-talk key (F1-F12) |
+| `--double-tap-window` | `TWISTT_DOUBLE_TAP_WINDOW` | 0.5 | Time window in seconds for double-tap detection |
 | `--model` | `TWISTT_MODEL` | gpt-4o-transcribe | Transcription model |
 | `--language` | `TWISTT_LANGUAGE` | Auto-detect | Transcription language (ISO 639-1) |
 | `--gain` | `TWISTT_GAIN` | 1.0 | Microphone amplification |
@@ -178,6 +181,9 @@ TWISTT_OUTPUT_MODE=batch  # batch (default) or full
 
 ### How It Works
 
+Twistt supports two recording modes:
+
+#### Push-to-Talk Mode (Hold)
 1. **Start the script**: Run `./twistt.py`
 2. **Position cursor**: Click where you want text to appear
 3. **Hold to record**: Press and hold your configured hotkey (default: F9)
@@ -185,7 +191,15 @@ TWISTT_OUTPUT_MODE=batch  # batch (default) or full
 5. **Release to transcribe**: Let go of the key
 6. **Auto-paste**: Text is automatically pasted at cursor position
 
-The transcription appears in the terminal when you pause or stop speaking, and is automatically pasted when you release the key.
+#### Toggle Mode (Double-Tap)
+1. **Start the script**: Run `./twistt.py`
+2. **Position cursor**: Click where you want text to appear
+3. **Double-tap to start**: Press-release-press the hotkey quickly (within 0.5s)
+4. **Speak freely**: Recording continues without holding any key
+5. **Press to stop**: Press the hotkey once to stop recording
+6. **Auto-paste**: Text is automatically pasted
+
+The transcription appears in the terminal when you pause or stop speaking.
 
 ### Output Modes
 

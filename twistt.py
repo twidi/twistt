@@ -634,16 +634,37 @@ def find_keyboard():
     return device
 
 
-async def keyboard_listener(device, hotkey_code, transcriber):
+async def keyboard_listener(device, hotkey_code, transcriber, double_tap_window=0.5):
     hotkey_pressed = False
+    last_release_time = 0
+    is_toggle_mode = False
+    toggle_stop_time = 0  # Track when toggle mode was stopped to prevent immediate reactivation
+    toggle_cooldown = 0.5  # Cooldown period after stopping toggle mode
 
     async for event in device.async_read_loop():
         if event.type == ecodes.EV_KEY:
             key_event = evdev.categorize(event)
             
             if key_event.scancode == hotkey_code:
+                current_time = asyncio.get_event_loop().time()
+
                 if key_event.keystate == evdev.KeyEvent.key_down and not hotkey_pressed:
-                    hotkey_pressed = True
+                    # Check if we're in cooldown period after stopping toggle mode
+                    if current_time - toggle_stop_time < toggle_cooldown:
+                        # Ignore this press - we just stopped toggle mode
+                        continue
+
+                    # Check for double-tap pattern (press-release-press within window)
+                    if current_time - last_release_time < double_tap_window:
+                        # This is the second press of a double-tap - activate toggle mode
+                        is_toggle_mode = True
+                        hotkey_pressed = True
+                        print("[Toggle mode activated]", file=sys.stderr)
+                    else:
+                        # Normal press - could be hold mode or first press of double-tap
+                        hotkey_pressed = True
+                        is_toggle_mode = False
+
                     # Check if Shift is currently pressed when hotkey is pressed
                     shift_keys = [ecodes.KEY_LEFTSHIFT, ecodes.KEY_RIGHTSHIFT]
                     for shift_key in shift_keys:
@@ -653,7 +674,23 @@ async def keyboard_listener(device, hotkey_code, transcriber):
                     await transcriber.start_recording()
                     
                 elif key_event.keystate == evdev.KeyEvent.key_up and hotkey_pressed:
+                    last_release_time = current_time
+
+                    if is_toggle_mode:
+                        # In toggle mode, release doesn't stop recording
+                        hotkey_pressed = False
+                        # Recording continues...
+                    else:
+                        # In hold mode, release stops recording
+                        hotkey_pressed = False
+                        await transcriber.stop_recording()
+
+                elif key_event.keystate == evdev.KeyEvent.key_down and is_toggle_mode:
+                    # Any press while in toggle mode stops recording
+                    is_toggle_mode = False
                     hotkey_pressed = False
+                    toggle_stop_time = current_time  # Record when we stopped to prevent immediate reactivation
+                    print("[Toggle mode deactivated]", file=sys.stderr)
                     await transcriber.stop_recording()
             
             # Monitor Shift key presses while hotkey is held
@@ -708,6 +745,9 @@ async def main():
     # Output mode
     default_output_mode = os.getenv(f"{ENV_PREFIX}OUTPUT_MODE", "batch")
 
+    # Double-tap window
+    default_double_tap_window = float(os.getenv(f"{ENV_PREFIX}DOUBLE_TAP_WINDOW", "0.5"))
+
     parser.add_argument("--hotkey", default=default_hotkey, 
                        help=f"Push-to-talk key, F1-F12 (env: {ENV_PREFIX}HOTKEY)")
     parser.add_argument("--model", default=default_model,
@@ -739,6 +779,8 @@ async def main():
     parser.add_argument("--output-mode", default=default_output_mode,
                        choices=["batch", "full"],
                        help=f"Output mode: batch (incremental) or full (complete on release) (env: {ENV_PREFIX}OUTPUT_MODE)")
+    parser.add_argument("--double-tap-window", type=float, default=default_double_tap_window,
+                       help=f"Time window in seconds for double-tap detection (env: {ENV_PREFIX}DOUBLE_TAP_WINDOW)")
     args = parser.parse_args()
     
     # Handle post-treatment prompt logic - post-treatment is active if we have a prompt
@@ -818,7 +860,8 @@ async def main():
         print(f"Post-treatment: Enabled (provider: {args.post_provider}, model: {args.post_model})")
         prompt_preview = post_prompt[:50] + "..." if len(post_prompt) > 50 else post_prompt
         print(f"Post-treatment prompt: {prompt_preview}")
-    print(f"Using key '{args.hotkey.upper()}' for push-to-talk (Listening on {keyboard.name}).")
+    print(f"Using key '{args.hotkey.upper()}': hold for push-to-talk, double-tap to toggle (press again to stop).")
+    print(f"Listening on {keyboard.name}.")
     print("Text will be pasted by simulating Ctrl+V (or Ctrl+Shift+V if Shift is pressed at any time).")
     print("Press Ctrl+C to stop the script.")
 
@@ -842,7 +885,7 @@ async def main():
     transcriber.output_processor_task = asyncio.create_task(transcriber.process_output_queue())
     
     try:
-        await keyboard_listener(keyboard, hotkey_code, transcriber)
+        await keyboard_listener(keyboard, hotkey_code, transcriber, args.double_tap_window)
     except KeyboardInterrupt:
         print("\nStopping program.")
     finally:
