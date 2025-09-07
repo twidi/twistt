@@ -112,6 +112,11 @@ TWISTT_YDOTOOL_SOCKET=/run/user/1000/.ydotool_socket  # Optional, auto-detected 
 TWISTT_POST_TREATMENT_PROMPT="Fix grammar and punctuation"
 TWISTT_POST_TREATMENT_PROMPT_FILE=/path/to/prompt.txt  # Alternative to direct prompt
 TWISTT_POST_TREATMENT_MODEL=gpt-4o-mini  # Model for post-treatment
+TWISTT_POST_TREATMENT_PROVIDER=openai  # Provider: openai, cerebras, or openrouter
+
+# Provider-specific API keys (for post-treatment)
+TWISTT_CEREBRAS_API_KEY=csk-...  # Required if using cerebras provider
+TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 ```
 
 ### Available Options
@@ -127,6 +132,9 @@ TWISTT_POST_TREATMENT_MODEL=gpt-4o-mini  # Model for post-treatment
 | `--post-prompt` | `TWISTT_POST_TREATMENT_PROMPT` | - | Post-treatment instructions |
 | `--post-prompt-file` | `TWISTT_POST_TREATMENT_PROMPT_FILE` | - | File containing post-treatment prompt |
 | `--post-model` | `TWISTT_POST_TREATMENT_MODEL` | gpt-4o-mini | Model for post-treatment |
+| `--post-provider` | `TWISTT_POST_TREATMENT_PROVIDER` | openai | Provider for post-treatment (openai, cerebras, openrouter) |
+| `--cerebras-api-key` | `TWISTT_CEREBRAS_API_KEY` or `CEREBRAS_API_KEY` | - | Cerebras API key |
+| `--openrouter-api-key` | `TWISTT_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` | - | OpenRouter API key |
 
 ## Usage
 
@@ -153,6 +161,12 @@ TWISTT_POST_TREATMENT_MODEL=gpt-4o-mini  # Model for post-treatment
 
 # Specify a different model for post-treatment
 ./twistt.py --post-prompt "Make the text more formal" --post-model gpt-4o
+
+# Use Cerebras for post-treatment (faster inference)
+./twistt.py --post-prompt "Fix errors" --post-provider cerebras --post-model llama3-8b
+
+# Use OpenRouter for post-treatment (access to many models)
+./twistt.py --post-prompt "Fix errors" --post-provider openrouter --post-model meta-llama/llama-3.2-3b-instruct
 ```
 
 ### How It Works
@@ -186,6 +200,16 @@ The script automatically detects your physical keyboard. If multiple keyboards a
 
 Post-treatment uses AI to improve transcription accuracy by correcting errors, fixing punctuation, and applying custom transformations. It's activated automatically when you provide a prompt.
 
+### Supported Providers
+
+You can choose between different AI providers for post-treatment:
+
+- **OpenAI** (default): Uses OpenAI's GPT models
+- **Cerebras**: Fast inference with open-source models ([docs](https://inference-docs.cerebras.ai/)). Models can be free!
+- **OpenRouter**: Access to many different AI models ([docs](https://openrouter.ai/)). Provides paid cerebras models like GPT-OSS.
+
+Each provider requires its own API key, which can be set via environment variables or command-line arguments.
+
 ### Creating a Post-Treatment Prompt
 
 You can provide instructions directly via command line or use a file for more complex prompts:
@@ -218,6 +242,14 @@ Then use it with:
 
 # Use a more powerful model for complex corrections
 ./twistt.py --post-prompt-file complex_rules.txt --post-model gpt-4o
+
+# Use Cerebras for faster processing
+export CEREBRAS_API_KEY=csk-...
+./twistt.py --post-prompt "Fix errors" --post-provider cerebras --post-model llama3-70b
+
+# Use OpenRouter for access to various models
+export OPENROUTER_API_KEY=sk-or-...
+./twistt.py --post-prompt "Improve clarity" --post-provider openrouter --post-model anthropic/claude-3-haiku
 ```
 
 **Note**: Post-treatment adds a small delay (typically under 1 second) as it processes the text through the AI model.

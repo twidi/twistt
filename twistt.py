@@ -101,7 +101,8 @@ F_KEY_CODES = {
 
 class AudioTranscriber:
     def __init__(self, openai_api_key, language, model, gain, keyboard,
-                 post_treatment=False, post_prompt=None, post_model="gpt-4o-mini"):
+                 post_treatment=False, post_prompt=None, post_model="gpt-4o-mini",
+                 post_provider="openai", cerebras_api_key=None, openrouter_api_key=None):
         self.openai_api_key = openai_api_key
         self.language = language
         self.model = model
@@ -110,6 +111,9 @@ class AudioTranscriber:
         self.post_treatment = post_treatment
         self.post_prompt = post_prompt
         self.post_model = post_model
+        self.post_provider = post_provider
+        self.cerebras_api_key = cerebras_api_key
+        self.openrouter_api_key = openrouter_api_key
         self.recording = False
         self.stream_task = None
         self.speech_started = False
@@ -126,10 +130,27 @@ class AudioTranscriber:
         self.next_to_output = 0
         self.sequence_lock = asyncio.Lock()
         
-        # Initialize OpenAI client once if post-treatment is enabled
-        self.openai_client = None
+        # Initialize client for post-treatment based on provider
+        self.post_client = None
         if self.post_treatment:
-            self.openai_client = AsyncOpenAI(api_key=self.openai_api_key)
+            if self.post_provider == "openai":
+                self.post_client = AsyncOpenAI(api_key=self.openai_api_key)
+            elif self.post_provider == "cerebras":
+                if not self.cerebras_api_key:
+                    raise ValueError("Cerebras API key is required when using Cerebras provider")
+                self.post_client = AsyncOpenAI(
+                    api_key=self.cerebras_api_key,
+                    base_url="https://api.cerebras.ai/v1"
+                )
+            elif self.post_provider == "openrouter":
+                if not self.openrouter_api_key:
+                    raise ValueError("OpenRouter API key is required when using OpenRouter provider")
+                self.post_client = AsyncOpenAI(
+                    api_key=self.openrouter_api_key,
+                    base_url="https://openrouter.ai/api/v1"
+                )
+            else:
+                raise ValueError(f"Unknown post-treatment provider: {self.post_provider}")
 
         self.headers = {
             "Authorization": f"Bearer {self.openai_api_key}",
@@ -296,7 +317,7 @@ class AudioTranscriber:
 
             # Make the API call with streaming and timeout
             stream = await asyncio.wait_for(
-                self.openai_client.chat.completions.create(
+                self.post_client.chat.completions.create(
                     model=self.post_model,
                     messages=[
                         {"role": "system", "content": system_message},
@@ -626,6 +647,11 @@ async def main():
     default_post_prompt = os.getenv(f"{ENV_PREFIX}POST_TREATMENT_PROMPT", "")
     default_post_prompt_file = os.getenv(f"{ENV_PREFIX}POST_TREATMENT_PROMPT_FILE", "")
     default_post_model = os.getenv(f"{ENV_PREFIX}POST_TREATMENT_MODEL", "gpt-4o-mini")
+    default_post_provider = os.getenv(f"{ENV_PREFIX}POST_TREATMENT_PROVIDER", "openai")
+    
+    # Provider API keys
+    default_cerebras_api_key = os.getenv(f"{ENV_PREFIX}CEREBRAS_API_KEY") or os.getenv("CEREBRAS_API_KEY")
+    default_openrouter_api_key = os.getenv(f"{ENV_PREFIX}OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY")
 
     parser.add_argument("--hotkey", default=default_hotkey, 
                        help=f"Push-to-talk key, F1-F12 (env: {ENV_PREFIX}HOTKEY)")
@@ -647,7 +673,14 @@ async def main():
     parser.add_argument("--post-prompt-file", default=default_post_prompt_file,
                        help=f"Path to file containing post-treatment prompt (env: {ENV_PREFIX}POST_TREATMENT_PROMPT_FILE)")
     parser.add_argument("--post-model", default=default_post_model,
-                       help=f"OpenAI model for post-treatment (env: {ENV_PREFIX}POST_TREATMENT_MODEL)")
+                       help=f"Model for post-treatment (env: {ENV_PREFIX}POST_TREATMENT_MODEL)")
+    parser.add_argument("--post-provider", default=default_post_provider,
+                       choices=["openai", "cerebras", "openrouter"],
+                       help=f"Provider for post-treatment (env: {ENV_PREFIX}POST_TREATMENT_PROVIDER)")
+    parser.add_argument("--cerebras-api-key", default=default_cerebras_api_key,
+                       help=f"Cerebras API key (env: {ENV_PREFIX}CEREBRAS_API_KEY or CEREBRAS_API_KEY)")
+    parser.add_argument("--openrouter-api-key", default=default_openrouter_api_key,
+                       help=f"OpenRouter API key (env: {ENV_PREFIX}OPENROUTER_API_KEY or OPENROUTER_API_KEY)")
     args = parser.parse_args()
     
     # Handle post-treatment prompt logic - post-treatment is active if we have a prompt
@@ -683,12 +716,25 @@ async def main():
 
     pydotool_init()
 
-    # Check API key
+    # Check API keys
     if not args.api_key:
         print("ERROR: OpenAI API key is not defined", file=sys.stderr)
         print(f"Please set OPENAI_API_KEY or {ENV_PREFIX}OPENAI_API_KEY environment variable (can optionally be in a .env file)", file=sys.stderr)
         print("Or pass it via --api-key argument", file=sys.stderr)
         return
+    
+    # Check provider-specific API keys if post-treatment is enabled
+    if post_treatment_enabled:
+        if args.post_provider == "cerebras" and not args.cerebras_api_key:
+            print("ERROR: Cerebras API key is not defined for post-treatment", file=sys.stderr)
+            print(f"Please set CEREBRAS_API_KEY or {ENV_PREFIX}CEREBRAS_API_KEY environment variable", file=sys.stderr)
+            print("Or pass it via --cerebras-api-key argument", file=sys.stderr)
+            return
+        elif args.post_provider == "openrouter" and not args.openrouter_api_key:
+            print("ERROR: OpenRouter API key is not defined for post-treatment", file=sys.stderr)
+            print(f"Please set OPENROUTER_API_KEY or {ENV_PREFIX}OPENROUTER_API_KEY environment variable", file=sys.stderr)
+            print("Or pass it via --openrouter-api-key argument", file=sys.stderr)
+            return
 
     try:
         hotkey_code = parse_hotkey_evdev(args.hotkey)
@@ -711,7 +757,7 @@ async def main():
     if args.gain != 1.0:
         print(f"Audio gain: {args.gain}x")
     if post_treatment_enabled:
-        print(f"Post-treatment: Enabled (model: {args.post_model})")
+        print(f"Post-treatment: Enabled (provider: {args.post_provider}, model: {args.post_model})")
         prompt_preview = post_prompt[:50] + "..." if len(post_prompt) > 50 else post_prompt
         print(f"Post-treatment prompt: {prompt_preview}")
     print(f"Using key '{args.hotkey.upper()}' for push-to-talk (Listening on {keyboard.name}).")
@@ -727,7 +773,10 @@ async def main():
         keyboard=keyboard,
         post_treatment=post_treatment_enabled,
         post_prompt=post_prompt,
-        post_model=args.post_model
+        post_model=args.post_model,
+        post_provider=args.post_provider,
+        cerebras_api_key=args.cerebras_api_key,
+        openrouter_api_key=args.openrouter_api_key
     )
     
     # Start the output processor task that runs for the entire program duration

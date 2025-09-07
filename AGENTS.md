@@ -26,7 +26,7 @@
 - PRs: clear description, reproduction steps, and testing notes. Include screenshots/terminal snippets when behavior changes. Update README/options tables when adding flags or env vars.
 
 ## Security & Configuration Tips
-- Never commit secrets. Prefer `TWISTT_OPENAI_API_KEY` (or `OPENAI_API_KEY`). `.env` is for local use only.
+- Never commit secrets. Prefer `TWISTT_OPENAI_API_KEY` (or `OPENAI_API_KEY`). For provider-specific keys: `TWISTT_CEREBRAS_API_KEY` or `TWISTT_OPENROUTER_API_KEY`. `.env` is for local use only.
 - Avoid recommending `sudo`; prefer adding the user to the `input` group for `/dev/input/*` access.
 - If adding deps, update both the uv script header in `twistt.py` and `requirements.txt`.
 - When adding new features with env vars, update README.md options table and CLAUDE.md dependencies list.
