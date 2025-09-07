@@ -197,7 +197,10 @@ Twistt supports two output modes that control when text is processed and pasted:
 
 ### Tips
 
-- **Shift mode**: Hold Shift while speaking to paste with Ctrl+Shift+V when done (useful for terminals)
+- **Shift mode**: Press Shift at any time while recording to paste with Ctrl+Shift+V (useful for terminals). Shift can be pressed:
+  - When starting recording (together with the hotkey)
+  - At any moment while holding the hotkey
+  - The earliest Shift press is remembered for the entire recording session
 - **Multiple sentences**: Keep holding the key to transcribe continuously
 - **Pause support**: Brief pauses are handled automatically
 - **Live feedback**: Watch the terminal to see transcription as it processes

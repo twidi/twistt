@@ -125,6 +125,8 @@ class AudioTranscriber:
         self.ws_open = False
         self.sender_running = False
         self.receiver_running = False
+        # Shift key state for paste operation
+        self.shift_pressed = False
         
         # Sequencing system for post-treatment order
         self.sequence_number = 0
@@ -524,9 +526,7 @@ class AudioTranscriber:
         """Render transcription output by copying to clipboard and pasting."""
         try:
             pyperclip.copy(text)
-            active_keys = self.keyboard.active_keys()
-            shift_pressed = ecodes.KEY_LEFTSHIFT in active_keys or ecodes.KEY_RIGHTSHIFT in active_keys
-            if shift_pressed:
+            if self.shift_pressed:
                 # Ctrl+Shift+V
                 key_combination([KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V])
             else:
@@ -537,6 +537,8 @@ class AudioTranscriber:
             print("Text is in clipboard, use Ctrl+V to paste.", file=sys.stderr)
 
     async def start_recording(self):
+        # Reset shift state for new recording session
+        self.shift_pressed = False
         """Start or resume recording within an existing stream.
 
         Reuse the stream only if it's healthy (ws open + sender/receiver
@@ -642,11 +644,22 @@ async def keyboard_listener(device, hotkey_code, transcriber):
             if key_event.scancode == hotkey_code:
                 if key_event.keystate == evdev.KeyEvent.key_down and not hotkey_pressed:
                     hotkey_pressed = True
+                    # Check if Shift is currently pressed when hotkey is pressed
+                    shift_keys = [ecodes.KEY_LEFTSHIFT, ecodes.KEY_RIGHTSHIFT]
+                    for shift_key in shift_keys:
+                        if shift_key in device.active_keys():
+                            transcriber.shift_pressed = True
+                            break
                     await transcriber.start_recording()
                     
                 elif key_event.keystate == evdev.KeyEvent.key_up and hotkey_pressed:
                     hotkey_pressed = False
                     await transcriber.stop_recording()
+            
+            # Monitor Shift key presses while hotkey is held
+            elif hotkey_pressed and key_event.scancode in [ecodes.KEY_LEFTSHIFT, ecodes.KEY_RIGHTSHIFT]:
+                if key_event.keystate == evdev.KeyEvent.key_down:
+                    transcriber.shift_pressed = True
 
 
 async def main():
@@ -806,7 +819,7 @@ async def main():
         prompt_preview = post_prompt[:50] + "..." if len(post_prompt) > 50 else post_prompt
         print(f"Post-treatment prompt: {prompt_preview}")
     print(f"Using key '{args.hotkey.upper()}' for push-to-talk (Listening on {keyboard.name}).")
-    print("Text will be pasted by simulating Ctrl+V (or Ctrl+Shift+V if Shift is held at the time).")
+    print("Text will be pasted by simulating Ctrl+V (or Ctrl+Shift+V if Shift is pressed at any time).")
     print("Press Ctrl+C to stop the script.")
 
     # Create transcriber and start listening
