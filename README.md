@@ -117,6 +117,9 @@ TWISTT_POST_TREATMENT_PROVIDER=openai  # Provider: openai, cerebras, or openrout
 # Provider-specific API keys (for post-treatment)
 TWISTT_CEREBRAS_API_KEY=csk-...  # Required if using cerebras provider
 TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
+
+# Output mode
+TWISTT_OUTPUT_MODE=batch  # batch (default) or full
 ```
 
 ### Available Options
@@ -135,6 +138,7 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 | `--post-provider` | `TWISTT_POST_TREATMENT_PROVIDER` | openai | Provider for post-treatment (openai, cerebras, openrouter) |
 | `--cerebras-api-key` | `TWISTT_CEREBRAS_API_KEY` or `CEREBRAS_API_KEY` | - | Cerebras API key |
 | `--openrouter-api-key` | `TWISTT_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` | - | OpenRouter API key |
+| `--output-mode` | `TWISTT_OUTPUT_MODE` | batch | Output mode: batch (incremental) or full (complete on release) |
 
 ## Usage
 
@@ -167,6 +171,9 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 
 # Use OpenRouter for post-treatment (access to many models)
 ./twistt.py --post-prompt "Fix errors" --post-provider openrouter --post-model meta-llama/llama-3.2-3b-instruct
+
+# Use full output mode (wait for release to process/paste)
+./twistt.py --output-mode full
 ```
 
 ### How It Works
@@ -180,12 +187,21 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 
 The transcription appears in the terminal when you pause or stop speaking, and is automatically pasted when you release the key.
 
+### Output Modes
+
+Twistt supports two output modes that control when text is processed and pasted:
+
+- **batch mode** (default): Text is processed and can be pasted incrementally as you speak. Each pause triggers processing of that segment. With post-treatment enabled, each segment maintains context from previous segments.
+
+- **full mode**: All text is accumulated while you hold the key and only processed/pasted when you release it. With post-treatment, the entire text is processed at once without maintaining context between sessions. This mode is useful when you want to speak a complete thought before any processing occurs.
+
 ### Tips
 
 - **Shift mode**: Hold Shift while speaking to paste with Ctrl+Shift+V when done (useful for terminals)
 - **Multiple sentences**: Keep holding the key to transcribe continuously
 - **Pause support**: Brief pauses are handled automatically
 - **Live feedback**: Watch the terminal to see transcription as it processes
+- **Output mode choice**: Use `--output-mode full` when you want to complete your entire thought before processing
 - **Post-treatment**: Enable for improved accuracy, especially useful for:
   - Fixing punctuation and capitalization
   - Correcting common speech-to-text errors

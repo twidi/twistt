@@ -47,11 +47,17 @@ Configuration priority (highest to lowest):
 3. Local `.env` file in script directory
 4. Environment variables
 
-Key environment variables use `TWISTT_` prefix (e.g., `TWISTT_OPENAI_API_KEY`, `TWISTT_HOTKEY`, `TWISTT_POST_TREATMENT_PROMPT`, `TWISTT_POST_TREATMENT_PROVIDER`).
+Key environment variables use `TWISTT_` prefix (e.g., `TWISTT_OPENAI_API_KEY`, `TWISTT_HOTKEY`, `TWISTT_POST_TREATMENT_PROMPT`, `TWISTT_POST_TREATMENT_PROVIDER`, `TWISTT_OUTPUT_MODE`).
 
 Provider-specific API keys:
 - `TWISTT_CEREBRAS_API_KEY` or `CEREBRAS_API_KEY` for Cerebras
 - `TWISTT_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` for OpenRouter
+
+## Output Modes
+
+The application supports two output modes (`--output-mode` or `TWISTT_OUTPUT_MODE`):
+- **batch** (default): Processes and pastes text incrementally as segments are detected by the API. Each segment maintains context from previous segments when using post-treatment.
+- **full**: Accumulates all text while the key is held and processes/pastes only when released. Post-treatment runs without context between sessions.
 
 ## Testing
 
@@ -62,3 +68,4 @@ No formal test suite exists. Testing is manual:
 4. Test post-treatment with different prompts, models, and providers
 5. Verify post-treatment maintains transcription order
 6. Test provider switching (OpenAI, Cerebras, OpenRouter) for post-treatment
+7. Test output modes (batch vs full) with and without post-treatment

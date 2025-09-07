@@ -102,7 +102,8 @@ F_KEY_CODES = {
 class AudioTranscriber:
     def __init__(self, openai_api_key, language, model, gain, keyboard,
                  post_treatment=False, post_prompt=None, post_model="gpt-4o-mini",
-                 post_provider="openai", cerebras_api_key=None, openrouter_api_key=None):
+                 post_provider="openai", cerebras_api_key=None, openrouter_api_key=None,
+                 output_mode="batch"):
         self.openai_api_key = openai_api_key
         self.language = language
         self.model = model
@@ -114,6 +115,7 @@ class AudioTranscriber:
         self.post_provider = post_provider
         self.cerebras_api_key = cerebras_api_key
         self.openrouter_api_key = openrouter_api_key
+        self.output_mode = output_mode
         self.recording = False
         self.stream_task = None
         self.speech_started = False
@@ -274,12 +276,19 @@ class AudioTranscriber:
                                         full_text = "".join(current_transcription)
                                         if self.recording:
                                             full_text += " "
-                                        await self.output_queue.put({
-                                            'type': 'initial_transcription',
-                                            'text': full_text,
-                                            'previous_text': "".join(previous_transcriptions)
-                                        })
-                                        previous_transcriptions.append(full_text)
+                                        
+                                        # In batch mode, send to output queue immediately
+                                        if self.output_mode == "batch":
+                                            await self.output_queue.put({
+                                                'type': 'initial_transcription',
+                                                'text': full_text,
+                                                'previous_text': "".join(previous_transcriptions)
+                                            })
+                                            previous_transcriptions.append(full_text)
+                                        # In full mode, just accumulate the text
+                                        else:  # output_mode == "full"
+                                            previous_transcriptions.append(full_text)
+                                        
                                         current_transcription.clear()
 
                                     self.speech_started = False
@@ -301,6 +310,15 @@ class AudioTranscriber:
                 await asyncio.gather(sender(), receiver(), return_exceptions=True)
                 print("")
                 self.ws_open = False
+                
+                # In full mode, send all accumulated text at once
+                if self.output_mode == "full" and previous_transcriptions:
+                    full_text = "".join(previous_transcriptions)
+                    await self.output_queue.put({
+                        'type': 'initial_transcription',
+                        'text': full_text,
+                        'previous_text': ""  # No context in full mode
+                    })
 
     async def post_process_transcription(self, text, previous_text):
         """Stream post-processed transcription as an async generator."""
@@ -310,10 +328,17 @@ class AudioTranscriber:
                 user_prompt=self.post_prompt
             )
             
-            user_message = POST_TREATMENT_USER_TEMPLATE.format(
-                previous_context=previous_text if previous_text else "No previous transcription",
-                current_text=text
-            )
+            # In full mode, don't include context
+            if self.output_mode == "full":
+                user_message = POST_TREATMENT_USER_TEMPLATE.format(
+                    previous_context="No previous transcription",
+                    current_text=text
+                )
+            else:
+                user_message = POST_TREATMENT_USER_TEMPLATE.format(
+                    previous_context=previous_text if previous_text else "No previous transcription",
+                    current_text=text
+                )
 
             # Make the API call with streaming and timeout
             stream = await asyncio.wait_for(
@@ -652,6 +677,9 @@ async def main():
     # Provider API keys
     default_cerebras_api_key = os.getenv(f"{ENV_PREFIX}CEREBRAS_API_KEY") or os.getenv("CEREBRAS_API_KEY")
     default_openrouter_api_key = os.getenv(f"{ENV_PREFIX}OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY")
+    
+    # Output mode
+    default_output_mode = os.getenv(f"{ENV_PREFIX}OUTPUT_MODE", "batch")
 
     parser.add_argument("--hotkey", default=default_hotkey, 
                        help=f"Push-to-talk key, F1-F12 (env: {ENV_PREFIX}HOTKEY)")
@@ -681,6 +709,9 @@ async def main():
                        help=f"Cerebras API key (env: {ENV_PREFIX}CEREBRAS_API_KEY or CEREBRAS_API_KEY)")
     parser.add_argument("--openrouter-api-key", default=default_openrouter_api_key,
                        help=f"OpenRouter API key (env: {ENV_PREFIX}OPENROUTER_API_KEY or OPENROUTER_API_KEY)")
+    parser.add_argument("--output-mode", default=default_output_mode,
+                       choices=["batch", "full"],
+                       help=f"Output mode: batch (incremental) or full (complete on release) (env: {ENV_PREFIX}OUTPUT_MODE)")
     args = parser.parse_args()
     
     # Handle post-treatment prompt logic - post-treatment is active if we have a prompt
@@ -776,7 +807,8 @@ async def main():
         post_model=args.post_model,
         post_provider=args.post_provider,
         cerebras_api_key=args.cerebras_api_key,
-        openrouter_api_key=args.openrouter_api_key
+        openrouter_api_key=args.openrouter_api_key,
+        output_mode=args.output_mode
     )
     
     # Start the output processor task that runs for the entire program duration

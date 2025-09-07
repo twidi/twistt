@@ -17,7 +17,7 @@
 ## Coding Style & Naming Conventions
 - Python 3.11+, PEP 8, 4-space indents.
 - Names: functions/vars `snake_case`, classes `CamelCase`, constants `UPPER_SNAKE_CASE`.
-- CLI flags use `--kebab-case`; env vars use `TWISTT_*` (e.g., `TWISTT_OPENAI_API_KEY`).
+- CLI flags use `--kebab-case`; env vars use `TWISTT_*` (e.g., `TWISTT_OPENAI_API_KEY`, `TWISTT_OUTPUT_MODE`).
 - Keep functions small; prefer early returns; add docstrings/comments where behavior isn’t obvious.
 
 ## Commit & Pull Request Guidelines
