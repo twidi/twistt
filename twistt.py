@@ -52,6 +52,7 @@ RT_URL = "wss://api.openai.com/v1/realtime?intent=transcription"
 SR = 24_000
 BLOCK_MS = 40
 BLOCK_SIZE = int(SR * BLOCK_MS / 1000)
+STREAMING_TOKEN_BUFFER_SIZE = 5  # Number of tokens to buffer before outputting during streaming
 
 EV_SPEECH_STARTED = "input_audio_buffer.speech_started"
 EV_DELTA = "conversation.item.input_audio_transcription.delta"
@@ -252,7 +253,11 @@ class AudioTranscriber:
                                         full_text = "".join(current_transcription)
                                         if self.recording:
                                             full_text += " "
-                                        await self.output_queue.put((full_text, "".join(previous_transcriptions)))
+                                        await self.output_queue.put({
+                                            'type': 'initial_transcription',
+                                            'text': full_text,
+                                            'previous_text': "".join(previous_transcriptions)
+                                        })
                                         previous_transcriptions.append(full_text)
                                         current_transcription.clear()
 
@@ -277,7 +282,7 @@ class AudioTranscriber:
                 self.ws_open = False
 
     async def post_process_transcription(self, text, previous_text):
-        """Call OpenAI API to post-process the transcription."""
+        """Stream post-processed transcription as an async generator."""
         try:
             # Format the system and user messages
             system_message = POST_TREATMENT_SYSTEM_TEMPLATE.format(
@@ -289,84 +294,171 @@ class AudioTranscriber:
                 current_text=text
             )
 
-            # Make the API call with timeout
-            response = await asyncio.wait_for(
+            # Make the API call with streaming and timeout
+            stream = await asyncio.wait_for(
                 self.openai_client.chat.completions.create(
                     model=self.post_model,
                     messages=[
                         {"role": "system", "content": system_message},
                         {"role": "user", "content": user_message}
                     ],
-                    temperature=0.1
+                    temperature=0.1,
+                    stream=True
                 ),
                 timeout=10.0
             )
             
-            corrected_text = response.choices[0].message.content
-            print(f"\n[Post-treatment] {corrected_text}\n", flush=True)
-            return corrected_text.strip() + " "
+            # Buffer for collecting tokens
+            token_buffer = []
+            token_count = 0
+            
+            print("\n[Post-treatment] ", end='', flush=True)
+            
+            async for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    token_buffer.append(content)
+                    token_count += 1
+                    
+                    # Yield every STREAMING_TOKEN_BUFFER_SIZE tokens or when we have a complete word/punctuation
+                    if token_count >= STREAMING_TOKEN_BUFFER_SIZE or content.endswith((' ', '.', ',', '!', '?', '\n', ':', ';')):
+                        buffered_text = ''.join(token_buffer)
+                        print(buffered_text, end='', flush=True)
+                        yield buffered_text
+                        token_buffer = []
+                        token_count = 0
+            
+            # Yield any remaining tokens
+            if token_buffer:
+                buffered_text = ''.join(token_buffer)
+                print(buffered_text, end='', flush=True)
+                yield buffered_text
+            
+            print()  # New line after streaming
+            
+            # Signal end of stream
+            yield None
                     
         except asyncio.TimeoutError:
             print("WARNING: Post-treatment timeout, using raw text", file=sys.stderr)
-            return text
+            yield text
+            yield None
         except Exception as e:
             print(f"WARNING: Post-treatment failed: {e}", file=sys.stderr)
-            return text  # Fallback to original text
-
+            yield text
+            yield None
 
     async def process_output_queue(self):
-        """Process transcription outputs from the queue."""
+        """Process all outputs: initial transcriptions and streaming chunks."""
         while True:
             try:
-                text, previous_text = await self.output_queue.get()
+                message = await self.output_queue.get()
                 
-                if self.post_treatment:
-                    # Assign sequence number and process with post-treatment
+                # Handle old format for backward compatibility
+                if isinstance(message, tuple):
+                    text, previous_text = message
+                    message = {
+                        'type': 'initial_transcription',
+                        'text': text,
+                        'previous_text': previous_text
+                    }
+                
+                if message['type'] == 'initial_transcription':
+                    # New transcription to process
                     async with self.sequence_lock:
                         seq_num = self.sequence_number
                         self.sequence_number += 1
                     
-                    # Process in background to allow concurrent processing
-                    asyncio.create_task(self._process_with_sequence(seq_num, text, previous_text))
-                else:
-                    # Direct output without post-treatment
-                    self.output_transcription(text)
+                    if self.post_treatment:
+                        # Initialize structure for streaming
+                        self.pending_corrections[seq_num] = {
+                            'chunks_to_output': [],
+                            'already_output': '',
+                            'is_complete': False
+                        }
+                        
+                        # Start streaming in background
+                        asyncio.create_task(
+                            self._stream_post_treatment(
+                                seq_num,
+                                message['text'],
+                                message.get('previous_text')
+                            )
+                        )
+                    else:
+                        # No post-treatment, prepare for direct output
+                        self.pending_corrections[seq_num] = {
+                            'chunks_to_output': [message['text']],
+                            'already_output': '',
+                            'is_complete': True
+                        }
+                        # Signal ready to process
+                        await self.output_queue.put({
+                            'type': 'chunk_ready',
+                            'seq_num': seq_num
+                        })
+                
+                elif message['type'] == 'chunk_ready':
+                    # Chunks are ready, try to output in order
+                    await self._output_ordered_chunks()
                     
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 print(f"Error processing output queue: {e}", file=sys.stderr)
     
-    async def _process_with_sequence(self, seq_num, text, previous_text):
-        """Process a transcription with post-treatment and maintain order."""
+    async def _stream_post_treatment(self, seq_num, text, previous_text):
+        """Stream post-treatment and signal each chunk."""
         try:
-            # Apply post-treatment
-            corrected_text = await self.post_process_transcription(text, previous_text)
-            
-            # Store the result with its sequence number
-            async with self.sequence_lock:
-                self.pending_corrections[seq_num] = corrected_text
+            async for chunk in self.post_process_transcription(text, previous_text):
+                if chunk is None:  # End of stream
+                    async with self.sequence_lock:
+                        self.pending_corrections[seq_num]['chunks_to_output'].append(' ')
+                        self.pending_corrections[seq_num]['is_complete'] = True
+                else:
+                    async with self.sequence_lock:
+                        self.pending_corrections[seq_num]['chunks_to_output'].append(chunk)
                 
-                # Output all pending corrections in order
-                while self.next_to_output in self.pending_corrections:
-                    text_to_output = self.pending_corrections[self.next_to_output]
-                    del self.pending_corrections[self.next_to_output]
-                    self.next_to_output += 1
-                    
-                    # Output outside the lock to avoid blocking
-                    self.output_transcription(text_to_output)
-                    
+                # Signal via the same queue
+                await self.output_queue.put({
+                    'type': 'chunk_ready',
+                    'seq_num': seq_num
+                })
         except Exception as e:
-            print(f"ERROR: Error in sequenced processing: {e}", file=sys.stderr)
-            # On error, use original text to maintain order
+            print(f"Error in streaming post-treatment: {e}", file=sys.stderr)
+            # Fallback to original text
             async with self.sequence_lock:
-                self.pending_corrections[seq_num] = text
+                self.pending_corrections[seq_num]['chunks_to_output'] = [text]
+                self.pending_corrections[seq_num]['is_complete'] = True
+            
+            await self.output_queue.put({
+                'type': 'chunk_ready',
+                'seq_num': seq_num
+            })
+    
+    async def _output_ordered_chunks(self):
+        """Output all available chunks in the correct order."""
+        async with self.sequence_lock:
+            while self.next_to_output in self.pending_corrections:
+                correction = self.pending_corrections[self.next_to_output]
                 
-                while self.next_to_output in self.pending_corrections:
-                    text_to_output = self.pending_corrections[self.next_to_output]
+                # Output available chunks
+                if correction['chunks_to_output']:
+                    chunks = correction['chunks_to_output']
+                    correction['chunks_to_output'] = []
+                    text_to_paste = ''.join(chunks)
+                    
+                    if text_to_paste:
+                        correction['already_output'] += text_to_paste
+                        # Output outside the lock
+                        self.output_transcription(text_to_paste)
+                
+                # If complete and all output
+                if correction['is_complete'] and not correction['chunks_to_output']:
                     del self.pending_corrections[self.next_to_output]
                     self.next_to_output += 1
-                    self.output_transcription(text_to_output)
+                else:
+                    break  # Wait for more chunks
 
     def output_transcription(self, text):
         """Render transcription output by copying to clipboard and pasting."""
