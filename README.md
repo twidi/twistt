@@ -123,6 +123,8 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 
 # Output mode
 TWISTT_OUTPUT_MODE=batch  # batch (default) or full
+# Post-correct mode (apply corrections in-place with keyboard)
+TWISTT_POST_CORRECT=false
 ```
 
 ### Available Options
@@ -140,6 +142,7 @@ TWISTT_OUTPUT_MODE=batch  # batch (default) or full
 | `--post-prompt-file` | `TWISTT_POST_TREATMENT_PROMPT_FILE` | - | File containing post-treatment prompt |
 | `--post-model` | `TWISTT_POST_TREATMENT_MODEL` | gpt-4o-mini | Model for post-treatment |
 | `--post-provider` | `TWISTT_POST_TREATMENT_PROVIDER` | openai | Provider for post-treatment (openai, cerebras, openrouter) |
+| `--post-correct` | `TWISTT_POST_CORRECT` | false | Apply post-treatment by correcting already-pasted text in-place |
 | `--cerebras-api-key` | `TWISTT_CEREBRAS_API_KEY` or `CEREBRAS_API_KEY` | - | Cerebras API key |
 | `--openrouter-api-key` | `TWISTT_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` | - | OpenRouter API key |
 | `--output-mode` | `TWISTT_OUTPUT_MODE` | batch | Output mode: batch (incremental) or full (complete on release) |
@@ -178,6 +181,9 @@ TWISTT_OUTPUT_MODE=batch  # batch (default) or full
 
 # Use OpenRouter for post-treatment (access to many models)
 ./twistt.py --post-prompt "Fix errors" --post-provider openrouter --post-model meta-llama/llama-3.2-3b-instruct
+
+# Post-correct mode: paste raw immediately, correct in-place when fully ready
+./twistt.py --post-prompt "Fix grammar" --post-correct
 
 # Use full output mode (wait for release to process/paste)
 ./twistt.py --output-mode full

@@ -22,6 +22,7 @@ import base64
 import argparse
 from datetime import datetime
 from pathlib import Path
+import difflib
 
 from openai import AsyncOpenAI
 
@@ -33,7 +34,9 @@ import evdev
 from evdev import ecodes
 from dotenv import load_dotenv
 from platformdirs import user_config_dir
-from pydotool import init as pydotool_init, key_combination, KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V, KEY_BACKSPACE, DOWN, \
+from pydotool import KEY_DEFAULT_DELAY, KEY_DELETE, init as pydotool_init, key_combination, KEY_LEFTCTRL, KEY_LEFTSHIFT, \
+    KEY_V, \
+    KEY_BACKSPACE, DOWN, \
     UP, key_seq, KEY_LEFT, KEY_RIGHT
 
 # Load .env from script's directory first
@@ -104,7 +107,7 @@ class AudioTranscriber:
     def __init__(self, openai_api_key, language, model, gain, keyboard,
                  post_treatment=False, post_prompt=None, post_model="gpt-4o-mini",
                  post_provider="openai", cerebras_api_key=None, openrouter_api_key=None,
-                 output_mode="batch"):
+                 output_mode="batch", post_correct=False):
         self.openai_api_key = openai_api_key
         self.language = language
         self.model = model
@@ -117,6 +120,7 @@ class AudioTranscriber:
         self.cerebras_api_key = cerebras_api_key
         self.openrouter_api_key = openrouter_api_key
         self.output_mode = output_mode
+        self.post_correct = post_correct
         self.recording = False
         self.stream_task = None
         self.speech_started = False
@@ -134,6 +138,9 @@ class AudioTranscriber:
         self.pending_corrections = {}
         self.next_to_output = 0
         self.sequence_lock = asyncio.Lock()
+        
+        # Local buffer manager for post-correction mode
+        self.buffer_manager = BufferManager(self) if self.post_treatment and self.post_correct else None
         
         # Initialize client for post-treatment based on provider
         self.post_client = None
@@ -192,7 +199,7 @@ class AudioTranscriber:
 
     async def stream_mic(self):
         print(f"\n--- {datetime.now()} ---")
-        q = asyncio.Queue(maxsize=100)
+        q = asyncio.Queue()
         loop = asyncio.get_running_loop()
         self.recording = True
         self.speech_started = False
@@ -288,9 +295,15 @@ class AudioTranscriber:
                                                 'previous_text': "".join(previous_transcriptions)
                                             })
                                             previous_transcriptions.append(full_text)
-                                        # In full mode, just accumulate the text
+                                        # In full mode, accumulate the text, and if post-correct is enabled, also paste raw incrementally
                                         else:  # output_mode == "full"
                                             previous_transcriptions.append(full_text)
+                                            if self.post_treatment and self.post_correct:
+                                                await self.output_queue.put({
+                                                    'type': 'initial_transcription',
+                                                    'text': full_text,
+                                                    'previous_text': ""
+                                                })
                                         
                                         current_transcription.clear()
 
@@ -317,13 +330,20 @@ class AudioTranscriber:
                 # In full mode, send all accumulated text at once
                 if self.output_mode == "full" and previous_transcriptions:
                     full_text = "".join(previous_transcriptions)
-                    await self.output_queue.put({
-                        'type': 'initial_transcription',
-                        'text': full_text,
-                        'previous_text': ""  # No context in full mode
-                    })
+                    if self.post_treatment and self.post_correct:
+                        # Signal session completion for a single post-treatment correction pass
+                        await self.output_queue.put({
+                            'type': 'session_complete',
+                            'text': full_text
+                        })
+                    else:
+                        await self.output_queue.put({
+                            'type': 'initial_transcription',
+                            'text': full_text,
+                            'previous_text': ""  # No context in full mode
+                        })
 
-    async def post_process_transcription(self, text, previous_text):
+    async def post_process_transcription(self, text, previous_text, stream_output):
         """Stream post-processed transcription as an async generator."""
         try:
             # Format the system and user messages
@@ -374,19 +394,21 @@ class AudioTranscriber:
             # Buffer for collecting tokens
             token_buffer = []
             token_count = 0
-            
-            print("\n[Post-treatment] ", end='', flush=True)
+
+            if stream_output:
+                print("\n[Post-treatment] ", end='', flush=True)
             
             async for chunk in stream:
                 if chunk.choices[0].delta.content:
                     content = chunk.choices[0].delta.content
+                    if stream_output:
+                        print(content, end='', flush=True)
                     token_buffer.append(content)
                     token_count += 1
                     
                     # Yield every STREAMING_TOKEN_BUFFER_SIZE tokens or when we have a complete word/punctuation
-                    if token_count >= STREAMING_TOKEN_BUFFER_SIZE or content.endswith((' ', '.', ',', '!', '?', '\n', ':', ';')):
+                    if stream_output and (token_count >= STREAMING_TOKEN_BUFFER_SIZE or content.endswith((' ', '.', ',', '!', '?', '\n', ':', ';'))):
                         buffered_text = ''.join(token_buffer)
-                        print(buffered_text, end='', flush=True)
                         yield buffered_text
                         token_buffer = []
                         token_count = 0
@@ -394,10 +416,10 @@ class AudioTranscriber:
             # Yield any remaining tokens
             if token_buffer:
                 buffered_text = ''.join(token_buffer)
-                print(buffered_text, end='', flush=True)
                 yield buffered_text
             
-            print()  # New line after streaming
+            if stream_output:
+                print()  # New line after streaming
             
             # Signal end of stream
             yield None
@@ -433,21 +455,38 @@ class AudioTranscriber:
                         self.sequence_number += 1
                     
                     if self.post_treatment:
-                        # Initialize structure for streaming
-                        self.pending_corrections[seq_num] = {
-                            'chunks_to_output': [],
-                            'already_output': '',
-                            'is_complete': False
-                        }
-                        
-                        # Start streaming in background
-                        asyncio.create_task(
-                            self._stream_post_treatment(
-                                seq_num,
-                                message['text'],
-                                message.get('previous_text')
+                        if self.post_correct and self.buffer_manager is not None:
+                            if self.output_mode == 'full':
+                                # In full+post-correct, paste raw as we go, correction once at session end
+                                self.buffer_manager.start_session_if_needed()
+                                await self.buffer_manager.insert_segment(seq_num, message['text'])
+                            else:
+                                # In batch+post-correct, paste raw and schedule per-segment correction
+                                await self.buffer_manager.insert_segment(seq_num, message['text'])
+                                asyncio.create_task(
+                                    self._post_correct_apply(
+                                        seq_num,
+                                        message['text'],
+                                        message.get('previous_text')
+                                    )
+                                )
+                        else:
+                            # Initialize structure for streaming
+                            self.pending_corrections[seq_num] = {
+                                'chunks_to_output': [],
+                                'already_output': '',
+                                'is_complete': False
+                            }
+                            
+                            # Start streaming in background
+                            asyncio.create_task(
+                                self._stream_post_treatment(
+                                    seq_num,
+                                    message['text'],
+                                    message.get('previous_text'),
+                                    stream_output=True
+                                )
                             )
-                        )
                     else:
                         # No post-treatment, prepare for direct output
                         self.pending_corrections[seq_num] = {
@@ -464,16 +503,59 @@ class AudioTranscriber:
                 elif message['type'] == 'chunk_ready':
                     # Chunks are ready, try to output in order
                     await self._output_ordered_chunks()
+                
+                elif message['type'] == 'session_complete':
+                    if self.post_treatment and self.post_correct and self.buffer_manager is not None and self.output_mode == 'full':
+                        # Run a single correction on the full session text
+                        asyncio.create_task(self._post_correct_apply_session(message['text']))
                     
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 print(f"Error processing output queue: {e}", file=sys.stderr)
+
+    async def _post_correct_apply(self, seq_num, text, previous_text):
+        """Run post-treatment to completion, then apply an in-place correction for the given segment.
+
+        This is used only in post-correct mode, where raw text was already pasted.
+        """
+        try:
+            corrected_parts = []
+            async for chunk in self.post_process_transcription(text, previous_text, stream_output=False):
+                if chunk is None:
+                    break
+                corrected_parts.append(chunk)
+            corrected_text = ''.join(corrected_parts)
+
+            # Preserve a trailing space if the original pasted segment had one (keeps separation while recording)
+            if self.buffer_manager is not None:
+                seg = self.buffer_manager.get_segment(seq_num)
+                if seg is not None and seg['text_current'].endswith(' ') and not corrected_text.endswith(' '):
+                    corrected_text += ' '
+
+            if self.buffer_manager is not None:
+                await self.buffer_manager.apply_correction(seq_num, corrected_text)
+        except Exception as e:
+            print(f"Error applying post-correction: {e}", file=sys.stderr)
     
-    async def _stream_post_treatment(self, seq_num, text, previous_text):
+    async def _post_correct_apply_session(self, full_text):
+        """Full-mode session correction: correct the entire session in-place once fully received."""
+        try:
+            corrected_parts = []
+            async for chunk in self.post_process_transcription(full_text, previous_text="", stream_output=False):
+                if chunk is None:
+                    break
+                corrected_parts.append(chunk)
+            corrected_text = ''.join(corrected_parts)
+            if self.buffer_manager is not None:
+                await self.buffer_manager.apply_correction_session(corrected_text)
+        except Exception as e:
+            print(f"Error applying session post-correction: {e}", file=sys.stderr)
+    
+    async def _stream_post_treatment(self, seq_num, text, previous_text, stream_output):
         """Stream post-treatment and signal each chunk."""
         try:
-            async for chunk in self.post_process_transcription(text, previous_text):
+            async for chunk in self.post_process_transcription(text, previous_text, stream_output=stream_output):
                 if chunk is None:  # End of stream
                     async with self.sequence_lock:
                         self.pending_corrections[seq_num]['chunks_to_output'].append(' ')
@@ -578,8 +660,11 @@ class KeyboardAction:
     CTRL_V = [KEY_LEFTCTRL, KEY_V]
     CTRL_SHIFT_V = [KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V]
     BACKSPACE = [(KEY_BACKSPACE, DOWN), (KEY_BACKSPACE, UP)]
+    DELETE = [(KEY_DELETE, DOWN), (KEY_DELETE, UP)]
     LEFT = [(KEY_LEFT, DOWN), (KEY_LEFT, UP)]
     RIGHT = [(KEY_RIGHT, DOWN), (KEY_RIGHT, UP)]
+
+    DELAY_BETWEEN_KEYS_MS = KEY_DEFAULT_DELAY
 
     @classmethod
     def copy(cls, text):
@@ -595,17 +680,274 @@ class KeyboardAction:
         KeyboardAction.paste(use_shift)
 
     @classmethod
-    def delete_chars(cls, count):
-        key_seq(cls.BACKSPACE * count)
+    def delete_chars_backward(cls, count):
+        key_seq(cls.BACKSPACE * count, next_delay_ms=cls.DELAY_BETWEEN_KEYS_MS)
+
+    @classmethod
+    def delete_chars_forward(cls, count):
+        key_seq(cls.DELETE * count, next_delay_ms=cls.DELAY_BETWEEN_KEYS_MS)
 
     @classmethod
     def go_left(cls, count):
-        key_seq(cls.LEFT * count)
+        key_seq(cls.LEFT * count, next_delay_ms=cls.DELAY_BETWEEN_KEYS_MS)
 
     @classmethod
     def go_right(cls, count):
-        key_seq(cls.RIGHT * count)
+        key_seq(cls.RIGHT * count, next_delay_ms=cls.DELAY_BETWEEN_KEYS_MS)
 
+
+class BufferManager:
+    """Maintain a mirror of pasted text and apply minimal corrections via keyboard.
+
+    All operations are serialized to avoid interleaving keystrokes with new inserts.
+    """
+    def __init__(self, transcriber):
+        self.transcriber = transcriber
+        self.text = ""
+        self.cursor = 0
+        # segments: seq_num -> {'start': int, 'text_current': str, 'text_original': str}
+        self.segments = {}
+        self.segment_order = []
+        self.lock = asyncio.Lock()
+        # Session tracking (full mode post-correct)
+        self.session_active = False
+        self.session_start_index = 0
+        self.session_segment_ids = []
+
+    def _move_cursor_to(self, target_index: int):
+        # Clamp
+        target_index = max(0, min(target_index, len(self.text)))
+        delta = target_index - self.cursor
+        if delta > 0:
+            KeyboardAction.go_right(delta)
+        elif delta < 0:
+            KeyboardAction.go_left(-delta)
+        self.cursor = target_index
+
+    def start_session_if_needed(self):
+        if not self.session_active:
+            self.session_active = True
+            self.session_start_index = len(self.text)
+            self.session_segment_ids = []
+
+    @staticmethod
+    def _common_prefix_len(a: str, b: str) -> int:
+        i = 0
+        max_i = min(len(a), len(b))
+        while i < max_i and a[i] == b[i]:
+            i += 1
+        return i
+
+    @staticmethod
+    def _common_suffix_len(a: str, b: str, max_allowed: int | None = None) -> int:
+        i = 0
+        max_i = min(len(a), len(b)) if max_allowed is None else min(max_allowed, len(a), len(b))
+        while i < max_i and a[len(a) - 1 - i] == b[len(b) - 1 - i]:
+            i += 1
+        return i
+
+    def _replace_range(self, abs_start: int, abs_end: int, replacement: str):
+        # Choose forward delete or backward delete based on minimal movement
+        delete_len = max(0, abs_end - abs_start)
+        move_cost_to_start = abs(self.cursor - abs_start)
+        move_cost_to_end = abs(self.cursor - abs_end)
+
+        if delete_len == 0:
+            # Pure insertion at abs_start
+            self._move_cursor_to(abs_start)
+            if replacement:
+                self.transcriber.output_transcription(replacement)
+                self.text = self.text[:abs_start] + replacement + self.text[abs_start:]
+                self.cursor = abs_start + len(replacement)
+            return
+
+        if move_cost_to_end <= move_cost_to_start:
+            # Go to end, delete backward
+            self._move_cursor_to(abs_end)
+            KeyboardAction.delete_chars_backward(delete_len)
+            self.text = self.text[:abs_start] + self.text[abs_end:]
+            self.cursor = abs_start
+        else:
+            # Go to start, delete forward
+            self._move_cursor_to(abs_start)
+            KeyboardAction.delete_chars_forward(delete_len)
+            self.text = self.text[:abs_start] + self.text[abs_end:]
+            self.cursor = abs_start
+        # Insert replacement
+        if replacement:
+            self.transcriber.output_transcription(replacement)
+            self.text = self.text[:self.cursor] + replacement + self.text[self.cursor:]
+            self.cursor += len(replacement)
+
+    async def insert_segment(self, seq_num: int, text: str):
+        """Paste raw segment text at the end and register the segment."""
+        async with self.lock:
+            # Always move to end before inserting
+            self._move_cursor_to(len(self.text))
+            # Paste
+            try:
+                self.transcriber.output_transcription(text)
+            except Exception:
+                pass
+            # Update buffer
+            start = len(self.text)
+            self.text += text
+            self.cursor = len(self.text)
+            self.segments[seq_num] = {
+                'start': start,
+                'text_current': text,
+                'text_original': text,
+            }
+            self.segment_order.append(seq_num)
+            if self.session_active:
+                self.session_segment_ids.append(seq_num)
+
+    def get_segment(self, seq_num: int):
+        return self.segments.get(seq_num)
+
+    async def apply_correction(self, seq_num: int, corrected_text: str, replace_threshold: float = 0.7):
+        """Apply minimal in-place edits to transform a segment to corrected_text.
+
+        Uses only Left/Right/Backspace/Paste. After applying, returns cursor to end.
+        """
+        async with self.lock:
+            seg = self.segments.get(seq_num)
+            if not seg:
+                return
+
+            old = seg['text_current']
+            if old == corrected_text:
+                # Nothing to do; ensure cursor at end
+                self._move_cursor_to(len(self.text))
+                return
+
+            # Decide whether to do minimal diff or full replace
+            try:
+                sm = difflib.SequenceMatcher(None, old, corrected_text)
+                ratio = sm.ratio()
+            except Exception:
+                sm = None
+                ratio = 0.0
+
+            start_base = seg['start']
+            # Helper to adjust following segments after length change
+            def shift_following(delta: int):
+                if delta == 0:
+                    return
+                passed = False
+                for s in self.segment_order:
+                    if s == seq_num:
+                        passed = True
+                        continue
+                    if passed:
+                        self.segments[s]['start'] += delta
+
+            # Heuristic: full replace if similarity low OR unchanged prefix+suffix are tiny
+            lcp_for_check = self._common_prefix_len(old, corrected_text)
+            lcs_for_check = self._common_suffix_len(old, corrected_text, max_allowed=min(len(old)-lcp_for_check, len(corrected_text)-lcp_for_check))
+            unchanged = lcp_for_check + lcs_for_check
+            tiny_unchanged = unchanged < max(2, int(0.2 * min(len(old), len(corrected_text))))
+            if sm is None or ratio < (1.0 - replace_threshold) or tiny_unchanged:
+                # Replace whole segment
+                # Move to end of segment
+                abs_end = start_base + len(old)
+                self._move_cursor_to(abs_end)
+                # Delete old content
+                KeyboardAction.delete_chars_backward(len(old))
+                # Paste corrected
+                try:
+                    self.transcriber.output_transcription(corrected_text)
+                except Exception:
+                    pass
+                # Update buffer state
+                abs_start = start_base
+                self.text = self.text[:abs_start] + corrected_text + self.text[abs_end:]
+                delta = len(corrected_text) - len(old)
+                self.cursor = abs_start + len(corrected_text)
+                seg['text_current'] = corrected_text
+                shift_following(delta)
+                # Move to end
+                self._move_cursor_to(len(self.text))
+                return
+
+            # Single-window minimal edit: change the middle once
+            lcp = self._common_prefix_len(old, corrected_text)
+            # Prevent overlap when suffix is large
+            max_suffix = min(len(old) - lcp, len(corrected_text) - lcp)
+            lcs = self._common_suffix_len(old, corrected_text, max_allowed=max_suffix)
+            old_mid_len = len(old) - lcp - lcs
+            new_mid = corrected_text[lcp:len(corrected_text) - lcs] if len(corrected_text) - lcp - lcs > 0 else ""
+            abs_start = start_base + lcp
+            abs_end = start_base + len(old) - lcs
+            self._replace_range(abs_start, abs_end, new_mid)
+
+            # Update segment content and following segments positions
+            total_delta = len(corrected_text) - len(old)
+            seg['text_current'] = corrected_text
+            shift_following(total_delta)
+            # Move to end
+            self._move_cursor_to(len(self.text))
+
+    async def apply_correction_session(self, corrected_text: str, replace_threshold: float = 0.7):
+        """Apply a single correction over the whole active session window (full mode)."""
+        async with self.lock:
+            if not self.session_active:
+                return
+            start_base = self.session_start_index
+            old = self.text[start_base:]
+            if old == corrected_text:
+                # Nothing to change
+                self.session_active = False
+                self.session_segment_ids = []
+                self._move_cursor_to(len(self.text))
+                return
+            try:
+                sm = difflib.SequenceMatcher(None, old, corrected_text)
+                ratio = sm.ratio()
+            except Exception:
+                sm = None
+                ratio = 0.0
+            # Replace-all fallback
+            # Heuristic: full replace if similarity low OR unchanged prefix+suffix are tiny
+            lcp_for_check = self._common_prefix_len(old, corrected_text)
+            lcs_for_check = self._common_suffix_len(old, corrected_text, max_allowed=min(len(old)-lcp_for_check, len(corrected_text)-lcp_for_check))
+            unchanged = lcp_for_check + lcs_for_check
+            tiny_unchanged = unchanged < max(2, int(0.2 * min(len(old), len(corrected_text))))
+            if sm is None or ratio < (1.0 - replace_threshold) or tiny_unchanged:
+                abs_end = len(self.text)
+                self._move_cursor_to(abs_end)
+                KeyboardAction.delete_chars_backward(len(old))
+                try:
+                    self.transcriber.output_transcription(corrected_text)
+                except Exception:
+                    pass
+                self.text = self.text[:start_base] + corrected_text
+                self.cursor = len(self.text)
+                # Update segments within session: recompute starts incrementally
+                running = start_base
+                # We cannot reliably split corrected_text back to per-segment; keep their start best-effort
+                for sid in self.session_segment_ids:
+                    seg = self.segments.get(sid)
+                    if seg:
+                        seg_len = len(seg['text_current'])
+                        seg['start'] = running
+                        running += seg_len
+                self.session_active = False
+                self.session_segment_ids = []
+                return
+            # Single-window minimal edit on session window
+            lcp = self._common_prefix_len(old, corrected_text)
+            max_suffix = min(len(old) - lcp, len(corrected_text) - lcp)
+            lcs = self._common_suffix_len(old, corrected_text, max_allowed=max_suffix)
+            old_mid_len = len(old) - lcp - lcs
+            new_mid = corrected_text[lcp:len(corrected_text) - lcs] if len(corrected_text) - lcp - lcs > 0 else ""
+            abs_start = start_base + lcp
+            abs_end = start_base + len(old) - lcs
+            self._replace_range(abs_start, abs_end, new_mid)
+            # Session done
+            self.session_active = False
+            self.session_segment_ids = []
+            self._move_cursor_to(len(self.text))
 
 def parse_hotkeys_evdev(hotkeys_str):
     hotkeys = [k.strip().lower() for k in hotkeys_str.split(',')]
@@ -674,76 +1016,85 @@ async def keyboard_listener(device, hotkey_codes, transcriber, double_tap_window
     toggle_stop_time = 0  # Track when toggle mode was stopped to prevent immediate reactivation
     toggle_cooldown = 0.5  # Cooldown period after stopping toggle mode
 
-    async for event in device.async_read_loop():
-        if event.type == ecodes.EV_KEY:
-            key_event = evdev.categorize(event)
-            
-            if key_event.scancode in hotkey_codes:
-                current_time = asyncio.get_event_loop().time()
-                current_key = key_event.scancode
+    try:
+        async for event in device.async_read_loop():
+            if event.type == ecodes.EV_KEY:
+                key_event = evdev.categorize(event)
+                
+                if key_event.scancode in hotkey_codes:
+                    current_time = asyncio.get_event_loop().time()
+                    current_key = key_event.scancode
 
-                # If recording is active, only the active hotkey matters
-                if active_hotkey is not None and current_key != active_hotkey:
-                    # Ignore all other hotkeys while recording is active
-                    if key_event.keystate == evdev.KeyEvent.key_up:
-                        last_release_time[current_key] = current_time
-                    continue
-
-                if key_event.keystate == evdev.KeyEvent.key_down and not hotkey_pressed:
-                    # Check if we're in cooldown period after stopping toggle mode
-                    if current_time - toggle_stop_time < toggle_cooldown:
-                        # Ignore this press - we just stopped toggle mode
+                    # If recording is active, only the active hotkey matters
+                    if active_hotkey is not None and current_key != active_hotkey:
+                        # Ignore all other hotkeys while recording is active
+                        if key_event.keystate == evdev.KeyEvent.key_up:
+                            last_release_time[current_key] = current_time
                         continue
 
-                    # Check for double-tap pattern (press-release-press within window)
-                    if current_time - last_release_time[current_key] < double_tap_window:
-                        # This is the second press of a double-tap - activate toggle mode
-                        is_toggle_mode = True
-                        active_hotkey = current_key  # Remember which key is active
-                        hotkey_pressed = True
-                        key_name = [k for k, v in F_KEY_CODES.items() if v == current_key][0]
-                        print(f"[Toggle mode activated with {key_name.upper()}]", file=sys.stderr)
-                    else:
-                        # Normal press - hold mode
-                        hotkey_pressed = True
+                    if key_event.keystate == evdev.KeyEvent.key_down and not hotkey_pressed:
+                        # Check if we're in cooldown period after stopping toggle mode
+                        if current_time - toggle_stop_time < toggle_cooldown:
+                            # Ignore this press - we just stopped toggle mode
+                            continue
+
+                        # Check for double-tap pattern (press-release-press within window)
+                        if current_time - last_release_time[current_key] < double_tap_window:
+                            # This is the second press of a double-tap - activate toggle mode
+                            is_toggle_mode = True
+                            active_hotkey = current_key  # Remember which key is active
+                            hotkey_pressed = True
+                            key_name = [k for k, v in F_KEY_CODES.items() if v == current_key][0]
+                            print(f"[Toggle mode activated with {key_name.upper()}]", file=sys.stderr)
+                        else:
+                            # Normal press - hold mode
+                            hotkey_pressed = True
+                            is_toggle_mode = False
+                            active_hotkey = current_key  # Remember which key is active
+
+                        # Check if Shift is currently pressed when hotkey is pressed
+                        shift_keys = [ecodes.KEY_LEFTSHIFT, ecodes.KEY_RIGHTSHIFT]
+                        for shift_key in shift_keys:
+                            if shift_key in device.active_keys():
+                                transcriber.shift_pressed = True
+                                break
+                        await transcriber.start_recording()
+                        
+                    elif key_event.keystate == evdev.KeyEvent.key_up and hotkey_pressed and not is_toggle_mode:
+                        # In hold mode, release stops recording
+                        last_release_time[current_key] = current_time
+                        hotkey_pressed = False
+                        active_hotkey = None  # Clear the active hotkey
+                        await transcriber.stop_recording()
+                        
+                    elif key_event.keystate == evdev.KeyEvent.key_up and is_toggle_mode:
+                        # In toggle mode, release doesn't stop recording
+                        last_release_time[current_key] = current_time
+                        hotkey_pressed = False
+                        # Recording continues...
+
+                    elif key_event.keystate == evdev.KeyEvent.key_down and is_toggle_mode:
+                        # In toggle mode, press again stops recording
                         is_toggle_mode = False
-                        active_hotkey = current_key  # Remember which key is active
-
-                    # Check if Shift is currently pressed when hotkey is pressed
-                    shift_keys = [ecodes.KEY_LEFTSHIFT, ecodes.KEY_RIGHTSHIFT]
-                    for shift_key in shift_keys:
-                        if shift_key in device.active_keys():
-                            transcriber.shift_pressed = True
-                            break
-                    await transcriber.start_recording()
-                    
-                elif key_event.keystate == evdev.KeyEvent.key_up and hotkey_pressed and not is_toggle_mode:
-                    # In hold mode, release stops recording
-                    last_release_time[current_key] = current_time
-                    hotkey_pressed = False
-                    active_hotkey = None  # Clear the active hotkey
-                    await transcriber.stop_recording()
-                    
-                elif key_event.keystate == evdev.KeyEvent.key_up and is_toggle_mode:
-                    # In toggle mode, release doesn't stop recording
-                    last_release_time[current_key] = current_time
-                    hotkey_pressed = False
-                    # Recording continues...
-
-                elif key_event.keystate == evdev.KeyEvent.key_down and is_toggle_mode:
-                    # In toggle mode, press again stops recording
-                    is_toggle_mode = False
-                    active_hotkey = None  # Clear the active hotkey
-                    hotkey_pressed = False
-                    toggle_stop_time = current_time  # Record when we stopped to prevent immediate reactivation
-                    key_name = [k for k, v in F_KEY_CODES.items() if v == current_key][0]
-                    print(f"[Toggle mode deactivated with {key_name.upper()}]", file=sys.stderr)
-                    await transcriber.stop_recording()
-            
-            # Monitor Shift key presses while hotkey is held
-            elif hotkey_pressed and key_event.scancode in [ecodes.KEY_LEFTSHIFT, ecodes.KEY_RIGHTSHIFT]:
-                if key_event.keystate == evdev.KeyEvent.key_down:
-                    transcriber.shift_pressed = True
+                        active_hotkey = None  # Clear the active hotkey
+                        hotkey_pressed = False
+                        toggle_stop_time = current_time  # Record when we stopped to prevent immediate reactivation
+                        key_name = [k for k, v in F_KEY_CODES.items() if v == current_key][0]
+                        print(f"[Toggle mode deactivated with {key_name.upper()}]", file=sys.stderr)
+                        await transcriber.stop_recording()
+                
+                # Monitor Shift key presses while hotkey is held
+                elif hotkey_pressed and key_event.scancode in [ecodes.KEY_LEFTSHIFT, ecodes.KEY_RIGHTSHIFT]:
+                    if key_event.keystate == evdev.KeyEvent.key_down:
+                        transcriber.shift_pressed = True
+    except asyncio.CancelledError:
+        # Graceful shutdown on Ctrl+C / task cancellation
+        pass
+    finally:
+        try:
+            device.close()
+        except Exception:
+            pass
 
 
 async def main():
@@ -784,6 +1135,12 @@ async def main():
     default_post_prompt_file = os.getenv(f"{ENV_PREFIX}POST_TREATMENT_PROMPT_FILE", "")
     default_post_model = os.getenv(f"{ENV_PREFIX}POST_TREATMENT_MODEL", "gpt-4o-mini")
     default_post_provider = os.getenv(f"{ENV_PREFIX}POST_TREATMENT_PROVIDER", "openai")
+    # Post-correct mode
+    def _env_truthy(val: str | None) -> bool:
+        if not val:
+            return False
+        return val.strip().lower() in {"1", "true", "yes", "on"}
+    default_post_correct = _env_truthy(os.getenv(f"{ENV_PREFIX}POST_CORRECT"))
     
     # Provider API keys
     default_cerebras_api_key = os.getenv(f"{ENV_PREFIX}CEREBRAS_API_KEY") or os.getenv("CEREBRAS_API_KEY")
@@ -819,6 +1176,8 @@ async def main():
     parser.add_argument("--post-provider", default=default_post_provider,
                        choices=["openai", "cerebras", "openrouter"],
                        help=f"Provider for post-treatment (env: {ENV_PREFIX}POST_TREATMENT_PROVIDER)")
+    parser.add_argument("--post-correct", action=argparse.BooleanOptionalAction, default=default_post_correct,
+                       help=f"Apply post-treatment by correcting already-pasted text in-place (env: {ENV_PREFIX}POST_CORRECT)")
     parser.add_argument("--cerebras-api-key", default=default_cerebras_api_key,
                        help=f"Cerebras API key (env: {ENV_PREFIX}CEREBRAS_API_KEY or CEREBRAS_API_KEY)")
     parser.add_argument("--openrouter-api-key", default=default_openrouter_api_key,
@@ -907,6 +1266,8 @@ async def main():
         print(f"Post-treatment: Enabled (provider: {args.post_provider}, model: {args.post_model})")
         prompt_preview = post_prompt[:50] + "..." if len(post_prompt) > 50 else post_prompt
         print(f"Post-treatment prompt: {prompt_preview}")
+        if args.post_correct:
+            print("Post-correct mode: Enabled (waits for full correction, then edits in-place)")
     hotkeys_display = ', '.join([k.strip().upper() for k in args.hotkey.split(',')])
     print(f"Using key(s) '{hotkeys_display}': hold for push-to-talk, double-tap to toggle (press same key again to stop).")
     print(f"Listening on {keyboard.name}.")
@@ -926,7 +1287,8 @@ async def main():
         post_provider=args.post_provider,
         cerebras_api_key=args.cerebras_api_key,
         openrouter_api_key=args.openrouter_api_key,
-        output_mode=args.output_mode
+        output_mode=args.output_mode,
+        post_correct=args.post_correct
     )
     
     # Start the output processor task that runs for the entire program duration
@@ -936,6 +1298,9 @@ async def main():
         await keyboard_listener(keyboard, hotkey_codes, transcriber, args.double_tap_window)
     except KeyboardInterrupt:
         print("\nStopping program.")
+    except asyncio.CancelledError:
+        # Cancelled by asyncio runner (e.g., Ctrl+C) — ignore
+        pass
     finally:
         # Clean up output processor task
         if transcriber.output_processor_task:
@@ -944,6 +1309,11 @@ async def main():
                 await transcriber.output_processor_task
             except asyncio.CancelledError:
                 pass
+        # Ensure keyboard device is closed
+        try:
+            keyboard.close()
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     try:

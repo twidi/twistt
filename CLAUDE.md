@@ -47,7 +47,7 @@ Configuration priority (highest to lowest):
 3. Local `.env` file in script directory
 4. Environment variables
 
-Key environment variables use `TWISTT_` prefix (e.g., `TWISTT_OPENAI_API_KEY`, `TWISTT_HOTKEY` or `TWISTT_HOTKEYS`, `TWISTT_POST_TREATMENT_PROMPT`, `TWISTT_POST_TREATMENT_PROVIDER`, `TWISTT_OUTPUT_MODE`).
+Key environment variables use `TWISTT_` prefix (e.g., `TWISTT_OPENAI_API_KEY`, `TWISTT_HOTKEY` or `TWISTT_HOTKEYS`, `TWISTT_POST_TREATMENT_PROMPT`, `TWISTT_POST_TREATMENT_PROVIDER`, `TWISTT_OUTPUT_MODE`, `TWISTT_POST_CORRECT`).
 
 Multiple hotkeys can be specified by separating them with commas (e.g., `TWISTT_HOTKEY=F8,F9,F10` or `--hotkey F8,F9,F10`).
 
@@ -60,6 +60,8 @@ Provider-specific API keys:
 The application supports two output modes (`--output-mode` or `TWISTT_OUTPUT_MODE`):
 - **batch** (default): Processes and pastes text incrementally as segments are detected by the API. Each segment maintains context from previous segments when using post-treatment.
 - **full**: Accumulates all text while the key is held and processes/pastes only when released. Post-treatment runs without context between sessions.
+
+Additionally, a post-correction mode (`--post-correct` or `TWISTT_POST_CORRECT`) pastes raw transcription immediately and, once the post-treatment result is fully available, edits the pasted text in-place using only arrow keys and backspace to minimize disruption.
 
 ## Testing
 
