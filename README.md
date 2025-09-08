@@ -103,7 +103,8 @@ TWISTT_OPENAI_API_KEY=sk-...
 OPENAI_API_KEY=sk-...
 
 # Optional settings
-TWISTT_HOTKEY=F9
+TWISTT_HOTKEY=F9           # Single hotkey
+TWISTT_HOTKEYS=F8,F9,F10   # Multiple hotkeys (comma-separated)
 TWISTT_MODEL=gpt-4o-transcribe
 TWISTT_LANGUAGE=en  # Leave empty or omit for auto-detect
 TWISTT_GAIN=1.0
@@ -128,7 +129,7 @@ TWISTT_OUTPUT_MODE=batch  # batch (default) or full
 
 | Option | Environment Variable | Default | Description |
 |--------|---------------------|---------|-------------|
-| `--hotkey` | `TWISTT_HOTKEY` | F9 | Push-to-talk key (F1-F12) |
+| `--hotkey` | `TWISTT_HOTKEY` or `TWISTT_HOTKEYS` | F9 | Push-to-talk key(s) (F1-F12), comma-separated for multiple |
 | `--double-tap-window` | `TWISTT_DOUBLE_TAP_WINDOW` | 0.5 | Time window in seconds for double-tap detection |
 | `--model` | `TWISTT_MODEL` | gpt-4o-transcribe | Transcription model |
 | `--language` | `TWISTT_LANGUAGE` | Auto-detect | Transcription language (ISO 639-1) |
@@ -153,6 +154,9 @@ TWISTT_OUTPUT_MODE=batch  # batch (default) or full
 
 # Use F5 key with English transcription
 ./twistt.py --hotkey F5 --language en
+
+# Use multiple hotkeys
+./twistt.py --hotkey F8,F9,F10
 
 # Force French language
 ./twistt.py --language fr
@@ -186,7 +190,7 @@ Twistt supports two recording modes:
 #### Push-to-Talk Mode (Hold)
 1. **Start the script**: Run `./twistt.py`
 2. **Position cursor**: Click where you want text to appear
-3. **Hold to record**: Press and hold your configured hotkey (default: F9)
+3. **Hold to record**: Press and hold one of your configured hotkeys (default: F9)
 4. **Speak**: Talk while holding the key
 5. **Release to transcribe**: Let go of the key
 6. **Auto-paste**: Text is automatically pasted at cursor position
@@ -194,9 +198,9 @@ Twistt supports two recording modes:
 #### Toggle Mode (Double-Tap)
 1. **Start the script**: Run `./twistt.py`
 2. **Position cursor**: Click where you want text to appear
-3. **Double-tap to start**: Press-release-press the hotkey quickly (within 0.5s)
+3. **Double-tap to start**: Press-release-press the same hotkey quickly (within 0.5s)
 4. **Speak freely**: Recording continues without holding any key
-5. **Press to stop**: Press the hotkey once to stop recording
+5. **Press to stop**: Press the same hotkey once to stop recording (only the hotkey that started toggle mode can stop it)
 6. **Auto-paste**: Text is automatically pasted
 
 The transcription appears in the terminal when you pause or stop speaking.

@@ -47,7 +47,9 @@ Configuration priority (highest to lowest):
 3. Local `.env` file in script directory
 4. Environment variables
 
-Key environment variables use `TWISTT_` prefix (e.g., `TWISTT_OPENAI_API_KEY`, `TWISTT_HOTKEY`, `TWISTT_POST_TREATMENT_PROMPT`, `TWISTT_POST_TREATMENT_PROVIDER`, `TWISTT_OUTPUT_MODE`).
+Key environment variables use `TWISTT_` prefix (e.g., `TWISTT_OPENAI_API_KEY`, `TWISTT_HOTKEY` or `TWISTT_HOTKEYS`, `TWISTT_POST_TREATMENT_PROMPT`, `TWISTT_POST_TREATMENT_PROVIDER`, `TWISTT_OUTPUT_MODE`).
+
+Multiple hotkeys can be specified by separating them with commas (e.g., `TWISTT_HOTKEY=F8,F9,F10` or `--hotkey F8,F9,F10`).
 
 Provider-specific API keys:
 - `TWISTT_CEREBRAS_API_KEY` or `CEREBRAS_API_KEY` for Cerebras
@@ -62,10 +64,11 @@ The application supports two output modes (`--output-mode` or `TWISTT_OUTPUT_MOD
 ## Testing
 
 No formal test suite exists. Testing is manual:
-1. Run the script with various hotkeys
+1. Run the script with various hotkeys (including multiple hotkeys comma-separated)
 2. Test transcription in different languages
 3. Verify paste functionality works in different applications
 4. Test post-treatment with different prompts, models, and providers
 5. Verify post-treatment maintains transcription order
 6. Test provider switching (OpenAI, Cerebras, OpenRouter) for post-treatment
 7. Test output modes (batch vs full) with and without post-treatment
+8. Test toggle mode activation/deactivation with same hotkey when multiple hotkeys are configured
