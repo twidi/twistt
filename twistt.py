@@ -33,7 +33,8 @@ import evdev
 from evdev import ecodes
 from dotenv import load_dotenv
 from platformdirs import user_config_dir
-from pydotool import init as pydotool_init, key_combination, KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V
+from pydotool import init as pydotool_init, key_combination, KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V, KEY_BACKSPACE, DOWN, \
+    UP, key_seq, KEY_LEFT, KEY_RIGHT
 
 # Load .env from script's directory first
 script_dir = Path(__file__).parent
@@ -525,13 +526,7 @@ class AudioTranscriber:
     def output_transcription(self, text):
         """Render transcription output by copying to clipboard and pasting."""
         try:
-            pyperclip.copy(text)
-            if self.shift_pressed:
-                # Ctrl+Shift+V
-                key_combination([KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V])
-            else:
-                # Ctrl+V
-                key_combination([KEY_LEFTCTRL, KEY_V])
+            KeyboardAction.copy_paste(text, self.shift_pressed)
         except Exception as e:
             print(f"Error outputting transcription: {e}", file=sys.stderr)
             print("Text is in clipboard, use Ctrl+V to paste.", file=sys.stderr)
@@ -577,6 +572,40 @@ class AudioTranscriber:
         """
         if self.recording:
             self.recording = False
+
+
+class KeyboardAction:
+    CTRL_V = [KEY_LEFTCTRL, KEY_V]
+    CTRL_SHIFT_V = [KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V]
+    BACKSPACE = [(KEY_BACKSPACE, DOWN), (KEY_BACKSPACE, UP)]
+    LEFT = [(KEY_LEFT, DOWN), (KEY_LEFT, UP)]
+    RIGHT = [(KEY_RIGHT, DOWN), (KEY_RIGHT, UP)]
+
+    @classmethod
+    def copy(cls, text):
+        pyperclip.copy(text)
+
+    @classmethod
+    def paste(cls, use_shift):
+        key_combination(cls.CTRL_SHIFT_V if use_shift else cls.CTRL_V)
+
+    @classmethod
+    def copy_paste(cls, text, use_shift):
+        KeyboardAction.copy(text)
+        KeyboardAction.paste(use_shift)
+
+    @classmethod
+    def delete_chars(cls, count):
+        key_seq(cls.BACKSPACE * count)
+
+    @classmethod
+    def go_left(cls, count):
+        key_seq(cls.LEFT * count)
+
+    @classmethod
+    def go_right(cls, count):
+        key_seq(cls.RIGHT * count)
+
 
 def parse_hotkeys_evdev(hotkeys_str):
     hotkeys = [k.strip().lower() for k in hotkeys_str.split(',')]
