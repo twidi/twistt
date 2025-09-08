@@ -341,6 +341,10 @@ Leave the language parameter empty to use auto-detection.
 - Transcriptions are only kept in memory during the session
 - Transcribed text remains in clipboard after paste (allows manual paste if needed)
 
+## Ideas
+
+We maintain a curated list of potential enhancements in IDEAS.md. If you have suggestions or want to pick something up, check it out and open an issue or PR.
+
 ## Author
 
 Stephane "Twidi" Angel
