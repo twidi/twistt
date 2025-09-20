@@ -26,6 +26,7 @@ import difflib
 import json
 import os
 import sys
+import time
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from enum import Enum
@@ -439,50 +440,100 @@ class Bus:
         self.audio_chunks = janus.Queue()
         self.post_commands: asyncio.Queue = asyncio.Queue()
         self.buffer_commands: asyncio.Queue = asyncio.Queue()
+        self.keyboard_commands: asyncio.Queue = asyncio.Queue()
         self.shift_pressed = asyncio.Event()
         self.recording = asyncio.Event()
         self.speech_active = asyncio.Event()
         self.stop = asyncio.Event()
 
 
-class KeyboardAction:
-    CTRL_V = [KEY_LEFTCTRL, KEY_V]
-    CTRL_SHIFT_V = [KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V]
-    BACKSPACE = [(KEY_BACKSPACE, DOWN), (KEY_BACKSPACE, UP)]
-    DELETE = [(KEY_DELETE, DOWN), (KEY_DELETE, UP)]
-    LEFT = [(KEY_LEFT, DOWN), (KEY_LEFT, UP)]
-    RIGHT = [(KEY_RIGHT, DOWN), (KEY_RIGHT, UP)]
+class KeyboardTask:
+    class Combo(Enum):
+        CTRL_V = (KEY_LEFTCTRL, KEY_V)
+        CTRL_SHIFT_V = (KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V)
 
-    DELAY_BETWEEN_KEYS_MS = KEY_DEFAULT_DELAY
+    class Stroke(Enum):
+        BACKSPACE = ((KEY_BACKSPACE, DOWN), (KEY_BACKSPACE, UP))
+        DELETE = ((KEY_DELETE, DOWN), (KEY_DELETE, UP))
+        LEFT = ((KEY_LEFT, DOWN), (KEY_LEFT, UP))
+        RIGHT = ((KEY_RIGHT, DOWN), (KEY_RIGHT, UP))
 
-    @classmethod
-    def copy(cls, text: str):
-        pyperclip.copy(text)
+    class Commands:
+        class Copy(NamedTuple):
+            text: str
 
-    @classmethod
-    def paste(cls, use_shift: bool):
-        key_combination(cls.CTRL_SHIFT_V if use_shift else cls.CTRL_V)
+        class Paste(NamedTuple):
+            use_shift: bool
 
-    @classmethod
-    def copy_paste(cls, text: str, use_shift: bool):
-        cls.copy(text)
-        cls.paste(use_shift)
+        class CopyPaste(NamedTuple):
+            text: str
+            use_shift: bool
 
-    @classmethod
-    def delete_chars_backward(cls, count: int):
-        key_seq(cls.BACKSPACE * count, next_delay_ms=cls.DELAY_BETWEEN_KEYS_MS)
+        class DeleteCharsBackward(NamedTuple):
+            count: int
 
-    @classmethod
-    def delete_chars_forward(cls, count: int):
-        key_seq(cls.DELETE * count, next_delay_ms=cls.DELAY_BETWEEN_KEYS_MS)
+        class DeleteCharsForward(NamedTuple):
+            count: int
 
-    @classmethod
-    def go_left(cls, count: int):
-        key_seq(cls.LEFT * count, next_delay_ms=cls.DELAY_BETWEEN_KEYS_MS)
+        class GoLeft(NamedTuple):
+            count: int
 
-    @classmethod
-    def go_right(cls, count: int):
-        key_seq(cls.RIGHT * count, next_delay_ms=cls.DELAY_BETWEEN_KEYS_MS)
+        class GoRight(NamedTuple):
+            count: int
+
+        class Shutdown(NamedTuple):
+            pass
+
+    def __init__(self, bus: Bus):
+        self.bus = bus
+        self._delay_between_keys_ms = KEY_DEFAULT_DELAY
+        self._delay_between_actions_s = KEY_DEFAULT_DELAY / 1000
+        self._last_action_time = 0.0
+
+    async def run(self):
+        try:
+            while not self.bus.stop.is_set():
+                cmd = await self.bus.keyboard_commands.get()
+                if isinstance(cmd, self.Commands.Shutdown):
+                    break
+                await self._ensure_min_delay_between_actions()
+                self._execute(cmd)
+                self._last_action_time = time.perf_counter()
+        except asyncio.CancelledError:
+            pass
+
+    async def _ensure_min_delay_between_actions(self):
+        if self._last_action_time == 0.0:
+            return
+        elapsed = time.perf_counter() - self._last_action_time
+        remaining = self._delay_between_actions_s - elapsed
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+
+    def _execute(self, cmd):
+        if isinstance(cmd, self.Commands.Copy):
+            pyperclip.copy(cmd.text)
+        elif isinstance(cmd, self.Commands.Paste):
+            combo = self.Combo.CTRL_SHIFT_V.value if cmd.use_shift else self.Combo.CTRL_V.value
+            key_combination(list(combo))
+        elif isinstance(cmd, self.Commands.CopyPaste):
+            pyperclip.copy(cmd.text)
+            combo = self.Combo.CTRL_SHIFT_V.value if cmd.use_shift else self.Combo.CTRL_V.value
+            key_combination(list(combo))
+        elif isinstance(cmd, self.Commands.DeleteCharsBackward):
+            sequence = self.Stroke.BACKSPACE.value * cmd.count
+            key_seq(list(sequence), next_delay_ms=self._delay_between_keys_ms)
+        elif isinstance(cmd, self.Commands.DeleteCharsForward):
+            sequence = self.Stroke.DELETE.value * cmd.count
+            key_seq(list(sequence), next_delay_ms=self._delay_between_keys_ms)
+        elif isinstance(cmd, self.Commands.GoLeft):
+            sequence = self.Stroke.LEFT.value * cmd.count
+            key_seq(list(sequence), next_delay_ms=self._delay_between_keys_ms)
+        elif isinstance(cmd, self.Commands.GoRight):
+            sequence = self.Stroke.RIGHT.value * cmd.count
+            key_seq(list(sequence), next_delay_ms=self._delay_between_keys_ms)
+        else:  # pragma: no cover - defensive
+            raise ValueError(f"Unknown keyboard command: {cmd}")
 
 
 class HotKeyTask:
@@ -1135,9 +1186,14 @@ class BufferTask:
         def __init__(self, bus: Bus):
             self.bus = bus
 
-        def output_transcription(self, text: str):
+        async def output_transcription(self, text: str):
             try:
-                KeyboardAction.copy_paste(text, self.bus.shift_pressed.is_set())
+                await self.bus.keyboard_commands.put(
+                    KeyboardTask.Commands.CopyPaste(
+                        text=text,
+                        use_shift=self.bus.shift_pressed.is_set(),
+                    )
+                )
             except Exception as exc:  # pragma: no cover - defensive
                 print(f"Error outputting transcription: {exc}", file=sys.stderr)
                 print("Text is in clipboard, use Ctrl+V to paste.", file=sys.stderr)
@@ -1147,6 +1203,7 @@ class BufferTask:
 
         def __init__(self, output_adapter):
             self.output_adapter = output_adapter
+            self.bus = output_adapter.bus
             self.text = ""
             self.cursor = 0
             self.segments = {}
@@ -1156,13 +1213,16 @@ class BufferTask:
             self.session_start_index = 0
             self.session_segment_ids = []
 
-        def _move_cursor_to(self, target_index: int):
+        async def _enqueue(self, command):
+            await self.bus.keyboard_commands.put(command)
+
+        async def _move_cursor_to(self, target_index: int):
             target_index = max(0, min(target_index, len(self.text)))
             delta = target_index - self.cursor
             if delta > 0:
-                KeyboardAction.go_right(delta)
+                await self._enqueue(KeyboardTask.Commands.GoRight(delta))
             elif delta < 0:
-                KeyboardAction.go_left(-delta)
+                await self._enqueue(KeyboardTask.Commands.GoLeft(-delta))
             self.cursor = target_index
 
         def start_session_if_needed(self):
@@ -1187,40 +1247,40 @@ class BufferTask:
                 i += 1
             return i
 
-        def _replace_range(self, abs_start: int, abs_end: int, replacement: str):
+        async def _replace_range(self, abs_start: int, abs_end: int, replacement: str):
             delete_len = max(0, abs_end - abs_start)
             move_cost_to_start = abs(self.cursor - abs_start)
             move_cost_to_end = abs(self.cursor - abs_end)
 
             if delete_len == 0:
-                self._move_cursor_to(abs_start)
+                await self._move_cursor_to(abs_start)
                 if replacement:
-                    self.output_adapter.output_transcription(replacement)
+                    await self.output_adapter.output_transcription(replacement)
                     self.text = self.text[:abs_start] + replacement + self.text[abs_start:]
                     self.cursor = abs_start + len(replacement)
                 return
 
             if move_cost_to_end <= move_cost_to_start:
-                self._move_cursor_to(abs_end)
-                KeyboardAction.delete_chars_backward(delete_len)
+                await self._move_cursor_to(abs_end)
+                await self._enqueue(KeyboardTask.Commands.DeleteCharsBackward(delete_len))
                 self.text = self.text[:abs_start] + self.text[abs_end:]
                 self.cursor = abs_start
             else:
-                self._move_cursor_to(abs_start)
-                KeyboardAction.delete_chars_forward(delete_len)
+                await self._move_cursor_to(abs_start)
+                await self._enqueue(KeyboardTask.Commands.DeleteCharsForward(delete_len))
                 self.text = self.text[:abs_start] + self.text[abs_end:]
                 self.cursor = abs_start
 
             if replacement:
-                self.output_adapter.output_transcription(replacement)
+                await self.output_adapter.output_transcription(replacement)
                 self.text = self.text[:self.cursor] + replacement + self.text[self.cursor:]
                 self.cursor += len(replacement)
 
         async def insert_segment(self, seq_num: int, text: str):
             async with self.lock:
-                self._move_cursor_to(len(self.text))
+                await self._move_cursor_to(len(self.text))
                 with suppress(Exception):
-                    self.output_adapter.output_transcription(text)
+                    await self.output_adapter.output_transcription(text)
                 start = len(self.text)
                 self.text += text
                 self.cursor = len(self.text)
@@ -1240,7 +1300,7 @@ class BufferTask:
                     return
                 old = seg["text_current"]
                 if old == corrected_text:
-                    self._move_cursor_to(len(self.text))
+                    await self._move_cursor_to(len(self.text))
                     return
                 try:
                     sm = difflib.SequenceMatcher(None, old, corrected_text)
@@ -1264,17 +1324,17 @@ class BufferTask:
 
                 if sm is None or ratio < (1.0 - replace_threshold):
                     abs_end = start_base + len(old)
-                    self._move_cursor_to(abs_end)
-                    KeyboardAction.delete_chars_backward(len(old))
+                    await self._move_cursor_to(abs_end)
+                    await self._enqueue(KeyboardTask.Commands.DeleteCharsBackward(len(old)))
                     self.text = self.text[:start_base] + self.text[abs_end:]
                     self.cursor = start_base
                     if corrected_text:
-                        self.output_adapter.output_transcription(corrected_text)
+                        await self.output_adapter.output_transcription(corrected_text)
                         self.text = self.text[:self.cursor] + corrected_text + self.text[self.cursor:]
                         self.cursor += len(corrected_text)
                     seg["text_current"] = corrected_text
                     shift_following(len(corrected_text) - len(old))
-                    self._move_cursor_to(len(self.text))
+                    await self._move_cursor_to(len(self.text))
                     return
 
                 lcp = self._common_prefix_len(old, corrected_text)
@@ -1288,10 +1348,10 @@ class BufferTask:
                 )
                 abs_start = start_base + lcp
                 abs_end = abs_start + old_mid_len
-                self._replace_range(abs_start, abs_end, new_mid)
+                await self._replace_range(abs_start, abs_end, new_mid)
                 seg["text_current"] = corrected_text
                 shift_following(len(corrected_text) - len(old))
-                self._move_cursor_to(len(self.text))
+                await self._move_cursor_to(len(self.text))
 
         async def apply_correction_session(self, corrected_text: str, replace_threshold: float = 0.7):
             async with self.lock:
@@ -1302,7 +1362,7 @@ class BufferTask:
                 if old == corrected_text:
                     self.session_active = False
                     self.session_segment_ids = []
-                    self._move_cursor_to(len(self.text))
+                    await self._move_cursor_to(len(self.text))
                     return
                 try:
                     sm = difflib.SequenceMatcher(None, old, corrected_text)
@@ -1320,10 +1380,10 @@ class BufferTask:
                 tiny_unchanged = unchanged < max(2, int(0.2 * min(len(old), len(corrected_text))))
                 if sm is None or ratio < (1.0 - replace_threshold) or tiny_unchanged:
                     abs_end = len(self.text)
-                    self._move_cursor_to(abs_end)
-                    KeyboardAction.delete_chars_backward(len(old))
+                    await self._move_cursor_to(abs_end)
+                    await self._enqueue(KeyboardTask.Commands.DeleteCharsBackward(len(old)))
                     with suppress(Exception):
-                        self.output_adapter.output_transcription(corrected_text)
+                        await self.output_adapter.output_transcription(corrected_text)
                     self.text = self.text[:start_base] + corrected_text
                     self.cursor = len(self.text)
                     running = start_base
@@ -1347,10 +1407,10 @@ class BufferTask:
                 )
                 abs_start = start_base + lcp
                 abs_end = abs_start + old_mid_len
-                self._replace_range(abs_start, abs_end, new_mid)
+                await self._replace_range(abs_start, abs_end, new_mid)
                 self.session_active = False
                 self.session_segment_ids = []
-                self._move_cursor_to(len(self.text))
+                await self._move_cursor_to(len(self.text))
 
     def __init__(self, bus: Bus, config: Config.Buffer):
         self.bus = bus
@@ -1388,11 +1448,13 @@ async def main_async():
 
         hotkey_task = HotKeyTask(bus, app_config.hotkey)
         capture_task = CaptureTask(bus, app_config.capture)
+        keyboard_task = KeyboardTask(bus)
         buffer_task = BufferTask(bus, app_config.buffer)
         transcription_task = TranscriptionTask(bus, app_config.transcription, app_config.post)
 
         tasks.append(loop.create_task(hotkey_task.run()))
         tasks.append(loop.create_task(capture_task.run()))
+        tasks.append(loop.create_task(keyboard_task.run()))
         tasks.append(loop.create_task(buffer_task.run()))
         tasks.append(loop.create_task(transcription_task.run()))
 
@@ -1410,6 +1472,7 @@ async def main_async():
         if app_config.post.enabled:
             await bus.post_commands.put(PostTreatmentTask.Commands.Shutdown())
         await bus.buffer_commands.put(BufferTask.Commands.Shutdown())
+        await bus.keyboard_commands.put(KeyboardTask.Commands.Shutdown())
 
         for task in tasks:
             task.cancel()
