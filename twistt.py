@@ -1293,22 +1293,52 @@ class BufferTask:
                 self.text = self.text[:self.cursor] + replacement + self.text[self.cursor:]
                 self.cursor += len(replacement)
 
-        async def insert_segment(self, seq_num: int, text: str):
+        async def insert_segment(self, seq_num: int, text: str, in_session: bool):
             async with self.lock:
-                await self._move_cursor_to(len(self.text))
+                insert_len = len(text)
+                insert_index = 0
+                for existing_seq in self.segment_order:
+                    if existing_seq > seq_num:
+                        break
+                    insert_index += 1
+
+                if insert_index == len(self.segment_order):
+                    insert_pos = len(self.text)
+                else:
+                    next_seq = self.segment_order[insert_index]
+                    insert_pos = self.segments[next_seq]["start"]
+
+                await self._move_cursor_to(insert_pos)
                 with suppress(Exception):
                     await self.output_adapter.output_transcription(text)
-                start = len(self.text)
-                self.text += text
-                self.cursor = len(self.text)
+
+                self.text = self.text[:insert_pos] + text + self.text[insert_pos:]
+                self.cursor = insert_pos + insert_len
+
                 self.segments[seq_num] = {
-                    "start": start,
+                    "start": insert_pos,
                     "text_current": text,
                     "text_original": text,
                 }
-                self.segment_order.append(seq_num)
+                self.segment_order.insert(insert_index, seq_num)
+
+                if insert_len:
+                    for sid in self.segment_order[insert_index + 1:]:
+                        self.segments[sid]["start"] += insert_len
+
                 if self.session_active:
-                    self.session_segment_ids.append(seq_num)
+                    if in_session and seq_num not in self.session_segment_ids:
+                        self.session_segment_ids.append(seq_num)
+                    if self.session_segment_ids:
+                        session_ids = set(self.session_segment_ids)
+                        self.session_segment_ids = [
+                            sid for sid in self.segment_order if sid in session_ids
+                        ]
+                        self.session_start_index = self.segments[
+                            self.session_segment_ids[0]
+                        ]["start"]
+
+                await self._move_cursor_to(len(self.text))
 
         async def apply_correction(self, seq_num: int, corrected_text: str, replace_threshold: float = 0.7):
             async with self.lock:
@@ -1446,7 +1476,7 @@ class BufferTask:
                     case self.Commands.InsertSegment(in_session=in_session, seq_num=seq_num, text=text):
                         if in_session:
                             self.manager.start_session_if_needed()
-                        await self.manager.insert_segment(seq_num, text)
+                        await self.manager.insert_segment(seq_num, text, in_session)
 
                     case self.Commands.ApplyCorrection(seq_num=seq_num, corrected_text=corrected_text):
                         await self.manager.apply_correction(seq_num, corrected_text)
