@@ -11,59 +11,873 @@
 #     "platformdirs",
 #     "python-ydotool",
 #     "openai",
+#     "janus",
 # ]
 # ///
 
-import os
-import sys
-import json
+"""Async reworked version of Twistt with pipeline responsibilities split into tasks."""
+
+from __future__ import annotations
+
+import argparse
 import asyncio
 import base64
-import argparse
+import difflib
+import json
+import os
+import sys
+from collections.abc import AsyncIterator
+from contextlib import suppress
+from enum import Enum
 from datetime import datetime
 from pathlib import Path
-import difflib
+from typing import NamedTuple, Optional
 
-from openai import AsyncOpenAI
-
+import janus
 import numpy as np
 import sounddevice as sd
 import websockets
+from dotenv import load_dotenv
+from openai import AsyncOpenAI
+from platformdirs import user_config_dir
+
 import pyperclipfix as pyperclip
 import evdev
-from evdev import ecodes
-from dotenv import load_dotenv
-from platformdirs import user_config_dir
-from pydotool import KEY_DEFAULT_DELAY, KEY_DELETE, init as pydotool_init, key_combination, KEY_LEFTCTRL, KEY_LEFTSHIFT, \
-    KEY_V, \
-    KEY_BACKSPACE, DOWN, \
-    UP, key_seq, KEY_LEFT, KEY_RIGHT
+from evdev import InputDevice, categorize, ecodes
+from pydotool import (
+    KEY_BACKSPACE,
+    KEY_DEFAULT_DELAY,
+    KEY_DELETE,
+    KEY_LEFT,
+    KEY_LEFTCTRL,
+    KEY_LEFTSHIFT,
+    KEY_RIGHT,
+    KEY_V,
+    DOWN,
+    UP,
+    init as pydotool_init,
+    key_combination,
+    key_seq,
+)
 
-# Load .env from script's directory first
-script_dir = Path(__file__).parent
-env_path = script_dir / ".env"
-if env_path.exists():
-    load_dotenv(dotenv_path=env_path)
+F_KEY_CODES = {
+    "f1": ecodes.KEY_F1,
+    "f2": ecodes.KEY_F2,
+    "f3": ecodes.KEY_F3,
+    "f4": ecodes.KEY_F4,
+    "f5": ecodes.KEY_F5,
+    "f6": ecodes.KEY_F6,
+    "f7": ecodes.KEY_F7,
+    "f8": ecodes.KEY_F8,
+    "f9": ecodes.KEY_F9,
+    "f10": ecodes.KEY_F10,
+    "f11": ecodes.KEY_F11,
+    "f12": ecodes.KEY_F12,
+}
 
-# Then load and override with user config file
-config_dir = Path(user_config_dir("twistt", ensure_exists=False))
-user_config_path = config_dir / "config.env"
-if user_config_path.exists():
-    load_dotenv(dotenv_path=user_config_path, override=True)
 
-ENV_PREFIX = "TWISTT_"
-RT_URL = "wss://api.openai.com/v1/realtime?intent=transcription"
-SR = 24_000
-BLOCK_MS = 40
-BLOCK_SIZE = int(SR * BLOCK_MS / 1000)
-STREAMING_TOKEN_BUFFER_SIZE = 5  # Number of tokens to buffer before outputting during streaming
+class OutputMode(Enum):
+    BATCH = "batch"
+    FULL = "full"
 
-EV_SPEECH_STARTED = "input_audio_buffer.speech_started"
-EV_DELTA = "conversation.item.input_audio_transcription.delta"
-EV_DONE = "conversation.item.input_audio_transcription.completed"
 
-# Post-treatment templates
-POST_TREATMENT_SYSTEM_TEMPLATE = """You are a real-time transcription correction assistant.
+class Config:
+    class HotKey(NamedTuple):
+        device: InputDevice
+        hotkey_codes: list[int]
+        double_tap_window: float
+
+    class Capture(NamedTuple):
+        gain: float
+
+    class Transcription(NamedTuple):
+        api_key: str
+        model: TranscriptionTask.Model
+        language: Optional[str]
+        output_mode: OutputMode
+
+    class PostTreatment(NamedTuple):
+        enabled: bool
+        prompt: Optional[str]
+        provider: PostTreatmentTask.Provider
+        model: str
+        openai_api_key: Optional[str]
+        cerebras_api_key: Optional[str]
+        openrouter_api_key: Optional[str]
+        post_correct: bool
+        output_mode: OutputMode
+
+    class Buffer(NamedTuple):
+        post_correct: bool
+        output_mode: OutputMode
+
+    class App(NamedTuple):
+        hotkey: "Config.HotKey"
+        capture: "Config.Capture"
+        transcription: "Config.Transcription"
+        post: "Config.PostTreatment"
+        buffer: "Config.Buffer"
+
+
+class CommandLineParser:
+    ENV_PREFIX = "TWISTT_"
+
+    @staticmethod
+    def parse() -> Optional[Config.App]:
+        CommandLineParser._load_env_files()
+
+        epilog = """Configuration files:
+  The script loads configuration from two .env files (if they exist):
+  1. .env file in the script's directory
+  2. ~/.config/twistt/config.env (overrides values from #1)
+
+  Environment variables (in order of priority):
+  - Command-line arguments (highest priority)
+  - User config file (~/.config/twistt/config.env)
+  - Local .env file (script directory)
+  - System environment variables (lowest priority)
+
+  Each option can be set via environment variable using the TWISTT_ prefix.
+  API key can also use OPENAI_API_KEY (without prefix).
+  YDOTOOL_SOCKET can be set to specify the ydotool socket path.
+  """
+
+        parser = argparse.ArgumentParser(
+            description="Push to talk transcription via OpenAI",
+            epilog=epilog,
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+        )
+
+        prefix = CommandLineParser.ENV_PREFIX
+
+        default_hotkeys = os.getenv(f"{prefix}HOTKEY", os.getenv(f"{prefix}HOTKEYS", "F9"))
+        default_model = os.getenv(f"{prefix}MODEL", TranscriptionTask.Model.GPT_4O_TRANSCRIBE.value)
+        default_language = os.getenv(f"{prefix}LANGUAGE")
+        default_gain = float(os.getenv(f"{prefix}GAIN", "1.0"))
+        default_api_key = os.getenv(f"{prefix}OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+        ydotool_socket = os.getenv(f"{prefix}YDOTOOL_SOCKET") or os.getenv("YDOTOOL_SOCKET")
+        default_post_prompt = os.getenv(f"{prefix}POST_TREATMENT_PROMPT", "")
+        default_post_prompt_file = os.getenv(f"{prefix}POST_TREATMENT_PROMPT_FILE", "")
+        default_post_model = os.getenv(f"{prefix}POST_TREATMENT_MODEL", "gpt-4o-mini")
+        default_post_provider = os.getenv(f"{prefix}POST_TREATMENT_PROVIDER", PostTreatmentTask.Provider.OPENAI.value)
+        default_post_correct = CommandLineParser._env_truthy(os.getenv(f"{prefix}POST_CORRECT"))
+        default_cerebras_api_key = os.getenv(f"{prefix}CEREBRAS_API_KEY") or os.getenv("CEREBRAS_API_KEY")
+        default_openrouter_api_key = os.getenv(f"{prefix}OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY")
+        default_output_mode = os.getenv(f"{prefix}OUTPUT_MODE", OutputMode.BATCH.value)
+        default_double_tap_window = float(os.getenv(f"{prefix}DOUBLE_TAP_WINDOW", "0.5"))
+
+        parser.add_argument(
+            "--hotkey",
+            "--hotkeys",
+            default=default_hotkeys,
+            help=f"Push-to-talk key(s), F1-F12, comma-separated for multiple (env: {prefix}HOTKEY or {prefix}HOTKEYS)",
+        )
+        parser.add_argument(
+            "--model",
+            default=default_model,
+            choices=[m.value for m in TranscriptionTask.Model],
+            help=f"OpenAI model to use for transcription (env: {prefix}MODEL)",
+        )
+        parser.add_argument(
+            "--language",
+            default=default_language,
+            help=f"Transcription language, leave empty for auto-detect (env: {prefix}LANGUAGE)",
+        )
+        parser.add_argument(
+            "--gain",
+            type=float,
+            default=default_gain,
+            help=f"Microphone amplification factor, 1.0=normal, 2.0=double (env: {prefix}GAIN)",
+        )
+        parser.add_argument(
+            "--api-key",
+            default=default_api_key,
+            help=f"OpenAI API key (env: {prefix}OPENAI_API_KEY or OPENAI_API_KEY)",
+        )
+        parser.add_argument(
+            "--ydotool-socket",
+            default=ydotool_socket,
+            help=f"Path to ydotool socket (env: {prefix}YDOTOOL_SOCKET or YDOTOOL_SOCKET)",
+        )
+        parser.add_argument(
+            "--post-prompt",
+            default=default_post_prompt,
+            help=f"Post-treatment prompt instructions (env: {prefix}POST_TREATMENT_PROMPT)",
+        )
+        parser.add_argument(
+            "--post-prompt-file",
+            default=default_post_prompt_file,
+            help=f"Path to file containing post-treatment prompt (env: {prefix}POST_TREATMENT_PROMPT_FILE)",
+        )
+        parser.add_argument(
+            "--post-model",
+            default=default_post_model,
+            help=f"Model for post-treatment (env: {prefix}POST_TREATMENT_MODEL)",
+        )
+        parser.add_argument(
+            "--post-provider",
+            default=default_post_provider,
+            choices=[p.value for p in PostTreatmentTask.Provider],
+            help=f"Provider for post-treatment (env: {prefix}POST_TREATMENT_PROVIDER)",
+        )
+        parser.add_argument(
+            "--post-correct",
+            action=argparse.BooleanOptionalAction,
+            default=default_post_correct,
+            help=f"Apply post-treatment by correcting already-pasted text in-place (env: {prefix}POST_CORRECT)",
+        )
+        parser.add_argument(
+            "--cerebras-api-key",
+            default=default_cerebras_api_key,
+            help=f"Cerebras API key (env: {prefix}CEREBRAS_API_KEY or CEREBRAS_API_KEY)",
+        )
+        parser.add_argument(
+            "--openrouter-api-key",
+            default=default_openrouter_api_key,
+            help=f"OpenRouter API key (env: {prefix}OPENROUTER_API_KEY or OPENROUTER_API_KEY)",
+        )
+        parser.add_argument(
+            "--output-mode",
+            default=default_output_mode,
+            choices=[mode.value for mode in OutputMode],
+            help=f"Output mode: batch (incremental) or full (complete on release) (env: {prefix}OUTPUT_MODE)",
+        )
+        parser.add_argument(
+            "--double-tap-window",
+            type=float,
+            default=default_double_tap_window,
+            help=f"Time window in seconds for double-tap detection (env: {prefix}DOUBLE_TAP_WINDOW)",
+        )
+
+        args = parser.parse_args()
+
+        if not args.api_key:
+            print("ERROR: OpenAI API key is not defined", file=sys.stderr)
+            print(
+                f"Please set OPENAI_API_KEY or {prefix}OPENAI_API_KEY environment variable (can optionally be in a .env file)",
+                file=sys.stderr,
+            )
+            print("Or pass it via --api-key argument", file=sys.stderr)
+            return None
+
+        post_prompt = None
+        post_treatment_enabled = False
+        if args.post_prompt_file and args.post_prompt_file.strip():
+            prompt_file_path = Path(args.post_prompt_file)
+            if not prompt_file_path.exists():
+                print(f"ERROR: Post-treatment prompt file not found: {args.post_prompt_file}", file=sys.stderr)
+                return None
+            try:
+                post_prompt = prompt_file_path.read_text(encoding="utf-8").strip()
+                if not post_prompt:
+                    print(f"ERROR: Post-treatment prompt file is empty: {args.post_prompt_file}", file=sys.stderr)
+                    return None
+                post_treatment_enabled = True
+            except Exception as exc:
+                print(f"ERROR: Unable to read post-treatment prompt file: {exc}", file=sys.stderr)
+                return None
+        elif args.post_prompt:
+            post_prompt = args.post_prompt
+            post_treatment_enabled = True
+
+        transcription_model = TranscriptionTask.Model(args.model)
+        output_mode = OutputMode(args.output_mode)
+        post_provider_enum = PostTreatmentTask.Provider(args.post_provider)
+
+        if post_treatment_enabled:
+            if post_provider_enum is PostTreatmentTask.Provider.CEREBRAS and not args.cerebras_api_key:
+                print("ERROR: Cerebras API key is not defined for post-treatment", file=sys.stderr)
+                print(f"Please set CEREBRAS_API_KEY or {prefix}CEREBRAS_API_KEY environment variable", file=sys.stderr)
+                print("Or pass it via --cerebras-api-key argument", file=sys.stderr)
+                return None
+            if post_provider_enum is PostTreatmentTask.Provider.OPENROUTER and not args.openrouter_api_key:
+                print("ERROR: OpenRouter API key is not defined for post-treatment", file=sys.stderr)
+                print(
+                    f"Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable",
+                    file=sys.stderr,
+                )
+                print("Or pass it via --openrouter-api-key argument", file=sys.stderr)
+                return None
+
+        try:
+            hotkey_codes = CommandLineParser._parse_hotkeys(args.hotkey)
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return None
+
+        try:
+            keyboard = CommandLineParser._find_keyboard()
+        except Exception as exc:
+            print(f"ERROR: Unable to find keyboard: {exc}", file=sys.stderr)
+            return None
+
+        if args.ydotool_socket:
+            os.environ["YDOTOOL_SOCKET"] = args.ydotool_socket
+        pydotool_init()
+
+        print(f"Transcription model: {transcription_model.value}")
+        if args.language:
+            print(f"Language: {args.language}")
+        else:
+            print("Language: Auto-detect")
+        if args.gain != 1.0:
+            print(f"Audio gain: {args.gain}x")
+        if post_treatment_enabled:
+            print(f"Post-treatment: Enabled (provider: {post_provider_enum.value}, model: {args.post_model})")
+            if post_prompt:
+                preview = post_prompt[:50] + "..." if len(post_prompt) > 50 else post_prompt
+                print(f"Post-treatment prompt: {preview}")
+            if args.post_correct:
+                print("Post-correct mode: Enabled (waits for correction, then edits in-place)")
+        hotkeys_display = ", ".join([k.strip().upper() for k in args.hotkey.split(",")])
+        print(
+            f"Using key(s) '{hotkeys_display}': hold for push-to-talk, double-tap to toggle (press same key again to stop)."
+        )
+        print(f"Listening on {keyboard.name}.")
+        print("Text will be pasted by simulating Ctrl+V (or Ctrl+Shift+V if Shift is pressed at any time).")
+        print("Press Ctrl+C to stop the script.")
+
+        return Config.App(
+            hotkey=Config.HotKey(
+                device=keyboard,
+                hotkey_codes=hotkey_codes,
+                double_tap_window=args.double_tap_window,
+            ),
+            capture=Config.Capture(gain=args.gain),
+            transcription=Config.Transcription(
+                api_key=args.api_key,
+                model=transcription_model,
+                language=args.language,
+                output_mode=output_mode,
+            ),
+            post=Config.PostTreatment(
+                enabled=post_treatment_enabled,
+                prompt=post_prompt,
+                provider=post_provider_enum,
+                model=args.post_model,
+                openai_api_key=args.api_key,
+                cerebras_api_key=args.cerebras_api_key,
+                openrouter_api_key=args.openrouter_api_key,
+                post_correct=args.post_correct and post_treatment_enabled,
+                output_mode=output_mode,
+            ),
+            buffer=Config.Buffer(
+                post_correct=args.post_correct and post_treatment_enabled,
+                output_mode=output_mode,
+            ),
+        )
+
+    @staticmethod
+    def _load_env_files() -> None:
+        script_dir = Path(__file__).parent
+        env_path = script_dir / ".env"
+        if env_path.exists():
+            load_dotenv(dotenv_path=env_path)
+        config_dir = Path(user_config_dir("twistt", ensure_exists=False))
+        user_config_path = config_dir / "config.env"
+        if user_config_path.exists():
+            load_dotenv(dotenv_path=user_config_path, override=True)
+
+    @staticmethod
+    def _env_truthy(val: Optional[str]) -> bool:
+        if not val:
+            return False
+        return val.strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _parse_hotkeys(hotkeys_str: str) -> list[int]:
+        hotkeys = [k.strip().lower() for k in hotkeys_str.split(",")]
+        codes = []
+        for hotkey in hotkeys:
+            if hotkey in F_KEY_CODES:
+                codes.append(F_KEY_CODES[hotkey])
+            else:
+                raise ValueError(f"Unsupported key: {hotkey}. Use F1-F12")
+        return codes
+
+    @staticmethod
+    def _find_keyboard() -> InputDevice:
+        devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
+        physical_keyboards = []
+        for device in devices:
+            capabilities = device.capabilities(verbose=False)
+            if ecodes.EV_KEY not in capabilities:
+                continue
+            keys = capabilities[ecodes.EV_KEY]
+            name_lower = device.name.lower()
+            if any(virt in name_lower for virt in ["virtual", "dummy", "uinput", "ydotool"]):
+                continue
+            if any(k in [ecodes.BTN_LEFT, ecodes.BTN_RIGHT, ecodes.BTN_MIDDLE] for k in keys):
+                continue
+            if ecodes.EV_REL in capabilities:
+                continue
+            if ecodes.KEY_A not in keys or ecodes.KEY_Z not in keys:
+                continue
+            if ecodes.KEY_SPACE not in keys and ecodes.KEY_ENTER not in keys:
+                continue
+            if ecodes.KEY_F1 not in keys or ecodes.KEY_F12 not in keys:
+                continue
+            physical_keyboards.append(device)
+        if len(physical_keyboards) == 1:
+            return physical_keyboards[0]
+        if physical_keyboards:
+            print("\nMultiple physical keyboards found:")
+            for idx, device in enumerate(physical_keyboards):
+                print(f"  {idx}: {device.path} - {device.name}")
+            selection = int(input("Select your keyboard: "))
+            return physical_keyboards[selection]
+        print("\nNo physical keyboard detected automatically.")
+        print("Available devices:")
+        for idx, device in enumerate(devices):
+            print(f"  {idx}: {device.path} - {device.name}")
+        selection = int(input("Select your keyboard manually: "))
+        return devices[selection]
+
+
+class Bus:
+    def __init__(self):
+        self.audio_chunks = janus.Queue()
+        self.post_commands: asyncio.Queue = asyncio.Queue()
+        self.buffer_commands: asyncio.Queue = asyncio.Queue()
+        self.shift_pressed = asyncio.Event()
+        self.recording = asyncio.Event()
+        self.speech_active = asyncio.Event()
+        self.stop = asyncio.Event()
+
+
+class KeyboardAction:
+    CTRL_V = [KEY_LEFTCTRL, KEY_V]
+    CTRL_SHIFT_V = [KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V]
+    BACKSPACE = [(KEY_BACKSPACE, DOWN), (KEY_BACKSPACE, UP)]
+    DELETE = [(KEY_DELETE, DOWN), (KEY_DELETE, UP)]
+    LEFT = [(KEY_LEFT, DOWN), (KEY_LEFT, UP)]
+    RIGHT = [(KEY_RIGHT, DOWN), (KEY_RIGHT, UP)]
+
+    DELAY_BETWEEN_KEYS_MS = KEY_DEFAULT_DELAY
+
+    @classmethod
+    def copy(cls, text: str):
+        pyperclip.copy(text)
+
+    @classmethod
+    def paste(cls, use_shift: bool):
+        key_combination(cls.CTRL_SHIFT_V if use_shift else cls.CTRL_V)
+
+    @classmethod
+    def copy_paste(cls, text: str, use_shift: bool):
+        cls.copy(text)
+        cls.paste(use_shift)
+
+    @classmethod
+    def delete_chars_backward(cls, count: int):
+        key_seq(cls.BACKSPACE * count, next_delay_ms=cls.DELAY_BETWEEN_KEYS_MS)
+
+    @classmethod
+    def delete_chars_forward(cls, count: int):
+        key_seq(cls.DELETE * count, next_delay_ms=cls.DELAY_BETWEEN_KEYS_MS)
+
+    @classmethod
+    def go_left(cls, count: int):
+        key_seq(cls.LEFT * count, next_delay_ms=cls.DELAY_BETWEEN_KEYS_MS)
+
+    @classmethod
+    def go_right(cls, count: int):
+        key_seq(cls.RIGHT * count, next_delay_ms=cls.DELAY_BETWEEN_KEYS_MS)
+
+
+class HotKeyTask:
+    SHIFT_CODES = {ecodes.KEY_LEFTSHIFT, ecodes.KEY_RIGHTSHIFT}
+    KEY_DOWN = evdev.KeyEvent.key_down
+    KEY_UP = evdev.KeyEvent.key_up
+
+    def __init__(self, bus: Bus, config: Config.HotKey):
+        self.bus = bus
+        self.config = config
+
+    async def run(self):
+        hotkey_pressed = False
+        last_release_time = {code: 0.0 for code in self.config.hotkey_codes}
+        is_toggle_mode = False
+        active_hotkey: Optional[int] = None
+        toggle_stop_time = 0.0
+        toggle_cooldown = 0.5
+        loop = asyncio.get_running_loop()
+
+        try:
+            async for event in self.config.device.async_read_loop():
+                if self.bus.stop.is_set():
+                    break
+                if event.type != ecodes.EV_KEY:
+                    continue
+                key_event = categorize(event)
+                current_time = loop.time()
+                scancode = key_event.scancode
+
+                if scancode in self.config.hotkey_codes:
+                    if active_hotkey is not None and scancode != active_hotkey:
+                        if key_event.keystate == self.KEY_UP:
+                            last_release_time[scancode] = current_time
+                        continue
+
+                    if key_event.keystate == self.KEY_DOWN and not hotkey_pressed:
+                        if current_time - toggle_stop_time < toggle_cooldown:
+                            continue
+                        if current_time - last_release_time[scancode] < self.config.double_tap_window:
+                            is_toggle_mode = True
+                            active_hotkey = scancode
+                            hotkey_pressed = True
+                            name = next(k for k, v in F_KEY_CODES.items() if v == scancode)
+                            print(f"[Toggle mode activated with {name.upper()}]", file=sys.stderr)
+                        else:
+                            is_toggle_mode = False
+                            hotkey_pressed = True
+                            active_hotkey = scancode
+                        self.bus.shift_pressed.clear()
+                        if any(code in self.config.device.active_keys() for code in self.SHIFT_CODES):
+                            self.bus.shift_pressed.set()
+                        self.bus.recording.set()
+                        print(f"\n--- {datetime.now()} ---")
+
+                    elif key_event.keystate == self.KEY_UP and hotkey_pressed and not is_toggle_mode:
+                        last_release_time[scancode] = current_time
+                        hotkey_pressed = False
+                        active_hotkey = None
+                        self.bus.recording.clear()
+                        self.bus.shift_pressed.clear()
+
+                    elif key_event.keystate == self.KEY_UP and is_toggle_mode:
+                        last_release_time[scancode] = current_time
+                        hotkey_pressed = False
+
+                    elif key_event.keystate == self.KEY_DOWN and is_toggle_mode:
+                        is_toggle_mode = False
+                        active_hotkey = None
+                        hotkey_pressed = False
+                        toggle_stop_time = current_time
+                        name = next(k for k, v in F_KEY_CODES.items() if v == scancode)
+                        print(f"[Toggle mode deactivated with {name.upper()}]", file=sys.stderr)
+                        self.bus.recording.clear()
+                        self.bus.shift_pressed.clear()
+
+                elif self.bus.recording.is_set() and scancode in self.SHIFT_CODES:
+                    if key_event.keystate == self.KEY_DOWN:
+                        self.bus.shift_pressed.set()
+                    elif key_event.keystate == self.KEY_UP:
+                        self.bus.shift_pressed.clear()
+
+        except asyncio.CancelledError:
+            pass
+        finally:
+            with suppress(Exception):
+                self.config.device.close()
+
+
+class CaptureTask:
+    SAMPLERATE = 24_000
+    BLOCK_MS = 40
+    BLOCK_SIZE = int(SAMPLERATE * BLOCK_MS / 1000)
+    DTYPE = "int16"
+    CHANNELS = 1
+
+    def __init__(self, bus: Bus, config: Config.Capture):
+        self.bus = bus
+        self.config = config
+        self._loop = asyncio.get_running_loop()
+
+    async def run(self):
+        stream = sd.RawInputStream(
+            samplerate=self.SAMPLERATE,
+            blocksize=self.BLOCK_SIZE,
+            dtype=self.DTYPE,
+            channels=self.CHANNELS,
+            callback=self._callback,
+        )
+        try:
+            with stream:
+                await self.bus.stop.wait()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            stream.close()
+            self.bus.audio_chunks.close()
+            await self.bus.audio_chunks.wait_closed()
+
+    def _callback(self, indata, frames, timeinfo, status):  # pragma: no cover - sounddevice callback
+        if self.bus.stop.is_set():
+            return
+        if not (self.bus.recording.is_set() or self.bus.speech_active.is_set()):
+            return
+        try:
+            data = np.frombuffer(indata, dtype=np.int16)
+            if self.config.gain != 1.0:
+                amplified = np.clip(data * self.config.gain, -32768, 32767)
+                audio_bytes = amplified.astype(np.int16).tobytes()
+            else:
+                audio_bytes = data.tobytes()
+
+            def _put():
+                with suppress(RuntimeError):
+                    self.bus.audio_chunks.sync_q.put_nowait(audio_bytes)
+
+            self._loop.call_soon_threadsafe(_put)
+        except Exception as exc:
+            print(f"Error in microphone callback: {exc}", file=sys.stderr)
+
+
+class TranscriptionTask:
+    class Model(Enum):
+        GPT_4O_TRANSCRIBE = "gpt-4o-transcribe"
+        GPT_4O_MINI_TRANSCRIBE = "gpt-4o-mini-transcribe"
+
+    RT_URL = "wss://api.openai.com/v1/realtime?intent=transcription"
+    EVENT_SPEECH_STARTED = "input_audio_buffer.speech_started"
+    EVENT_DELTA = "conversation.item.input_audio_transcription.delta"
+    EVENT_DONE = "conversation.item.input_audio_transcription.completed"
+    QUEUE_IDLE_SLEEP = 0.05
+    CHUNK_TIMEOUT = 0.1
+    OPENAI_BETA_HEADER = "realtime=v1"
+
+    def __init__(self, bus: Bus, config: Config.Transcription, post_config: Config.PostTreatment):
+        self.bus = bus
+        self.config = config
+        self.post_config = post_config
+        self.seq_counter = 0
+        self.headers = {
+            "Authorization": f"Bearer {self.config.api_key}",
+            "OpenAI-Beta": self.OPENAI_BETA_HEADER,
+        }
+        self.session_json = self._build_session_json()
+
+    async def run(self):
+        while not self.bus.stop.is_set():
+            recording_wait = asyncio.create_task(self.bus.recording.wait())
+            stop_wait = asyncio.create_task(self.bus.stop.wait())
+            try:
+                done, _ = await asyncio.wait(
+                    {recording_wait, stop_wait},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in done:
+                    task.result()
+            finally:
+                for task in (recording_wait, stop_wait):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.shield(
+                    asyncio.gather(recording_wait, stop_wait, return_exceptions=True)
+                )
+            if self.bus.stop.is_set():
+                break
+            if not self.bus.recording.is_set():
+                continue
+            previous_transcriptions: list[str] = []
+            current_transcription: list[str] = []
+            try:
+                async with websockets.connect(
+                        self.RT_URL,
+                        additional_headers=self.headers,
+                        max_size=None,
+                ) as ws:
+                    await ws.send(self.session_json)
+
+                    sender_task = asyncio.create_task(self._sender(ws))
+                    receiver_task = asyncio.create_task(
+                        self._receiver(ws, previous_transcriptions, current_transcription))
+                    await asyncio.gather(sender_task, receiver_task)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                print(f"Error in transcription task: {exc}", file=sys.stderr)
+            finally:
+                self.bus.speech_active.clear()
+                with suppress(RuntimeError):
+                    while not self.bus.audio_chunks.async_q.empty():
+                        self.bus.audio_chunks.async_q.get_nowait()
+                print("")
+
+            if not previous_transcriptions:
+                continue
+            if self.config.output_mode is OutputMode.FULL:
+                full_text = "".join(previous_transcriptions)
+                if self.post_config.enabled:
+                    if self.post_config.post_correct:
+                        self.seq_counter += 1
+                        await self.bus.post_commands.put(
+                            PostTreatmentTask.Commands.SessionComplete(
+                                text=full_text,
+                                stream_output=False,
+                            )
+                        )
+                    else:
+                        await self.bus.post_commands.put(
+                            PostTreatmentTask.Commands.SessionComplete(
+                                text=full_text,
+                                stream_output=True,
+                            )
+                        )
+                else:
+                    seq = self.seq_counter
+                    self.seq_counter += 1
+                    await self.bus.buffer_commands.put(
+                        BufferTask.Commands.InsertSegment(
+                            seq_num=seq,
+                            text=full_text,
+                            in_session=False,
+                        )
+                    )
+
+    async def _sender(self, ws):
+        try:
+            while True:
+                if self.bus.stop.is_set():
+                    break
+                try:
+                    queue_empty = self.bus.audio_chunks.async_q.empty()
+                except RuntimeError:
+                    break
+                if not (self.bus.recording.is_set() or self.bus.speech_active.is_set()) and queue_empty:
+                    await asyncio.sleep(self.QUEUE_IDLE_SLEEP)
+                    if not self.bus.recording.is_set() and not self.bus.speech_active.is_set():
+                        break
+                    continue
+                try:
+                    chunk = await asyncio.wait_for(self.bus.audio_chunks.async_q.get(), timeout=self.CHUNK_TIMEOUT)
+                except asyncio.TimeoutError:
+                    continue
+                except RuntimeError:
+                    break
+                await ws.send(
+                    json.dumps(
+                        {
+                            "type": "input_audio_buffer.append",
+                            "audio": base64.b64encode(chunk).decode("ascii"),
+                        }
+                    )
+                )
+        except asyncio.CancelledError:
+            pass
+
+    async def _receiver(self, ws, previous_transcriptions, current_transcription):
+        try:
+            while True:
+                if self.bus.stop.is_set():
+                    break
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=self.CHUNK_TIMEOUT)
+                except asyncio.TimeoutError:
+                    if not self.bus.recording.is_set() and not self.bus.speech_active.is_set():
+                        break
+                    continue
+                event = json.loads(raw)
+                etype = event.get("type", "")
+                if etype == self.EVENT_SPEECH_STARTED:
+                    self.bus.speech_active.set()
+                elif etype == self.EVENT_DELTA:
+                    delta = event.get("delta")
+                    if delta:
+                        current_transcription.append(delta)
+                        self.bus.speech_active.set()
+                        print(delta, end="", flush=True)
+                elif etype == self.EVENT_DONE:
+                    await self._handle_done(previous_transcriptions, current_transcription)
+                    if not self.bus.recording.is_set():
+                        break
+        except asyncio.CancelledError:
+            pass
+
+    async def _handle_done(self, previous_transcriptions, current_transcription):
+        if not current_transcription:
+            self.bus.speech_active.clear()
+            return
+
+        full_text = "".join(current_transcription)
+        if self.bus.recording.is_set():
+            full_text += " "
+
+        if self.config.output_mode is OutputMode.BATCH:
+            seq = self.seq_counter
+            self.seq_counter += 1
+            previous_text = "".join(previous_transcriptions)
+            if self.post_config.enabled:
+                if self.post_config.post_correct:
+                    await self.bus.buffer_commands.put(
+                        BufferTask.Commands.InsertSegment(
+                            seq_num=seq,
+                            text=full_text,
+                            in_session=False,
+                        )
+                    )
+                await self.bus.post_commands.put(
+                    PostTreatmentTask.Commands.ProcessSegment(
+                        seq_num=seq,
+                        text=full_text,
+                        previous_text=previous_text,
+                        stream_output=not self.post_config.post_correct,
+                    )
+                )
+            else:
+                await self.bus.buffer_commands.put(
+                    BufferTask.Commands.InsertSegment(
+                        seq_num=seq,
+                        text=full_text,
+                        in_session=False,
+                    )
+                )
+            previous_transcriptions.append(full_text)
+        else:
+            previous_transcriptions.append(full_text)
+            if self.post_config.enabled and self.post_config.post_correct:
+                seq = self.seq_counter
+                self.seq_counter += 1
+                await self.bus.buffer_commands.put(
+                    BufferTask.Commands.InsertSegment(
+                        seq_num=seq,
+                        text=full_text,
+                        in_session=True,
+                    )
+                )
+
+        current_transcription.clear()
+        self.bus.speech_active.clear()
+
+    def _build_session_json(self) -> str:
+        session_config = {
+            "type": "transcription_session.update",
+            "session": {
+                "input_audio_format": "pcm16",
+                "turn_detection": {
+                    "type": "server_vad",
+                    "threshold": 0.5,
+                    "prefix_padding_ms": 300,
+                    "silence_duration_ms": 500,
+                },
+                "input_audio_transcription": {
+                    "model": self.config.model.value,
+                },
+                "input_audio_noise_reduction": {
+                    "type": "near_field",
+                },
+                "include": ["item.input_audio_transcription.logprobs"],
+            },
+        }
+        if self.config.language:
+            session_config["session"]["input_audio_transcription"]["language"] = self.config.language
+        return json.dumps(session_config)
+
+
+class PostTreatmentTask:
+    class Provider(Enum):
+        OPENAI = "openai"
+        CEREBRAS = "cerebras"
+        OPENROUTER = "openrouter"
+
+    STREAMING_TOKEN_BUFFER_SIZE = 5
+    REQUEST_TIMEOUT_SECONDS = 10.0
+    OPENROUTER_EXTRA_HEADERS = {
+        "HTTP-Referer": "https://github.com/twidi/twistt/",
+        "X-Title": "Twistt",
+    }
+    SYSTEM_TEMPLATE = """You are a real-time transcription correction assistant.
 
 CRITICAL RULES:
 1. You receive a context of previous transcriptions AND a new text
@@ -80,1244 +894,487 @@ CRITICAL RULES:
 
 User instructions:
 {user_prompt}"""
-
-POST_TREATMENT_USER_TEMPLATE = """CONTEXT (do not include in response):
+    USER_TEMPLATE = """CONTEXT (do not include in response):
 {previous_context}
 
 NEW TEXT TO CORRECT:
 {current_text}"""
 
-# F key mapping for evdev
-F_KEY_CODES = {
-    'f1': ecodes.KEY_F1,
-    'f2': ecodes.KEY_F2,
-    'f3': ecodes.KEY_F3,
-    'f4': ecodes.KEY_F4,
-    'f5': ecodes.KEY_F5,
-    'f6': ecodes.KEY_F6,
-    'f7': ecodes.KEY_F7,
-    'f8': ecodes.KEY_F8,
-    'f9': ecodes.KEY_F9,
-    'f10': ecodes.KEY_F10,
-    'f11': ecodes.KEY_F11,
-    'f12': ecodes.KEY_F12,
-}
+    class Commands:
+        class ProcessSegment(NamedTuple):
+            seq_num: int
+            text: str
+            previous_text: str
+            stream_output: bool
 
-class AudioTranscriber:
-    def __init__(self, openai_api_key, language, model, gain, keyboard,
-                 post_treatment=False, post_prompt=None, post_model="gpt-4o-mini",
-                 post_provider="openai", cerebras_api_key=None, openrouter_api_key=None,
-                 output_mode="batch", post_correct=False):
-        self.openai_api_key = openai_api_key
-        self.language = language
-        self.model = model
-        self.gain = gain
-        self.keyboard = keyboard
-        self.post_treatment = post_treatment
-        self.post_prompt = post_prompt
-        self.post_model = post_model
-        self.post_provider = post_provider
-        self.cerebras_api_key = cerebras_api_key
-        self.openrouter_api_key = openrouter_api_key
-        self.output_mode = output_mode
-        self.post_correct = post_correct
-        self.recording = False
-        self.stream_task = None
-        self.speech_started = False
-        self.output_queue = asyncio.Queue()
-        self.output_processor_task = None
-        # Health flags for the current stream
-        self.ws_open = False
-        self.sender_running = False
-        self.receiver_running = False
-        # Shift key state for paste operation
-        self.shift_pressed = False
-        
-        # Sequencing system for post-treatment order
-        self.sequence_number = 0
-        self.pending_corrections = {}
-        self.next_to_output = 0
-        self.sequence_lock = asyncio.Lock()
-        
-        # Local buffer manager for post-correction mode
-        self.buffer_manager = BufferManager(self) if self.post_treatment and self.post_correct else None
-        
-        # Initialize client for post-treatment based on provider
-        self.post_client = None
-        if self.post_treatment:
-            if self.post_provider == "openai":
-                self.post_client = AsyncOpenAI(api_key=self.openai_api_key)
-            elif self.post_provider == "cerebras":
-                if not self.cerebras_api_key:
-                    raise ValueError("Cerebras API key is required when using Cerebras provider")
-                self.post_client = AsyncOpenAI(
-                    api_key=self.cerebras_api_key,
-                    base_url="https://api.cerebras.ai/v1"
-                )
-            elif self.post_provider == "openrouter":
-                if not self.openrouter_api_key:
-                    raise ValueError("OpenRouter API key is required when using OpenRouter provider")
-                self.post_client = AsyncOpenAI(
-                    api_key=self.openrouter_api_key,
-                    base_url="https://openrouter.ai/api/v1"
-                )
-            else:
-                raise ValueError(f"Unknown post-treatment provider: {self.post_provider}")
+        class SessionComplete(NamedTuple):
+            text: str
+            stream_output: bool
 
-        self.headers = {
-            "Authorization": f"Bearer {self.openai_api_key}",
-            "OpenAI-Beta": "realtime=v1",
-        }
+        class Shutdown(NamedTuple):
+            pass
 
-        session_config = {
-            "type": "transcription_session.update",
-            "session": {
-                "input_audio_format": "pcm16",
-                "turn_detection": {
-                    "type": "server_vad",
-                    "threshold": 0.5,
-                    "prefix_padding_ms": 300,
-                    "silence_duration_ms": 500,
-                },
-                "input_audio_transcription": {
-                    "model": self.model,
-                },
-                "input_audio_noise_reduction": {
-                    "type": "near_field"  # "near_field" or "far_field" or null
-                },
-                "include": [
-                    "item.input_audio_transcription.logprobs",
-                ],
-            },
-        }
-        
-        # Only add language if specified
-        if self.language:
-            session_config["session"]["input_audio_transcription"]["language"] = self.language
-        
-        self.session_json = json.dumps(session_config)
+    def __init__(self, bus: Bus, config: Config.PostTreatment):
+        self.bus = bus
+        self.config = config
+        self.client = self._build_client()
+        self._buffer_seq_counter = 1_000_000
 
-    async def stream_mic(self):
-        print(f"\n--- {datetime.now()} ---")
-        q = asyncio.Queue()
-        loop = asyncio.get_running_loop()
-        self.recording = True
-        self.speech_started = False
-        # Reset health flags at start
-        self.ws_open = False
-        self.sender_running = False
-        self.receiver_running = False
+    def _next_buffer_seq(self) -> int:
+        seq = self._buffer_seq_counter
+        self._buffer_seq_counter += 1
+        return seq
 
-        def cb(indata, frames, timeinfo, status):
-            if self.recording or self.speech_started:
-                try:
-                    if self.gain != 1.0:
-                        audio_data = np.frombuffer(indata, dtype=np.int16)
-                        amplified = np.clip(audio_data * self.gain, -32768, 32767)
-                        audio_bytes = amplified.astype(np.int16).tobytes()
-                    else:
-                        audio_bytes = bytes(indata)
-                    
-                    loop.call_soon_threadsafe(q.put_nowait, audio_bytes)
-                except Exception as e:
-                    print(f"Error in microphone callback: {e}", file=sys.stderr)
-
-        with sd.RawInputStream(samplerate=SR, blocksize=BLOCK_SIZE,
-                               dtype="int16", channels=1, callback=cb):
-            async with websockets.connect(RT_URL, additional_headers=self.headers, max_size=None) as ws:
-                await ws.send(self.session_json)
-
-                previous_transcriptions = []
-                current_transcription = []
-                self.ws_open = True
-
-                async def sender():
-                    self.sender_running = True
-                    try:
-                        while self.recording or self.speech_started:
-                            try:
-                                try:
-                                    raw = await asyncio.wait_for(q.get(), timeout=0.1)
-                                except asyncio.TimeoutError:
-                                    continue
-                                try:
-                                    b64 = base64.b64encode(raw).decode("ascii")
-                                    await ws.send(json.dumps({
-                                        "type": "input_audio_buffer.append",
-                                        "audio": b64
-                                    }))
-                                except Exception as e:
-                                    print(f"Error in sender: {e}", file=sys.stderr)
-                                    break
-
-                            except asyncio.CancelledError:
-                                break
-                    finally:
-                        self.sender_running = False
-
-                async def receiver():
-                    self.receiver_running = True
-                    try:
-                        while self.recording or self.speech_started:
-                            try:
-                                raw = await asyncio.wait_for(ws.recv(), timeout=0.1)
-                            except asyncio.TimeoutError:
-                                continue
-                            except asyncio.CancelledError:
-                                break
-
-                            try:
-                                ev = json.loads(raw)
-                                ev_type = ev.get("type", "")
-
-                                if ev_type == EV_SPEECH_STARTED:
-                                    self.speech_started = True
-
-                                elif ev_type == EV_DELTA:
-                                    d = ev.get("delta")
-                                    if d:
-                                        current_transcription.append(d)
-                                        self.speech_started = True
-                                        print(d, end="", flush=True)
-
-                                elif ev_type == EV_DONE:
-
-                                    if current_transcription:
-                                        full_text = "".join(current_transcription)
-                                        if self.recording:
-                                            full_text += " "
-                                        
-                                        # In batch mode, send to output queue immediately
-                                        if self.output_mode == "batch":
-                                            await self.output_queue.put({
-                                                'type': 'initial_transcription',
-                                                'text': full_text,
-                                                'previous_text': "".join(previous_transcriptions)
-                                            })
-                                            previous_transcriptions.append(full_text)
-                                        # In full mode, accumulate the text, and if post-correct is enabled, also paste raw incrementally
-                                        else:  # output_mode == "full"
-                                            previous_transcriptions.append(full_text)
-                                            if self.post_treatment and self.post_correct:
-                                                await self.output_queue.put({
-                                                    'type': 'initial_transcription',
-                                                    'text': full_text,
-                                                    'previous_text': ""
-                                                })
-                                        
-                                        current_transcription.clear()
-
-                                    self.speech_started = False
-
-                                    if not self.recording:
-                                        break
-
-                                    print(" ", end="", flush=True)
-
-                            except Exception as e:
-                                print(f"Error in receiver: {e}", file=sys.stderr)
-                                break
-
-                            except asyncio.CancelledError:
-                                break
-                    finally:
-                        self.receiver_running = False
-
-                await asyncio.gather(sender(), receiver(), return_exceptions=True)
-                print("")
-                self.ws_open = False
-                
-                # In full mode, send all accumulated text at once
-                if self.output_mode == "full" and previous_transcriptions:
-                    full_text = "".join(previous_transcriptions)
-                    if self.post_treatment and self.post_correct:
-                        # Signal session completion for a single post-treatment correction pass
-                        await self.output_queue.put({
-                            'type': 'session_complete',
-                            'text': full_text
-                        })
-                    else:
-                        await self.output_queue.put({
-                            'type': 'initial_transcription',
-                            'text': full_text,
-                            'previous_text': ""  # No context in full mode
-                        })
-
-    async def post_process_transcription(self, text, previous_text, stream_output):
-        """Stream post-processed transcription as an async generator."""
+    async def run(self):
+        if not self.config.enabled:
+            return
         try:
-            # Format the system and user messages
-            system_message = POST_TREATMENT_SYSTEM_TEMPLATE.format(
-                user_prompt=self.post_prompt
-            )
-            
-            # In full mode, don't include context
-            if self.output_mode == "full":
-                user_message = POST_TREATMENT_USER_TEMPLATE.format(
-                    previous_context="No previous transcription",
-                    current_text=text
-                )
+            while not self.bus.stop.is_set():
+                cmd = await self.bus.post_commands.get()
+                if isinstance(cmd, self.Commands.Shutdown):
+                    break
+                if isinstance(cmd, self.Commands.ProcessSegment):
+                    await self._handle_segment(cmd)
+                elif isinstance(cmd, self.Commands.SessionComplete):
+                    await self._handle_session_complete(cmd)
+        except asyncio.CancelledError:
+            pass
+
+    async def _handle_segment(self, cmd: "PostTreatmentTask.Commands.ProcessSegment"):
+        chunks = []
+        async for piece in self._post_process(cmd.text, cmd.previous_text, cmd.stream_output):
+            if piece is None:
+                break
+            if self.config.post_correct:
+                chunks.append(piece)
             else:
-                user_message = POST_TREATMENT_USER_TEMPLATE.format(
-                    previous_context=previous_text if previous_text else "No previous transcription",
-                    current_text=text
+                await self.bus.buffer_commands.put(
+                    BufferTask.Commands.InsertSegment(
+                        seq_num=self._next_buffer_seq(),
+                        text=piece,
+                        in_session=False,
+                    )
                 )
-
-            # Prepare extra headers for OpenRouter
-            extra_headers = {}
-            if self.post_provider == "openrouter":
-                extra_headers = {
-                    "HTTP-Referer": "https://github.com/twidi/twistt/",
-                    "X-Title": "Twistt"
-                }
-            
-            # Make the API call with streaming and timeout
-            create_kwargs = {
-                "model": self.post_model,
-                "messages": [
-                    {"role": "system", "content": system_message},
-                    {"role": "user", "content": user_message}
-                ],
-                "temperature": 0.1,
-                "stream": True
-            }
-            
-            # Add extra headers only for OpenRouter
-            if extra_headers:
-                create_kwargs["extra_headers"] = extra_headers
-            
-            stream = await asyncio.wait_for(
-                self.post_client.chat.completions.create(**create_kwargs),
-                timeout=10.0
+        if self.config.post_correct:
+            corrected = "".join(chunks)
+            await self.bus.buffer_commands.put(
+                BufferTask.Commands.ApplyCorrection(seq_num=cmd.seq_num, corrected_text=corrected)
             )
-            
-            # Buffer for collecting tokens
-            token_buffer = []
-            token_count = 0
 
-            if stream_output:
-                print("\n[Post-treatment] ", end='', flush=True)
-            
-            async for chunk in stream:
-                if chunk.choices[0].delta.content:
-                    content = chunk.choices[0].delta.content
-                    if stream_output:
-                        print(content, end='', flush=True)
-                    token_buffer.append(content)
-                    token_count += 1
-                    
-                    # Yield every STREAMING_TOKEN_BUFFER_SIZE tokens or when we have a complete word/punctuation
-                    if stream_output and (token_count >= STREAMING_TOKEN_BUFFER_SIZE or content.endswith((' ', '.', ',', '!', '?', '\n', ':', ';'))):
-                        buffered_text = ''.join(token_buffer)
-                        yield buffered_text
-                        token_buffer = []
-                        token_count = 0
-            
-            # Yield any remaining tokens
-            if token_buffer:
-                buffered_text = ''.join(token_buffer)
-                yield buffered_text
-            
-            if stream_output:
-                print()  # New line after streaming
-            
-            # Signal end of stream
-            yield None
-                    
+    async def _handle_session_complete(self, cmd: "PostTreatmentTask.Commands.SessionComplete"):
+        chunks = []
+        async for piece in self._post_process(cmd.text, "", cmd.stream_output):
+            if piece is None:
+                break
+            if self.config.post_correct:
+                chunks.append(piece)
+            else:
+                await self.bus.buffer_commands.put(
+                    BufferTask.Commands.InsertSegment(
+                        seq_num=self._next_buffer_seq(),
+                        text=piece,
+                        in_session=False,
+                    )
+                )
+        if self.config.post_correct:
+            corrected = "".join(chunks)
+            await self.bus.buffer_commands.put(
+                BufferTask.Commands.ApplySessionCorrection(corrected_text=corrected)
+            )
+
+    async def _post_process(
+            self,
+            text: str,
+            previous_text: str,
+            stream_output: bool,
+    ) -> AsyncIterator[Optional[str]]:
+        system_message = self.SYSTEM_TEMPLATE.format(user_prompt=self.config.prompt)
+        if self.config.output_mode is OutputMode.FULL:
+            previous_context = "No previous transcription"
+        else:
+            previous_context = previous_text if previous_text else "No previous transcription"
+        user_message = self.USER_TEMPLATE.format(
+            previous_context=previous_context,
+            current_text=text,
+        )
+        create_kwargs = {
+            "model": self.config.model,
+            "messages": [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message},
+            ],
+            "temperature": 0.1,
+            "stream": True,
+        }
+        if self.config.provider is PostTreatmentTask.Provider.OPENROUTER:
+            create_kwargs["extra_headers"] = self.OPENROUTER_EXTRA_HEADERS
+        try:
+            stream = await asyncio.wait_for(
+                self.client.chat.completions.create(**create_kwargs),
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
+            )
         except asyncio.TimeoutError:
             print("WARNING: Post-treatment timeout, using raw text", file=sys.stderr)
             yield text
             yield None
-        except Exception as e:
-            print(f"WARNING: Post-treatment failed: {e}", file=sys.stderr)
+            return
+        except Exception as exc:
+            print(f"WARNING: Post-treatment failed: {exc}", file=sys.stderr)
             yield text
             yield None
-
-    async def process_output_queue(self):
-        """Process all outputs: initial transcriptions and streaming chunks."""
-        while True:
-            try:
-                message = await self.output_queue.get()
-                
-                # Handle old format for backward compatibility
-                if isinstance(message, tuple):
-                    text, previous_text = message
-                    message = {
-                        'type': 'initial_transcription',
-                        'text': text,
-                        'previous_text': previous_text
-                    }
-                
-                if message['type'] == 'initial_transcription':
-                    # New transcription to process
-                    async with self.sequence_lock:
-                        seq_num = self.sequence_number
-                        self.sequence_number += 1
-                    
-                    if self.post_treatment:
-                        if self.post_correct and self.buffer_manager is not None:
-                            if self.output_mode == 'full':
-                                # In full+post-correct, paste raw as we go, correction once at session end
-                                self.buffer_manager.start_session_if_needed()
-                                await self.buffer_manager.insert_segment(seq_num, message['text'])
-                            else:
-                                # In batch+post-correct, paste raw and schedule per-segment correction
-                                await self.buffer_manager.insert_segment(seq_num, message['text'])
-                                asyncio.create_task(
-                                    self._post_correct_apply(
-                                        seq_num,
-                                        message['text'],
-                                        message.get('previous_text')
-                                    )
-                                )
-                        else:
-                            # Initialize structure for streaming
-                            self.pending_corrections[seq_num] = {
-                                'chunks_to_output': [],
-                                'already_output': '',
-                                'is_complete': False
-                            }
-                            
-                            # Start streaming in background
-                            asyncio.create_task(
-                                self._stream_post_treatment(
-                                    seq_num,
-                                    message['text'],
-                                    message.get('previous_text'),
-                                    stream_output=True
-                                )
-                            )
-                    else:
-                        # No post-treatment, prepare for direct output
-                        self.pending_corrections[seq_num] = {
-                            'chunks_to_output': [message['text']],
-                            'already_output': '',
-                            'is_complete': True
-                        }
-                        # Signal ready to process
-                        await self.output_queue.put({
-                            'type': 'chunk_ready',
-                            'seq_num': seq_num
-                        })
-                
-                elif message['type'] == 'chunk_ready':
-                    # Chunks are ready, try to output in order
-                    await self._output_ordered_chunks()
-                
-                elif message['type'] == 'session_complete':
-                    if self.post_treatment and self.post_correct and self.buffer_manager is not None and self.output_mode == 'full':
-                        # Run a single correction on the full session text
-                        asyncio.create_task(self._post_correct_apply_session(message['text']))
-                    
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                print(f"Error processing output queue: {e}", file=sys.stderr)
-
-    async def _post_correct_apply(self, seq_num, text, previous_text):
-        """Run post-treatment to completion, then apply an in-place correction for the given segment.
-
-        This is used only in post-correct mode, where raw text was already pasted.
-        """
-        try:
-            corrected_parts = []
-            async for chunk in self.post_process_transcription(text, previous_text, stream_output=False):
-                if chunk is None:
-                    break
-                corrected_parts.append(chunk)
-            corrected_text = ''.join(corrected_parts)
-
-            # Preserve a trailing space if the original pasted segment had one (keeps separation while recording)
-            if self.buffer_manager is not None:
-                seg = self.buffer_manager.get_segment(seq_num)
-                if seg is not None and seg['text_current'].endswith(' ') and not corrected_text.endswith(' '):
-                    corrected_text += ' '
-
-            if self.buffer_manager is not None:
-                await self.buffer_manager.apply_correction(seq_num, corrected_text)
-        except Exception as e:
-            print(f"Error applying post-correction: {e}", file=sys.stderr)
-    
-    async def _post_correct_apply_session(self, full_text):
-        """Full-mode session correction: correct the entire session in-place once fully received."""
-        try:
-            corrected_parts = []
-            async for chunk in self.post_process_transcription(full_text, previous_text="", stream_output=False):
-                if chunk is None:
-                    break
-                corrected_parts.append(chunk)
-            corrected_text = ''.join(corrected_parts)
-            if self.buffer_manager is not None:
-                await self.buffer_manager.apply_correction_session(corrected_text)
-        except Exception as e:
-            print(f"Error applying session post-correction: {e}", file=sys.stderr)
-    
-    async def _stream_post_treatment(self, seq_num, text, previous_text, stream_output):
-        """Stream post-treatment and signal each chunk."""
-        try:
-            async for chunk in self.post_process_transcription(text, previous_text, stream_output=stream_output):
-                if chunk is None:  # End of stream
-                    async with self.sequence_lock:
-                        self.pending_corrections[seq_num]['chunks_to_output'].append(' ')
-                        self.pending_corrections[seq_num]['is_complete'] = True
-                else:
-                    async with self.sequence_lock:
-                        self.pending_corrections[seq_num]['chunks_to_output'].append(chunk)
-                
-                # Signal via the same queue
-                await self.output_queue.put({
-                    'type': 'chunk_ready',
-                    'seq_num': seq_num
-                })
-        except Exception as e:
-            print(f"Error in streaming post-treatment: {e}", file=sys.stderr)
-            # Fallback to original text
-            async with self.sequence_lock:
-                self.pending_corrections[seq_num]['chunks_to_output'] = [text]
-                self.pending_corrections[seq_num]['is_complete'] = True
-            
-            await self.output_queue.put({
-                'type': 'chunk_ready',
-                'seq_num': seq_num
-            })
-    
-    async def _output_ordered_chunks(self):
-        """Output all available chunks in the correct order."""
-        async with self.sequence_lock:
-            while self.next_to_output in self.pending_corrections:
-                correction = self.pending_corrections[self.next_to_output]
-                
-                # Output available chunks
-                if correction['chunks_to_output']:
-                    chunks = correction['chunks_to_output']
-                    correction['chunks_to_output'] = []
-                    text_to_paste = ''.join(chunks)
-                    
-                    if text_to_paste:
-                        correction['already_output'] += text_to_paste
-                        # Output outside the lock
-                        self.output_transcription(text_to_paste)
-                
-                # If complete and all output
-                if correction['is_complete'] and not correction['chunks_to_output']:
-                    del self.pending_corrections[self.next_to_output]
-                    self.next_to_output += 1
-                else:
-                    break  # Wait for more chunks
-
-    def output_transcription(self, text):
-        """Render transcription output by copying to clipboard and pasting."""
-        try:
-            KeyboardAction.copy_paste(text, self.shift_pressed)
-        except Exception as e:
-            print(f"Error outputting transcription: {e}", file=sys.stderr)
-            print("Text is in clipboard, use Ctrl+V to paste.", file=sys.stderr)
-
-    async def start_recording(self):
-        # Reset shift state for new recording session
-        self.shift_pressed = False
-        """Start or resume recording within an existing stream.
-
-        Reuse the stream only if it's healthy (ws open + sender/receiver
-        running). Otherwise cancel/await the dying stream before starting a
-        fresh one to avoid double-opening the microphone.
-        """
-        # If a stream task exists but is completed, clear it first
-        if self.stream_task is not None and self.stream_task.done():
-            self.stream_task = None
-
-        if self.stream_task is not None and not self.stream_task.done():
-            if self.ws_open and self.sender_running and self.receiver_running:
-                # Healthy stream: just resume
-                self.recording = True
-                return
-            # Unhealthy/closing: cancel and await completion
-            self.stream_task.cancel()
-            try:
-                await self.stream_task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                pass
-            finally:
-                self.stream_task = None
-
-        if not self.recording and (self.stream_task is None):
-            self.stream_task = asyncio.create_task(self.stream_mic())
-
-    async def stop_recording(self):
-        """Signal push-to-talk release without blocking the event loop.
-
-        We intentionally do not await the stream task here so that the
-        keyboard listener remains responsive. The active stream will finish
-        naturally when VAD completes the current segment.
-        """
-        if self.recording:
-            self.recording = False
-
-
-class KeyboardAction:
-    CTRL_V = [KEY_LEFTCTRL, KEY_V]
-    CTRL_SHIFT_V = [KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V]
-    BACKSPACE = [(KEY_BACKSPACE, DOWN), (KEY_BACKSPACE, UP)]
-    DELETE = [(KEY_DELETE, DOWN), (KEY_DELETE, UP)]
-    LEFT = [(KEY_LEFT, DOWN), (KEY_LEFT, UP)]
-    RIGHT = [(KEY_RIGHT, DOWN), (KEY_RIGHT, UP)]
-
-    DELAY_BETWEEN_KEYS_MS = KEY_DEFAULT_DELAY
-
-    @classmethod
-    def copy(cls, text):
-        pyperclip.copy(text)
-
-    @classmethod
-    def paste(cls, use_shift):
-        key_combination(cls.CTRL_SHIFT_V if use_shift else cls.CTRL_V)
-
-    @classmethod
-    def copy_paste(cls, text, use_shift):
-        KeyboardAction.copy(text)
-        KeyboardAction.paste(use_shift)
-
-    @classmethod
-    def delete_chars_backward(cls, count):
-        key_seq(cls.BACKSPACE * count, next_delay_ms=cls.DELAY_BETWEEN_KEYS_MS)
-
-    @classmethod
-    def delete_chars_forward(cls, count):
-        key_seq(cls.DELETE * count, next_delay_ms=cls.DELAY_BETWEEN_KEYS_MS)
-
-    @classmethod
-    def go_left(cls, count):
-        key_seq(cls.LEFT * count, next_delay_ms=cls.DELAY_BETWEEN_KEYS_MS)
-
-    @classmethod
-    def go_right(cls, count):
-        key_seq(cls.RIGHT * count, next_delay_ms=cls.DELAY_BETWEEN_KEYS_MS)
-
-
-class BufferManager:
-    """Maintain a mirror of pasted text and apply minimal corrections via keyboard.
-
-    All operations are serialized to avoid interleaving keystrokes with new inserts.
-    """
-    def __init__(self, transcriber):
-        self.transcriber = transcriber
-        self.text = ""
-        self.cursor = 0
-        # segments: seq_num -> {'start': int, 'text_current': str, 'text_original': str}
-        self.segments = {}
-        self.segment_order = []
-        self.lock = asyncio.Lock()
-        # Session tracking (full mode post-correct)
-        self.session_active = False
-        self.session_start_index = 0
-        self.session_segment_ids = []
-
-    def _move_cursor_to(self, target_index: int):
-        # Clamp
-        target_index = max(0, min(target_index, len(self.text)))
-        delta = target_index - self.cursor
-        if delta > 0:
-            KeyboardAction.go_right(delta)
-        elif delta < 0:
-            KeyboardAction.go_left(-delta)
-        self.cursor = target_index
-
-    def start_session_if_needed(self):
-        if not self.session_active:
-            self.session_active = True
-            self.session_start_index = len(self.text)
-            self.session_segment_ids = []
-
-    @staticmethod
-    def _common_prefix_len(a: str, b: str) -> int:
-        i = 0
-        max_i = min(len(a), len(b))
-        while i < max_i and a[i] == b[i]:
-            i += 1
-        return i
-
-    @staticmethod
-    def _common_suffix_len(a: str, b: str, max_allowed: int | None = None) -> int:
-        i = 0
-        max_i = min(len(a), len(b)) if max_allowed is None else min(max_allowed, len(a), len(b))
-        while i < max_i and a[len(a) - 1 - i] == b[len(b) - 1 - i]:
-            i += 1
-        return i
-
-    def _replace_range(self, abs_start: int, abs_end: int, replacement: str):
-        # Choose forward delete or backward delete based on minimal movement
-        delete_len = max(0, abs_end - abs_start)
-        move_cost_to_start = abs(self.cursor - abs_start)
-        move_cost_to_end = abs(self.cursor - abs_end)
-
-        if delete_len == 0:
-            # Pure insertion at abs_start
-            self._move_cursor_to(abs_start)
-            if replacement:
-                self.transcriber.output_transcription(replacement)
-                self.text = self.text[:abs_start] + replacement + self.text[abs_start:]
-                self.cursor = abs_start + len(replacement)
             return
 
-        if move_cost_to_end <= move_cost_to_start:
-            # Go to end, delete backward
-            self._move_cursor_to(abs_end)
-            KeyboardAction.delete_chars_backward(delete_len)
-            self.text = self.text[:abs_start] + self.text[abs_end:]
-            self.cursor = abs_start
-        else:
-            # Go to start, delete forward
-            self._move_cursor_to(abs_start)
-            KeyboardAction.delete_chars_forward(delete_len)
-            self.text = self.text[:abs_start] + self.text[abs_end:]
-            self.cursor = abs_start
-        # Insert replacement
-        if replacement:
-            self.transcriber.output_transcription(replacement)
-            self.text = self.text[:self.cursor] + replacement + self.text[self.cursor:]
-            self.cursor += len(replacement)
+        token_buffer = []
+        token_count = 0
+        if stream_output:
+            print("\n[Post-treatment] ", end="", flush=True)
+        async for chunk in stream:
+            delta = chunk.choices[0].delta.content
+            if not delta:
+                continue
+            if stream_output:
+                print(delta, end="", flush=True)
+            token_buffer.append(delta)
+            token_count += 1
+            if stream_output and (
+                    token_count >= self.STREAMING_TOKEN_BUFFER_SIZE
+                    or delta.endswith((" ", ".", ",", "!", "?", "\n", ":", ";"))
+            ):
+                buffered = "".join(token_buffer)
+                yield buffered
+                token_buffer = []
+                token_count = 0
+        if token_buffer:
+            yield "".join(token_buffer)
+        if stream_output:
+            print("")
+        yield None
 
-    async def insert_segment(self, seq_num: int, text: str):
-        """Paste raw segment text at the end and register the segment."""
-        async with self.lock:
-            # Always move to end before inserting
-            self._move_cursor_to(len(self.text))
-            # Paste
+    def _build_client(self) -> AsyncOpenAI:
+        if self.config.provider is PostTreatmentTask.Provider.OPENAI:
+            return AsyncOpenAI(api_key=self.config.openai_api_key)
+        if self.config.provider is PostTreatmentTask.Provider.CEREBRAS:
+            if not self.config.cerebras_api_key:
+                raise ValueError("Cerebras API key is required when using Cerebras provider")
+            return AsyncOpenAI(api_key=self.config.cerebras_api_key, base_url="https://api.cerebras.ai/v1")
+        if self.config.provider is PostTreatmentTask.Provider.OPENROUTER:
+            if not self.config.openrouter_api_key:
+                raise ValueError("OpenRouter API key is required when using OpenRouter provider")
+            return AsyncOpenAI(api_key=self.config.openrouter_api_key, base_url="https://openrouter.ai/api/v1")
+        raise ValueError(f"Unknown post-treatment provider: {self.config.provider.value}")
+
+
+class BufferTask:
+    class Commands:
+        class InsertSegment(NamedTuple):
+            seq_num: int
+            text: str
+            in_session: bool
+
+        class ApplyCorrection(NamedTuple):
+            seq_num: int
+            corrected_text: str
+
+        class ApplySessionCorrection(NamedTuple):
+            corrected_text: str
+
+        class Shutdown(NamedTuple):
+            pass
+
+    class ClipboardOutputAdapter:
+        def __init__(self, bus: Bus):
+            self.bus = bus
+
+        def output_transcription(self, text: str):
             try:
-                self.transcriber.output_transcription(text)
-            except Exception:
-                pass
-            # Update buffer
-            start = len(self.text)
-            self.text += text
-            self.cursor = len(self.text)
-            self.segments[seq_num] = {
-                'start': start,
-                'text_current': text,
-                'text_original': text,
-            }
-            self.segment_order.append(seq_num)
-            if self.session_active:
-                self.session_segment_ids.append(seq_num)
+                KeyboardAction.copy_paste(text, self.bus.shift_pressed.is_set())
+            except Exception as exc:  # pragma: no cover - defensive
+                print(f"Error outputting transcription: {exc}", file=sys.stderr)
+                print("Text is in clipboard, use Ctrl+V to paste.", file=sys.stderr)
 
-    def get_segment(self, seq_num: int):
-        return self.segments.get(seq_num)
+    class Manager:
+        """Maintain a mirror of pasted text and apply minimal corrections via keyboard."""
 
-    async def apply_correction(self, seq_num: int, corrected_text: str, replace_threshold: float = 0.7):
-        """Apply minimal in-place edits to transform a segment to corrected_text.
-
-        Uses only Left/Right/Backspace/Paste. After applying, returns cursor to end.
-        """
-        async with self.lock:
-            seg = self.segments.get(seq_num)
-            if not seg:
-                return
-
-            old = seg['text_current']
-            if old == corrected_text:
-                # Nothing to do; ensure cursor at end
-                self._move_cursor_to(len(self.text))
-                return
-
-            # Decide whether to do minimal diff or full replace
-            try:
-                sm = difflib.SequenceMatcher(None, old, corrected_text)
-                ratio = sm.ratio()
-            except Exception:
-                sm = None
-                ratio = 0.0
-
-            start_base = seg['start']
-            # Helper to adjust following segments after length change
-            def shift_following(delta: int):
-                if delta == 0:
-                    return
-                passed = False
-                for s in self.segment_order:
-                    if s == seq_num:
-                        passed = True
-                        continue
-                    if passed:
-                        self.segments[s]['start'] += delta
-
-            # Heuristic: full replace if similarity low OR unchanged prefix+suffix are tiny
-            lcp_for_check = self._common_prefix_len(old, corrected_text)
-            lcs_for_check = self._common_suffix_len(old, corrected_text, max_allowed=min(len(old)-lcp_for_check, len(corrected_text)-lcp_for_check))
-            unchanged = lcp_for_check + lcs_for_check
-            tiny_unchanged = unchanged < max(2, int(0.2 * min(len(old), len(corrected_text))))
-            if sm is None or ratio < (1.0 - replace_threshold) or tiny_unchanged:
-                # Replace whole segment
-                # Move to end of segment
-                abs_end = start_base + len(old)
-                self._move_cursor_to(abs_end)
-                # Delete old content
-                KeyboardAction.delete_chars_backward(len(old))
-                # Paste corrected
-                try:
-                    self.transcriber.output_transcription(corrected_text)
-                except Exception:
-                    pass
-                # Update buffer state
-                abs_start = start_base
-                self.text = self.text[:abs_start] + corrected_text + self.text[abs_end:]
-                delta = len(corrected_text) - len(old)
-                self.cursor = abs_start + len(corrected_text)
-                seg['text_current'] = corrected_text
-                shift_following(delta)
-                # Move to end
-                self._move_cursor_to(len(self.text))
-                return
-
-            # Single-window minimal edit: change the middle once
-            lcp = self._common_prefix_len(old, corrected_text)
-            # Prevent overlap when suffix is large
-            max_suffix = min(len(old) - lcp, len(corrected_text) - lcp)
-            lcs = self._common_suffix_len(old, corrected_text, max_allowed=max_suffix)
-            old_mid_len = len(old) - lcp - lcs
-            new_mid = corrected_text[lcp:len(corrected_text) - lcs] if len(corrected_text) - lcp - lcs > 0 else ""
-            abs_start = start_base + lcp
-            abs_end = start_base + len(old) - lcs
-            self._replace_range(abs_start, abs_end, new_mid)
-
-            # Update segment content and following segments positions
-            total_delta = len(corrected_text) - len(old)
-            seg['text_current'] = corrected_text
-            shift_following(total_delta)
-            # Move to end
-            self._move_cursor_to(len(self.text))
-
-    async def apply_correction_session(self, corrected_text: str, replace_threshold: float = 0.7):
-        """Apply a single correction over the whole active session window (full mode)."""
-        async with self.lock:
-            if not self.session_active:
-                return
-            start_base = self.session_start_index
-            old = self.text[start_base:]
-            if old == corrected_text:
-                # Nothing to change
-                self.session_active = False
-                self.session_segment_ids = []
-                self._move_cursor_to(len(self.text))
-                return
-            try:
-                sm = difflib.SequenceMatcher(None, old, corrected_text)
-                ratio = sm.ratio()
-            except Exception:
-                sm = None
-                ratio = 0.0
-            # Replace-all fallback
-            # Heuristic: full replace if similarity low OR unchanged prefix+suffix are tiny
-            lcp_for_check = self._common_prefix_len(old, corrected_text)
-            lcs_for_check = self._common_suffix_len(old, corrected_text, max_allowed=min(len(old)-lcp_for_check, len(corrected_text)-lcp_for_check))
-            unchanged = lcp_for_check + lcs_for_check
-            tiny_unchanged = unchanged < max(2, int(0.2 * min(len(old), len(corrected_text))))
-            if sm is None or ratio < (1.0 - replace_threshold) or tiny_unchanged:
-                abs_end = len(self.text)
-                self._move_cursor_to(abs_end)
-                KeyboardAction.delete_chars_backward(len(old))
-                try:
-                    self.transcriber.output_transcription(corrected_text)
-                except Exception:
-                    pass
-                self.text = self.text[:start_base] + corrected_text
-                self.cursor = len(self.text)
-                # Update segments within session: recompute starts incrementally
-                running = start_base
-                # We cannot reliably split corrected_text back to per-segment; keep their start best-effort
-                for sid in self.session_segment_ids:
-                    seg = self.segments.get(sid)
-                    if seg:
-                        seg_len = len(seg['text_current'])
-                        seg['start'] = running
-                        running += seg_len
-                self.session_active = False
-                self.session_segment_ids = []
-                return
-            # Single-window minimal edit on session window
-            lcp = self._common_prefix_len(old, corrected_text)
-            max_suffix = min(len(old) - lcp, len(corrected_text) - lcp)
-            lcs = self._common_suffix_len(old, corrected_text, max_allowed=max_suffix)
-            old_mid_len = len(old) - lcp - lcs
-            new_mid = corrected_text[lcp:len(corrected_text) - lcs] if len(corrected_text) - lcp - lcs > 0 else ""
-            abs_start = start_base + lcp
-            abs_end = start_base + len(old) - lcs
-            self._replace_range(abs_start, abs_end, new_mid)
-            # Session done
+        def __init__(self, output_adapter):
+            self.output_adapter = output_adapter
+            self.text = ""
+            self.cursor = 0
+            self.segments = {}
+            self.segment_order = []
+            self.lock = asyncio.Lock()
             self.session_active = False
+            self.session_start_index = 0
             self.session_segment_ids = []
-            self._move_cursor_to(len(self.text))
 
-def parse_hotkeys_evdev(hotkeys_str):
-    hotkeys = [k.strip().lower() for k in hotkeys_str.split(',')]
-    codes = []
-    for hotkey in hotkeys:
-        if hotkey in F_KEY_CODES:
-            codes.append(F_KEY_CODES[hotkey])
-        else:
-            raise ValueError(f"Unsupported key: {hotkey}. Use F1-F12")
-    return codes
+        def _move_cursor_to(self, target_index: int):
+            target_index = max(0, min(target_index, len(self.text)))
+            delta = target_index - self.cursor
+            if delta > 0:
+                KeyboardAction.go_right(delta)
+            elif delta < 0:
+                KeyboardAction.go_left(-delta)
+            self.cursor = target_index
 
-def find_keyboard():
-    devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
-    all_keyboards = []
-    
-    for device in devices:
-        capabilities = device.capabilities(verbose=False)
-        
-        if ecodes.EV_KEY not in capabilities:
-            continue
-        keys = capabilities[ecodes.EV_KEY]
+        def start_session_if_needed(self):
+            if not self.session_active:
+                self.session_active = True
+                self.session_start_index = len(self.text)
+                self.session_segment_ids = []
 
-        if any(virt in device.name.lower() for virt in ['virtual', 'dummy', 'uinput', 'ydotool']):
-            continue
+        @staticmethod
+        def _common_prefix_len(a: str, b: str) -> int:
+            i = 0
+            max_i = min(len(a), len(b))
+            while i < max_i and a[i] == b[i]:
+                i += 1
+            return i
 
-        if any(k in [ecodes.BTN_LEFT, ecodes.BTN_RIGHT, ecodes.BTN_MIDDLE] for k in keys):
-            continue
-        if ecodes.EV_REL in capabilities:
-            continue
+        @staticmethod
+        def _common_suffix_len(a: str, b: str, max_allowed: int | None = None) -> int:
+            i = 0
+            max_i = min(len(a), len(b)) if max_allowed is None else min(max_allowed, len(a), len(b))
+            while i < max_i and a[len(a) - 1 - i] == b[len(b) - 1 - i]:
+                i += 1
+            return i
 
-        if ecodes.KEY_A not in keys or ecodes.KEY_Z not in keys:
-            continue
+        def _replace_range(self, abs_start: int, abs_end: int, replacement: str):
+            delete_len = max(0, abs_end - abs_start)
+            move_cost_to_start = abs(self.cursor - abs_start)
+            move_cost_to_end = abs(self.cursor - abs_end)
 
-        if ecodes.KEY_SPACE not in keys and ecodes.KEY_ENTER not in keys:
-            continue
+            if delete_len == 0:
+                self._move_cursor_to(abs_start)
+                if replacement:
+                    self.output_adapter.output_transcription(replacement)
+                    self.text = self.text[:abs_start] + replacement + self.text[abs_start:]
+                    self.cursor = abs_start + len(replacement)
+                return
 
-        if ecodes.KEY_F1 not in keys or ecodes.KEY_F12 not in keys:
-            continue
+            if move_cost_to_end <= move_cost_to_start:
+                self._move_cursor_to(abs_end)
+                KeyboardAction.delete_chars_backward(delete_len)
+                self.text = self.text[:abs_start] + self.text[abs_end:]
+                self.cursor = abs_start
+            else:
+                self._move_cursor_to(abs_start)
+                KeyboardAction.delete_chars_forward(delete_len)
+                self.text = self.text[:abs_start] + self.text[abs_end:]
+                self.cursor = abs_start
 
-        all_keyboards.append(device)
-    
-    if len(all_keyboards) == 1:
-        device = all_keyboards[0]
-    elif len(all_keyboards) > 1:
-        print("\nMultiple physical keyboards found:")
-        for i, device in enumerate(all_keyboards):
-            print(f"  {i}: {device.path} - {device.name}")
-        idx = int(input("Select your keyboard: "))
-        device = all_keyboards[idx]
-    else:
-        print("\nNo physical keyboard detected automatically.")
-        print("Available devices:")
-        for i, device in enumerate(devices):
-            print(f"  {i}: {device.path} - {device.name}")
-        idx = int(input("Select your keyboard manually: "))
-        device = devices[idx]
+            if replacement:
+                self.output_adapter.output_transcription(replacement)
+                self.text = self.text[:self.cursor] + replacement + self.text[self.cursor:]
+                self.cursor += len(replacement)
 
-    return device
+        async def insert_segment(self, seq_num: int, text: str):
+            async with self.lock:
+                self._move_cursor_to(len(self.text))
+                with suppress(Exception):
+                    self.output_adapter.output_transcription(text)
+                start = len(self.text)
+                self.text += text
+                self.cursor = len(self.text)
+                self.segments[seq_num] = {
+                    "start": start,
+                    "text_current": text,
+                    "text_original": text,
+                }
+                self.segment_order.append(seq_num)
+                if self.session_active:
+                    self.session_segment_ids.append(seq_num)
 
+        async def apply_correction(self, seq_num: int, corrected_text: str, replace_threshold: float = 0.7):
+            async with self.lock:
+                seg = self.segments.get(seq_num)
+                if not seg:
+                    return
+                old = seg["text_current"]
+                if old == corrected_text:
+                    self._move_cursor_to(len(self.text))
+                    return
+                try:
+                    sm = difflib.SequenceMatcher(None, old, corrected_text)
+                    ratio = sm.ratio()
+                except Exception:
+                    sm = None
+                    ratio = 0.0
+                start_base = seg["start"]
 
-async def keyboard_listener(device, hotkey_codes, transcriber, double_tap_window=0.5):
-    hotkey_pressed = False
-    last_release_time = {code: 0 for code in hotkey_codes}  # Track release time for each hotkey
-    is_toggle_mode = False
-    active_hotkey = None  # Track which hotkey is currently active (for both hold and toggle modes)
-    toggle_stop_time = 0  # Track when toggle mode was stopped to prevent immediate reactivation
-    toggle_cooldown = 0.5  # Cooldown period after stopping toggle mode
-
-    try:
-        async for event in device.async_read_loop():
-            if event.type == ecodes.EV_KEY:
-                key_event = evdev.categorize(event)
-                
-                if key_event.scancode in hotkey_codes:
-                    current_time = asyncio.get_event_loop().time()
-                    current_key = key_event.scancode
-
-                    # If recording is active, only the active hotkey matters
-                    if active_hotkey is not None and current_key != active_hotkey:
-                        # Ignore all other hotkeys while recording is active
-                        if key_event.keystate == evdev.KeyEvent.key_up:
-                            last_release_time[current_key] = current_time
-                        continue
-
-                    if key_event.keystate == evdev.KeyEvent.key_down and not hotkey_pressed:
-                        # Check if we're in cooldown period after stopping toggle mode
-                        if current_time - toggle_stop_time < toggle_cooldown:
-                            # Ignore this press - we just stopped toggle mode
+                def shift_following(delta: int):
+                    if delta == 0:
+                        return
+                    passed = False
+                    for s in self.segment_order:
+                        if s == seq_num:
+                            passed = True
                             continue
+                        if passed:
+                            other = self.segments[s]
+                            other["start"] += delta
 
-                        # Check for double-tap pattern (press-release-press within window)
-                        if current_time - last_release_time[current_key] < double_tap_window:
-                            # This is the second press of a double-tap - activate toggle mode
-                            is_toggle_mode = True
-                            active_hotkey = current_key  # Remember which key is active
-                            hotkey_pressed = True
-                            key_name = [k for k, v in F_KEY_CODES.items() if v == current_key][0]
-                            print(f"[Toggle mode activated with {key_name.upper()}]", file=sys.stderr)
-                        else:
-                            # Normal press - hold mode
-                            hotkey_pressed = True
-                            is_toggle_mode = False
-                            active_hotkey = current_key  # Remember which key is active
+                if sm is None or ratio < (1.0 - replace_threshold):
+                    abs_end = start_base + len(old)
+                    self._move_cursor_to(abs_end)
+                    KeyboardAction.delete_chars_backward(len(old))
+                    self.text = self.text[:start_base] + self.text[abs_end:]
+                    self.cursor = start_base
+                    if corrected_text:
+                        self.output_adapter.output_transcription(corrected_text)
+                        self.text = self.text[:self.cursor] + corrected_text + self.text[self.cursor:]
+                        self.cursor += len(corrected_text)
+                    seg["text_current"] = corrected_text
+                    shift_following(len(corrected_text) - len(old))
+                    self._move_cursor_to(len(self.text))
+                    return
 
-                        # Check if Shift is currently pressed when hotkey is pressed
-                        shift_keys = [ecodes.KEY_LEFTSHIFT, ecodes.KEY_RIGHTSHIFT]
-                        for shift_key in shift_keys:
-                            if shift_key in device.active_keys():
-                                transcriber.shift_pressed = True
-                                break
-                        await transcriber.start_recording()
-                        
-                    elif key_event.keystate == evdev.KeyEvent.key_up and hotkey_pressed and not is_toggle_mode:
-                        # In hold mode, release stops recording
-                        last_release_time[current_key] = current_time
-                        hotkey_pressed = False
-                        active_hotkey = None  # Clear the active hotkey
-                        await transcriber.stop_recording()
-                        
-                    elif key_event.keystate == evdev.KeyEvent.key_up and is_toggle_mode:
-                        # In toggle mode, release doesn't stop recording
-                        last_release_time[current_key] = current_time
-                        hotkey_pressed = False
-                        # Recording continues...
+                lcp = self._common_prefix_len(old, corrected_text)
+                max_suffix = min(len(old) - lcp, len(corrected_text) - lcp)
+                lcs = self._common_suffix_len(old, corrected_text, max_allowed=max_suffix)
+                old_mid_len = len(old) - lcp - lcs
+                new_mid = (
+                    corrected_text[lcp: len(corrected_text) - lcs]
+                    if len(corrected_text) - lcp - lcs > 0
+                    else ""
+                )
+                abs_start = start_base + lcp
+                abs_end = abs_start + old_mid_len
+                self._replace_range(abs_start, abs_end, new_mid)
+                seg["text_current"] = corrected_text
+                shift_following(len(corrected_text) - len(old))
+                self._move_cursor_to(len(self.text))
 
-                    elif key_event.keystate == evdev.KeyEvent.key_down and is_toggle_mode:
-                        # In toggle mode, press again stops recording
-                        is_toggle_mode = False
-                        active_hotkey = None  # Clear the active hotkey
-                        hotkey_pressed = False
-                        toggle_stop_time = current_time  # Record when we stopped to prevent immediate reactivation
-                        key_name = [k for k, v in F_KEY_CODES.items() if v == current_key][0]
-                        print(f"[Toggle mode deactivated with {key_name.upper()}]", file=sys.stderr)
-                        await transcriber.stop_recording()
-                
-                # Monitor Shift key presses while hotkey is held
-                elif hotkey_pressed and key_event.scancode in [ecodes.KEY_LEFTSHIFT, ecodes.KEY_RIGHTSHIFT]:
-                    if key_event.keystate == evdev.KeyEvent.key_down:
-                        transcriber.shift_pressed = True
-    except asyncio.CancelledError:
-        # Graceful shutdown on Ctrl+C / task cancellation
-        pass
-    finally:
+        async def apply_correction_session(self, corrected_text: str, replace_threshold: float = 0.7):
+            async with self.lock:
+                if not self.session_active:
+                    return
+                start_base = self.session_start_index
+                old = self.text[start_base:]
+                if old == corrected_text:
+                    self.session_active = False
+                    self.session_segment_ids = []
+                    self._move_cursor_to(len(self.text))
+                    return
+                try:
+                    sm = difflib.SequenceMatcher(None, old, corrected_text)
+                    ratio = sm.ratio()
+                except Exception:
+                    sm = None
+                    ratio = 0.0
+                lcp_for_check = self._common_prefix_len(old, corrected_text)
+                lcs_for_check = self._common_suffix_len(
+                    old,
+                    corrected_text,
+                    max_allowed=min(len(old) - lcp_for_check, len(corrected_text) - lcp_for_check),
+                )
+                unchanged = lcp_for_check + lcs_for_check
+                tiny_unchanged = unchanged < max(2, int(0.2 * min(len(old), len(corrected_text))))
+                if sm is None or ratio < (1.0 - replace_threshold) or tiny_unchanged:
+                    abs_end = len(self.text)
+                    self._move_cursor_to(abs_end)
+                    KeyboardAction.delete_chars_backward(len(old))
+                    with suppress(Exception):
+                        self.output_adapter.output_transcription(corrected_text)
+                    self.text = self.text[:start_base] + corrected_text
+                    self.cursor = len(self.text)
+                    running = start_base
+                    for sid in self.session_segment_ids:
+                        seg = self.segments.get(sid)
+                        if seg:
+                            seg_len = len(seg["text_current"])
+                            seg["start"] = running
+                            running += seg_len
+                    self.session_active = False
+                    self.session_segment_ids = []
+                    return
+                lcp = self._common_prefix_len(old, corrected_text)
+                max_suffix = min(len(old) - lcp, len(corrected_text) - lcp)
+                lcs = self._common_suffix_len(old, corrected_text, max_allowed=max_suffix)
+                old_mid_len = len(old) - lcp - lcs
+                new_mid = (
+                    corrected_text[lcp: len(corrected_text) - lcs]
+                    if len(corrected_text) - lcp - lcs > 0
+                    else ""
+                )
+                abs_start = start_base + lcp
+                abs_end = abs_start + old_mid_len
+                self._replace_range(abs_start, abs_end, new_mid)
+                self.session_active = False
+                self.session_segment_ids = []
+                self._move_cursor_to(len(self.text))
+
+    def __init__(self, bus: Bus, config: Config.Buffer):
+        self.bus = bus
+        self.config = config
+        self.adapter = BufferTask.ClipboardOutputAdapter(bus)
+        self.manager = BufferTask.Manager(self.adapter)
+
+    async def run(self):
         try:
-            device.close()
-        except Exception:
+            while not self.bus.stop.is_set():
+                cmd = await self.bus.buffer_commands.get()
+                if isinstance(cmd, self.Commands.Shutdown):
+                    break
+                if isinstance(cmd, self.Commands.InsertSegment):
+                    if cmd.in_session:
+                        self.manager.start_session_if_needed()
+                    await self.manager.insert_segment(cmd.seq_num, cmd.text)
+                elif isinstance(cmd, self.Commands.ApplyCorrection):
+                    await self.manager.apply_correction(cmd.seq_num, cmd.corrected_text)
+                elif isinstance(cmd, self.Commands.ApplySessionCorrection):
+                    await self.manager.apply_correction_session(cmd.corrected_text)
+        except asyncio.CancelledError:
             pass
 
 
-async def main():
-    epilog = """Configuration files:
-  The script loads configuration from two .env files (if they exist):
-  1. .env file in the script's directory
-  2. ~/.config/twistt/config.env (overrides values from #1)
-  
-  Environment variables (in order of priority):
-  - Command-line arguments (highest priority)
-  - User config file (~/.config/twistt/config.env)
-  - Local .env file (script directory)
-  - System environment variables (lowest priority)
-  
-  Each option can be set via environment variable using the TWISTT_ prefix.
-  API key can also use OPENAI_API_KEY (without prefix).
-  YDOTOOL_SOCKET can be set to specify the ydotool socket path.
-  """
-    
-    parser = argparse.ArgumentParser(
-        description="Push to talk transcription via OpenAI",
-        epilog=epilog,
-        formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    
-    # Get values from environment variables or use defaults
-    default_hotkeys = os.getenv(f"{ENV_PREFIX}HOTKEY", os.getenv(f"{ENV_PREFIX}HOTKEYS", "F9"))
-    default_model = os.getenv(f"{ENV_PREFIX}MODEL", "gpt-4o-transcribe")
-    default_language = os.getenv(f"{ENV_PREFIX}LANGUAGE", None)
-    default_gain = float(os.getenv(f"{ENV_PREFIX}GAIN", "1.0"))
-    # API key priority: TWISTT_OPENAI_API_KEY > OPENAI_API_KEY
-    default_api_key = os.getenv(f"{ENV_PREFIX}OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-    # ydotool socket priority: TWISTT_YDOTOOL_SOCKET > YDOTOOL_SOCKET
-    ydotool_socket = os.getenv(f"{ENV_PREFIX}YDOTOOL_SOCKET") or os.getenv("YDOTOOL_SOCKET")
-    
-    # Post-treatment defaults
-    default_post_prompt = os.getenv(f"{ENV_PREFIX}POST_TREATMENT_PROMPT", "")
-    default_post_prompt_file = os.getenv(f"{ENV_PREFIX}POST_TREATMENT_PROMPT_FILE", "")
-    default_post_model = os.getenv(f"{ENV_PREFIX}POST_TREATMENT_MODEL", "gpt-4o-mini")
-    default_post_provider = os.getenv(f"{ENV_PREFIX}POST_TREATMENT_PROVIDER", "openai")
-    # Post-correct mode
-    def _env_truthy(val: str | None) -> bool:
-        if not val:
-            return False
-        return val.strip().lower() in {"1", "true", "yes", "on"}
-    default_post_correct = _env_truthy(os.getenv(f"{ENV_PREFIX}POST_CORRECT"))
-    
-    # Provider API keys
-    default_cerebras_api_key = os.getenv(f"{ENV_PREFIX}CEREBRAS_API_KEY") or os.getenv("CEREBRAS_API_KEY")
-    default_openrouter_api_key = os.getenv(f"{ENV_PREFIX}OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY")
-    
-    # Output mode
-    default_output_mode = os.getenv(f"{ENV_PREFIX}OUTPUT_MODE", "batch")
-
-    # Double-tap window
-    default_double_tap_window = float(os.getenv(f"{ENV_PREFIX}DOUBLE_TAP_WINDOW", "0.5"))
-
-    parser.add_argument("--hotkey", "--hotkeys", default=default_hotkeys, 
-                       help=f"Push-to-talk key(s), F1-F12, comma-separated for multiple (env: {ENV_PREFIX}HOTKEY or {ENV_PREFIX}HOTKEYS)")
-    parser.add_argument("--model", default=default_model,
-                       choices=["gpt-4o-transcribe", "gpt-4o-mini-transcribe"],
-                       help=f"OpenAI model to use for transcription (env: {ENV_PREFIX}MODEL)")
-    parser.add_argument("--language", default=default_language, 
-                       help=f"Transcription language, leave empty for auto-detect (env: {ENV_PREFIX}LANGUAGE)")
-    parser.add_argument("--gain", type=float, default=default_gain, 
-                       help=f"Microphone amplification factor, 1.0=normal, 2.0=double (env: {ENV_PREFIX}GAIN)")
-    parser.add_argument("--api-key", default=default_api_key,
-                       help=f"OpenAI API key (env: {ENV_PREFIX}OPENAI_API_KEY or OPENAI_API_KEY)")
-    parser.add_argument("--ydotool-socket", default=ydotool_socket,
-                       help=f"Path to ydotool socket (env: {ENV_PREFIX}YDOTOOL_SOCKET or YDOTOOL_SOCKET)")
-    
-    # Post-treatment arguments
-    parser.add_argument("--post-prompt", default=default_post_prompt,
-                       help=f"Post-treatment prompt instructions (env: {ENV_PREFIX}POST_TREATMENT_PROMPT)")
-    parser.add_argument("--post-prompt-file", default=default_post_prompt_file,
-                       help=f"Path to file containing post-treatment prompt (env: {ENV_PREFIX}POST_TREATMENT_PROMPT_FILE)")
-    parser.add_argument("--post-model", default=default_post_model,
-                       help=f"Model for post-treatment (env: {ENV_PREFIX}POST_TREATMENT_MODEL)")
-    parser.add_argument("--post-provider", default=default_post_provider,
-                       choices=["openai", "cerebras", "openrouter"],
-                       help=f"Provider for post-treatment (env: {ENV_PREFIX}POST_TREATMENT_PROVIDER)")
-    parser.add_argument("--post-correct", action=argparse.BooleanOptionalAction, default=default_post_correct,
-                       help=f"Apply post-treatment by correcting already-pasted text in-place (env: {ENV_PREFIX}POST_CORRECT)")
-    parser.add_argument("--cerebras-api-key", default=default_cerebras_api_key,
-                       help=f"Cerebras API key (env: {ENV_PREFIX}CEREBRAS_API_KEY or CEREBRAS_API_KEY)")
-    parser.add_argument("--openrouter-api-key", default=default_openrouter_api_key,
-                       help=f"OpenRouter API key (env: {ENV_PREFIX}OPENROUTER_API_KEY or OPENROUTER_API_KEY)")
-    parser.add_argument("--output-mode", default=default_output_mode,
-                       choices=["batch", "full"],
-                       help=f"Output mode: batch (incremental) or full (complete on release) (env: {ENV_PREFIX}OUTPUT_MODE)")
-    parser.add_argument("--double-tap-window", type=float, default=default_double_tap_window,
-                       help=f"Time window in seconds for double-tap detection (env: {ENV_PREFIX}DOUBLE_TAP_WINDOW)")
-    args = parser.parse_args()
-    
-    # Handle post-treatment prompt logic - post-treatment is active if we have a prompt
-    post_prompt = None
-    post_treatment_enabled = False
-    
-    if args.post_prompt_file and args.post_prompt_file.strip():
-        # File is defined and not empty, must exist and be readable
-        prompt_file_path = Path(args.post_prompt_file)
-        if not prompt_file_path.exists():
-            print(f"ERROR: Post-treatment prompt file not found: {args.post_prompt_file}", file=sys.stderr)
-            return
-        try:
-            post_prompt = prompt_file_path.read_text(encoding='utf-8').strip()
-            if not post_prompt:
-                print(f"ERROR: Post-treatment prompt file is empty: {args.post_prompt_file}", file=sys.stderr)
-                return
-            post_treatment_enabled = True
-        except Exception as e:
-            print(f"ERROR: Unable to read post-treatment prompt file: {e}", file=sys.stderr)
-            return
-    elif args.post_prompt:
-        # No file or file explicitly empty, use direct prompt if available
-        post_prompt = args.post_prompt
-        post_treatment_enabled = True
-
-    # Re-initialize ydotool if socket was provided via CLI
-    # Initialize ydotool with socket if provided
-    if ydotool_socket:
-        # doc says we can pass the path to `init` bug it craches or says a string is expected
-        # thankfully it also checks the YDOTOOL_SOCKET env variable
-        os.environ["YDOTOOL_SOCKET"] = ydotool_socket
-
-    pydotool_init()
-
-    # Check API keys
-    if not args.api_key:
-        print("ERROR: OpenAI API key is not defined", file=sys.stderr)
-        print(f"Please set OPENAI_API_KEY or {ENV_PREFIX}OPENAI_API_KEY environment variable (can optionally be in a .env file)", file=sys.stderr)
-        print("Or pass it via --api-key argument", file=sys.stderr)
-        return
-    
-    # Check provider-specific API keys if post-treatment is enabled
-    if post_treatment_enabled:
-        if args.post_provider == "cerebras" and not args.cerebras_api_key:
-            print("ERROR: Cerebras API key is not defined for post-treatment", file=sys.stderr)
-            print(f"Please set CEREBRAS_API_KEY or {ENV_PREFIX}CEREBRAS_API_KEY environment variable", file=sys.stderr)
-            print("Or pass it via --cerebras-api-key argument", file=sys.stderr)
-            return
-        elif args.post_provider == "openrouter" and not args.openrouter_api_key:
-            print("ERROR: OpenRouter API key is not defined for post-treatment", file=sys.stderr)
-            print(f"Please set OPENROUTER_API_KEY or {ENV_PREFIX}OPENROUTER_API_KEY environment variable", file=sys.stderr)
-            print("Or pass it via --openrouter-api-key argument", file=sys.stderr)
-            return
-
-    try:
-        hotkey_codes = parse_hotkeys_evdev(args.hotkey)
-    except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
+async def main_async():
+    app_config = CommandLineParser.parse()
+    if app_config is None:
         return
 
-    # Find keyboard device
+    bus = Bus()
+    tasks = []
     try:
-        keyboard = find_keyboard()
-    except Exception as e:
-        print(f"ERROR: Unable to find keyboard: {e}", file=sys.stderr)
-        return
+        loop = asyncio.get_running_loop()
 
-    print(f"Transcription model: {args.model}")
-    if args.language:
-        print(f"Language: {args.language}")
-    else:
-        print(f"Language: Auto-detect")
-    if args.gain != 1.0:
-        print(f"Audio gain: {args.gain}x")
-    if post_treatment_enabled:
-        print(f"Post-treatment: Enabled (provider: {args.post_provider}, model: {args.post_model})")
-        prompt_preview = post_prompt[:50] + "..." if len(post_prompt) > 50 else post_prompt
-        print(f"Post-treatment prompt: {prompt_preview}")
-        if args.post_correct:
-            print("Post-correct mode: Enabled (waits for full correction, then edits in-place)")
-    hotkeys_display = ', '.join([k.strip().upper() for k in args.hotkey.split(',')])
-    print(f"Using key(s) '{hotkeys_display}': hold for push-to-talk, double-tap to toggle (press same key again to stop).")
-    print(f"Listening on {keyboard.name}.")
-    print("Text will be pasted by simulating Ctrl+V (or Ctrl+Shift+V if Shift is pressed at any time).")
-    print("Press Ctrl+C to stop the script.")
+        hotkey_task = HotKeyTask(bus, app_config.hotkey)
+        capture_task = CaptureTask(bus, app_config.capture)
+        buffer_task = BufferTask(bus, app_config.buffer)
+        transcription_task = TranscriptionTask(bus, app_config.transcription, app_config.post)
 
-    # Create transcriber and start listening
-    transcriber = AudioTranscriber(
-        openai_api_key=args.api_key,
-        language=args.language,
-        model=args.model,
-        gain=args.gain,
-        keyboard=keyboard,
-        post_treatment=post_treatment_enabled,
-        post_prompt=post_prompt,
-        post_model=args.post_model,
-        post_provider=args.post_provider,
-        cerebras_api_key=args.cerebras_api_key,
-        openrouter_api_key=args.openrouter_api_key,
-        output_mode=args.output_mode,
-        post_correct=args.post_correct
-    )
-    
-    # Start the output processor task that runs for the entire program duration
-    transcriber.output_processor_task = asyncio.create_task(transcriber.process_output_queue())
-    
-    try:
-        await keyboard_listener(keyboard, hotkey_codes, transcriber, args.double_tap_window)
-    except KeyboardInterrupt:
-        print("\nStopping program.")
-    except asyncio.CancelledError:
-        # Cancelled by asyncio runner (e.g., Ctrl+C) — ignore
-        pass
+        tasks.append(loop.create_task(hotkey_task.run()))
+        tasks.append(loop.create_task(capture_task.run()))
+        tasks.append(loop.create_task(buffer_task.run()))
+        tasks.append(loop.create_task(transcription_task.run()))
+
+        if app_config.post.enabled:
+            post_task = PostTreatmentTask(bus, app_config.post)
+            tasks.append(loop.create_task(post_task.run()))
+
+        await bus.stop.wait()
+
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        print("\nExit.")
+
     finally:
-        # Clean up output processor task
-        if transcriber.output_processor_task:
-            transcriber.output_processor_task.cancel()
+        bus.stop.set()
+        if app_config.post.enabled:
+            await bus.post_commands.put(PostTreatmentTask.Commands.Shutdown())
+        await bus.buffer_commands.put(BufferTask.Commands.Shutdown())
+
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
             try:
-                await transcriber.output_processor_task
+                await task
             except asyncio.CancelledError:
                 pass
-        # Ensure keyboard device is closed
-        try:
-            keyboard.close()
-        except Exception:
-            pass
+        with suppress(Exception):
+            app_config.hotkey.device.close()
+
+
+def main():
+    asyncio.run(main_async())
+
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("")
-        sys.exit(0)
+    main()
