@@ -444,6 +444,7 @@ class Bus:
         self.shift_pressed = asyncio.Event()
         self.recording = asyncio.Event()
         self.speech_active = asyncio.Event()
+        self.post_active = asyncio.Event()
         self.stop = asyncio.Event()
 
 
@@ -1058,46 +1059,54 @@ NEW TEXT TO CORRECT:
             pass
 
     async def _handle_segment(self, cmd: "PostTreatmentTask.Commands.ProcessSegment"):
-        chunks = []
-        async for piece in self._post_process(cmd.text, cmd.previous_text, cmd.stream_output):
-            if piece is None:
-                break
-            if self.config.post_correct:
-                chunks.append(piece)
-            else:
-                await self.bus.buffer_commands.put(
-                    BufferTask.Commands.InsertSegment(
-                        seq_num=self._next_buffer_seq(),
-                        text=piece,
-                        in_session=False,
+        self.bus.post_active.set()
+        try:
+            chunks = []
+            async for piece in self._post_process(cmd.text, cmd.previous_text, cmd.stream_output):
+                if piece is None:
+                    break
+                if self.config.post_correct:
+                    chunks.append(piece)
+                else:
+                    await self.bus.buffer_commands.put(
+                        BufferTask.Commands.InsertSegment(
+                            seq_num=self._next_buffer_seq(),
+                            text=piece,
+                            in_session=False,
+                        )
                     )
+            if self.config.post_correct:
+                corrected = "".join(chunks)
+                await self.bus.buffer_commands.put(
+                    BufferTask.Commands.ApplyCorrection(seq_num=cmd.seq_num, corrected_text=corrected)
                 )
-        if self.config.post_correct:
-            corrected = "".join(chunks)
-            await self.bus.buffer_commands.put(
-                BufferTask.Commands.ApplyCorrection(seq_num=cmd.seq_num, corrected_text=corrected)
-            )
+        finally:
+            self.bus.post_active.clear()
 
     async def _handle_session_complete(self, cmd: "PostTreatmentTask.Commands.SessionComplete"):
-        chunks = []
-        async for piece in self._post_process(cmd.text, "", cmd.stream_output):
-            if piece is None:
-                break
-            if self.config.post_correct:
-                chunks.append(piece)
-            else:
-                await self.bus.buffer_commands.put(
-                    BufferTask.Commands.InsertSegment(
-                        seq_num=self._next_buffer_seq(),
-                        text=piece,
-                        in_session=False,
+        self.bus.post_active.set()
+        try:
+            chunks = []
+            async for piece in self._post_process(cmd.text, "", cmd.stream_output):
+                if piece is None:
+                    break
+                if self.config.post_correct:
+                    chunks.append(piece)
+                else:
+                    await self.bus.buffer_commands.put(
+                        BufferTask.Commands.InsertSegment(
+                            seq_num=self._next_buffer_seq(),
+                            text=piece,
+                            in_session=False,
+                        )
                     )
+            if self.config.post_correct:
+                corrected = "".join(chunks)
+                await self.bus.buffer_commands.put(
+                    BufferTask.Commands.ApplySessionCorrection(corrected_text=corrected)
                 )
-        if self.config.post_correct:
-            corrected = "".join(chunks)
-            await self.bus.buffer_commands.put(
-                BufferTask.Commands.ApplySessionCorrection(corrected_text=corrected)
-            )
+        finally:
+            self.bus.post_active.clear()
 
     async def _post_process(
             self,
@@ -1293,6 +1302,21 @@ class BufferTask:
                 self.text = self.text[:self.cursor] + replacement + self.text[self.cursor:]
                 self.cursor += len(replacement)
 
+        async def _finalize_cursor(self, preferred_index: int):
+            preferred_index = max(0, min(preferred_index, len(self.text)))
+            active = (
+                self.bus.recording.is_set()
+                or self.bus.speech_active.is_set()
+                or self.bus.post_active.is_set()
+                or self.session_active
+            )
+            target = preferred_index if active else len(self.text)
+            await self._move_cursor_to(target)
+
+        async def enforce_cursor_policy(self):
+            async with self.lock:
+                await self._finalize_cursor(self.cursor)
+
         async def insert_segment(self, seq_num: int, text: str, in_session: bool):
             async with self.lock:
                 insert_len = len(text)
@@ -1327,6 +1351,8 @@ class BufferTask:
                         self.segments[sid]["start"] += insert_len
 
                 if self.session_active:
+                    if not in_session and insert_pos < self.session_start_index:
+                        self.session_start_index += insert_len
                     if in_session and seq_num not in self.session_segment_ids:
                         self.session_segment_ids.append(seq_num)
                     if self.session_segment_ids:
@@ -1338,7 +1364,7 @@ class BufferTask:
                             self.session_segment_ids[0]
                         ]["start"]
 
-                await self._move_cursor_to(len(self.text))
+                await self._finalize_cursor(self.segments[seq_num]["start"] + len(self.segments[seq_num]["text_current"]))
 
         async def apply_correction(self, seq_num: int, corrected_text: str, replace_threshold: float = 0.7):
             async with self.lock:
@@ -1346,8 +1372,9 @@ class BufferTask:
                 if not seg:
                     return
                 old = seg["text_current"]
+                start_base = seg["start"]
                 if old == corrected_text:
-                    await self._move_cursor_to(len(self.text))
+                    await self._finalize_cursor(start_base + len(old))
                     return
                 try:
                     sm = difflib.SequenceMatcher(None, old, corrected_text)
@@ -1355,7 +1382,6 @@ class BufferTask:
                 except Exception:
                     sm = None
                     ratio = 0.0
-                start_base = seg["start"]
 
                 def shift_following(delta: int):
                     if delta == 0:
@@ -1381,7 +1407,8 @@ class BufferTask:
                         self.cursor += len(corrected_text)
                     seg["text_current"] = corrected_text
                     shift_following(len(corrected_text) - len(old))
-                    await self._move_cursor_to(len(self.text))
+                    self.cursor = start_base + len(corrected_text)
+                    await self._finalize_cursor(self.cursor)
                     return
 
                 lcp = self._common_prefix_len(old, corrected_text)
@@ -1398,7 +1425,8 @@ class BufferTask:
                 await self._replace_range(abs_start, abs_end, new_mid)
                 seg["text_current"] = corrected_text
                 shift_following(len(corrected_text) - len(old))
-                await self._move_cursor_to(len(self.text))
+                self.cursor = start_base + len(corrected_text)
+                await self._finalize_cursor(self.cursor)
 
         async def apply_correction_session(self, corrected_text: str, replace_threshold: float = 0.7):
             async with self.lock:
@@ -1409,7 +1437,7 @@ class BufferTask:
                 if old == corrected_text:
                     self.session_active = False
                     self.session_segment_ids = []
-                    await self._move_cursor_to(len(self.text))
+                    await self._finalize_cursor(start_base + len(corrected_text))
                     return
                 try:
                     sm = difflib.SequenceMatcher(None, old, corrected_text)
@@ -1432,7 +1460,7 @@ class BufferTask:
                     with suppress(Exception):
                         await self.output_adapter.output_transcription(corrected_text)
                     self.text = self.text[:start_base] + corrected_text
-                    self.cursor = len(self.text)
+                    self.cursor = start_base + len(corrected_text)
                     running = start_base
                     for sid in self.session_segment_ids:
                         seg = self.segments.get(sid)
@@ -1442,6 +1470,7 @@ class BufferTask:
                             running += seg_len
                     self.session_active = False
                     self.session_segment_ids = []
+                    await self._finalize_cursor(self.cursor)
                     return
                 lcp = self._common_prefix_len(old, corrected_text)
                 max_suffix = min(len(old) - lcp, len(corrected_text) - lcp)
@@ -1457,16 +1486,19 @@ class BufferTask:
                 await self._replace_range(abs_start, abs_end, new_mid)
                 self.session_active = False
                 self.session_segment_ids = []
-                await self._move_cursor_to(len(self.text))
+                self.cursor = start_base + len(corrected_text)
+                await self._finalize_cursor(self.cursor)
 
     def __init__(self, bus: Bus, config: Config.Buffer):
         self.bus = bus
         self.config = config
         self.adapter = BufferTask.ClipboardOutputAdapter(bus)
         self.manager = BufferTask.Manager(self.adapter)
+        self._idle_cursor_task: Optional[asyncio.Task] = None
 
     async def run(self):
         try:
+            self._idle_cursor_task = asyncio.create_task(self._idle_cursor_monitor())
             while not self.bus.stop.is_set():
                 cmd = await self.bus.buffer_commands.get()
                 match cmd:
@@ -1484,6 +1516,19 @@ class BufferTask:
                     case self.Commands.ApplySessionCorrection(corrected_text=corrected_text):
                         await self.manager.apply_correction_session(corrected_text)
 
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if self._idle_cursor_task:
+                self._idle_cursor_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._idle_cursor_task
+
+    async def _idle_cursor_monitor(self):
+        try:
+            while not self.bus.stop.is_set():
+                await self.manager.enforce_cursor_policy()
+                await asyncio.sleep(0.2)
         except asyncio.CancelledError:
             pass
 
