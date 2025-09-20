@@ -1600,17 +1600,9 @@ class IndicatorTask:
         self.initialized = False
 
     def _build_indicator_text(self) -> str:
-        states: list[str] = []
-        if self.bus.post_active.is_set():
-            states.append("post-processing")
-        if self.bus.speech_active.is_set():
-            states.append("transcribing")
-        if self.bus.recording.is_set():
-            states.append("listening")
-        if not states:
-            return ""
-        labels = ", ".join(f"{state}..." for state in states)
-        return f"({labels})"
+        if self.bus.post_active.is_set() or self.bus.speech_active.is_set() or self.bus.recording.is_set():
+            return "(Twistting...)"
+        return ""
 
     async def _clear_indicator_active_flag_soon(self):
         await asyncio.sleep(1)
