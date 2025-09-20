@@ -705,6 +705,7 @@ class TranscriptionTask:
     CHUNK_TIMEOUT = 0.1
     OPENAI_BETA_HEADER = "realtime=v1"
     STREAM_DELTAS = True
+    STREAM_DELTA_MIN_CHARS = 10
 
     def __init__(self, bus: Bus, config: Config.Transcription, post_config: Config.PostTreatment):
         self.bus = bus
@@ -718,6 +719,7 @@ class TranscriptionTask:
         self.session_json = self._build_session_json()
         self._active_seq_num: Optional[int] = None
         self._active_in_session = False
+        self._chars_since_stream = 0
 
     async def run(self):
         while not self.bus.stop.is_set():
@@ -859,6 +861,7 @@ class TranscriptionTask:
     def _reset_active_sequence(self):
         self._active_seq_num = None
         self._active_in_session = False
+        self._chars_since_stream = 0
 
     def _should_stream_deltas(self) -> bool:
         if not self.STREAM_DELTAS:
@@ -901,9 +904,13 @@ class TranscriptionTask:
         print(delta, end="", flush=True)
         if not self._should_stream_deltas():
             return
+        self._chars_since_stream += len(delta)
+        if self._chars_since_stream < self.STREAM_DELTA_MIN_CHARS:
+            return
         segment_text = "".join(current_transcription)
         in_session = self.config.output_mode is OutputMode.FULL
         await self._upsert_buffer_segment(segment_text, in_session)
+        self._chars_since_stream = 0
 
     async def _handle_done(
             self,
