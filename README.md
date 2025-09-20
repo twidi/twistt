@@ -123,6 +123,7 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 
 # Output mode
 TWISTT_OUTPUT_MODE=batch  # batch (default) or full
+TWISTT_USE_TYPING=false  # Type ASCII characters via ydotool instead of copy/paste (slower)
 # Post-correct mode (apply corrections in-place with keyboard)
 TWISTT_POST_CORRECT=false
 ```
@@ -146,6 +147,7 @@ TWISTT_POST_CORRECT=false
 | `--cerebras-api-key` | `TWISTT_CEREBRAS_API_KEY` or `CEREBRAS_API_KEY` | - | Cerebras API key |
 | `--openrouter-api-key` | `TWISTT_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` | - | OpenRouter API key |
 | `--output-mode` | `TWISTT_OUTPUT_MODE` | batch | Output mode: batch (incremental) or full (complete on release) |
+| `--use-typing` | `TWISTT_USE_TYPING` | false | Type ASCII characters directly (slower); clipboard still handles non-ASCII |
 
 ## Usage
 
@@ -187,6 +189,9 @@ TWISTT_POST_CORRECT=false
 
 # Use full output mode (wait for release to process/paste)
 ./twistt.py --output-mode full
+
+# Type ASCII characters directly (slower; clipboard still handles non-ASCII)
+./twistt.py --use-typing
 ```
 
 ### How It Works

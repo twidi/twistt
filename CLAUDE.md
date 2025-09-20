@@ -36,7 +36,7 @@ The application is a single-file Python script with the following key components
 1. **AudioTranscriber class**: Core logic for WebSocket connection to OpenAI, audio streaming, and transcription handling
 2. **Keyboard monitoring**: Uses evdev to detect F-key presses for push-to-talk
 3. **Audio capture**: Uses sounddevice to record from microphone in real-time
-4. **Auto-paste**: Uses python-ydotool to simulate Ctrl+V for automatic text insertion
+4. **Auto-paste/typing**: Uses python-ydotool to paste text or optionally type ASCII characters directly
 5. **Post-treatment**: Optional AI-powered correction using various providers (OpenAI, Cerebras, OpenRouter) to improve transcription accuracy
 
 ## Configuration
@@ -47,7 +47,9 @@ Configuration priority (highest to lowest):
 3. Local `.env` file in script directory
 4. Environment variables
 
-Key environment variables use `TWISTT_` prefix (e.g., `TWISTT_OPENAI_API_KEY`, `TWISTT_HOTKEY` or `TWISTT_HOTKEYS`, `TWISTT_POST_TREATMENT_PROMPT`, `TWISTT_POST_TREATMENT_PROVIDER`, `TWISTT_OUTPUT_MODE`, `TWISTT_POST_CORRECT`).
+Key environment variables use `TWISTT_` prefix (e.g., `TWISTT_OPENAI_API_KEY`, `TWISTT_HOTKEY` or `TWISTT_HOTKEYS`, `TWISTT_POST_TREATMENT_PROMPT`, `TWISTT_POST_TREATMENT_PROVIDER`, `TWISTT_OUTPUT_MODE`, `TWISTT_POST_CORRECT`, `TWISTT_USE_TYPING`).
+
+`TWISTT_USE_TYPING` (or `--use-typing`) enables per-character typing for ASCII text, which is slower because of key delays; clipboard paste remains the fallback for non-ASCII characters.
 
 Multiple hotkeys can be specified by separating them with commas (e.g., `TWISTT_HOTKEY=F8,F9,F10` or `--hotkey F8,F9,F10`).
 

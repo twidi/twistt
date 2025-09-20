@@ -60,6 +60,7 @@ from pydotool import (
     init as pydotool_init,
     key_combination,
     key_seq,
+    type_string,
 )
 
 F_KEY_CODES = {
@@ -113,12 +114,16 @@ class Config:
         post_correct: bool
         output_mode: OutputMode
 
+    class Keyboard(NamedTuple):
+        use_typing: bool
+
     class App(NamedTuple):
         hotkey: "Config.HotKey"
         capture: "Config.Capture"
         transcription: "Config.Transcription"
         post: "Config.PostTreatment"
         buffer: "Config.Buffer"
+        keyboard: "Config.Keyboard"
 
 
 class CommandLineParser:
@@ -167,6 +172,7 @@ class CommandLineParser:
         default_openrouter_api_key = os.getenv(f"{prefix}OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY")
         default_output_mode = os.getenv(f"{prefix}OUTPUT_MODE", OutputMode.BATCH.value)
         default_double_tap_window = float(os.getenv(f"{prefix}DOUBLE_TAP_WINDOW", "0.5"))
+        default_use_typing = CommandLineParser._env_truthy(os.getenv(f"{prefix}USE_TYPING"))
 
         parser.add_argument(
             "--hotkey",
@@ -249,6 +255,15 @@ class CommandLineParser:
             type=float,
             default=default_double_tap_window,
             help=f"Time window in seconds for double-tap detection (env: {prefix}DOUBLE_TAP_WINDOW)",
+        )
+        parser.add_argument(
+            "--use-typing",
+            action=argparse.BooleanOptionalAction,
+            default=default_use_typing,
+            help=(
+                "Type ASCII characters one by one via ydotool (slower due to delays); copy/paste still handles non-ASCII"
+                f" (env: {prefix}USE_TYPING)"
+            ),
         )
 
         args = parser.parse_args()
@@ -336,7 +351,14 @@ class CommandLineParser:
             f"Using key(s) '{hotkeys_display}': hold for push-to-talk, double-tap to toggle (press same key again to stop)."
         )
         print(f"Listening on {keyboard.name}.")
-        print("Text will be pasted by simulating Ctrl+V (or Ctrl+Shift+V if Shift is pressed at any time).")
+        if args.use_typing:
+            print(
+                "ASCII characters will be typed directly; non-ASCII text still uses clipboard paste via Ctrl+V or Ctrl+Shift+V."
+            )
+        else:
+            print(
+                "Text will be pasted by simulating Ctrl+V (or Ctrl+Shift+V if Shift is pressed at any time)."
+            )
         print("Press Ctrl+C to stop the script.")
 
         return Config.App(
@@ -367,6 +389,7 @@ class CommandLineParser:
                 post_correct=args.post_correct and post_treatment_enabled,
                 output_mode=output_mode,
             ),
+            keyboard=Config.Keyboard(use_typing=args.use_typing),
         )
 
     @staticmethod
@@ -469,9 +492,9 @@ class KeyboardTask:
         class Paste(NamedTuple):
             use_shift: bool
 
-        class CopyPaste(NamedTuple):
+        class WriteText(NamedTuple):
             text: str
-            use_shift: bool
+            use_shift_to_paste: bool
 
         class DeleteCharsBackward(NamedTuple):
             count: int
@@ -488,8 +511,9 @@ class KeyboardTask:
         class Shutdown(NamedTuple):
             pass
 
-    def __init__(self, bus: Bus):
+    def __init__(self, bus: Bus, config: Config.Keyboard):
         self.bus = bus
+        self.config = config
         self._delay_between_keys_ms = KEY_DEFAULT_DELAY
         self._delay_between_actions_s = KEY_DEFAULT_DELAY / 1000
         self._last_action_time = 0.0
@@ -520,6 +544,40 @@ class KeyboardTask:
         if remaining > 0:
             await asyncio.sleep(remaining)
 
+    def _copy_paste(self, text: str, use_shift_to_paste: bool = False):
+        pyperclip.copy(text)
+        combo = self.Combo.CTRL_SHIFT_V.value if use_shift_to_paste else self.Combo.CTRL_V.value
+        key_combination(list(combo))
+
+    def _write_text(self, text: str, use_shift_to_paste: bool = False):
+        if not self.config.use_typing:
+            self._copy_paste(text, use_shift_to_paste)
+            return
+
+        ascii_buffer: list[str] = []
+        non_ascii_buffer: list[str] = []
+
+        def flush_ascii_buffer():
+            if ascii_buffer:
+                type_string("".join(ascii_buffer))
+                ascii_buffer.clear()
+
+        def flush_non_ascii_buffer():
+            if non_ascii_buffer:
+                self._copy_paste("".join(non_ascii_buffer), use_shift_to_paste)
+                non_ascii_buffer.clear()
+
+        for char in text:
+            if ord(char) <= 127:
+                flush_non_ascii_buffer()
+                ascii_buffer.append(char)
+            else:
+                flush_ascii_buffer()
+                non_ascii_buffer.append(char)
+
+        flush_non_ascii_buffer()
+        flush_ascii_buffer()
+
     def _execute(self, cmd):
         match cmd:
             case self.Commands.Copy(text=text):
@@ -529,10 +587,8 @@ class KeyboardTask:
                 combo = self.Combo.CTRL_SHIFT_V.value if use_shift else self.Combo.CTRL_V.value
                 key_combination(list(combo))
 
-            case self.Commands.CopyPaste(text=text, use_shift=use_shift) if text:
-                pyperclip.copy(text)
-                combo = self.Combo.CTRL_SHIFT_V.value if use_shift else self.Combo.CTRL_V.value
-                key_combination(list(combo))
+            case self.Commands.WriteText(text=text, use_shift_to_paste=use_shift_to_paste) if text:
+                self._write_text(text, use_shift_to_paste)
 
             case self.Commands.DeleteCharsBackward(count=count) if count > 0:
                 sequence = self.Stroke.BACKSPACE.value * count
@@ -1253,14 +1309,13 @@ class BufferTask:
                 return
             try:
                 await self.bus.keyboard_commands.put(
-                    KeyboardTask.Commands.CopyPaste(
+                    KeyboardTask.Commands.WriteText(
                         text=text,
-                        use_shift=self.bus.shift_pressed.is_set(),
+                        use_shift_to_paste=self.bus.shift_pressed.is_set(),
                     )
                 )
             except Exception as exc:  # pragma: no cover - defensive
                 print(f"Error outputting transcription: {exc}", file=sys.stderr)
-                print("Text is in clipboard, use Ctrl+V to paste.", file=sys.stderr)
 
     class Manager:
         """Maintain a mirror of pasted text and apply minimal corrections via keyboard."""
@@ -1673,7 +1728,7 @@ async def main_async():
 
         hotkey_task = HotKeyTask(bus, app_config.hotkey)
         capture_task = CaptureTask(bus, app_config.capture)
-        keyboard_task = KeyboardTask(bus)
+        keyboard_task = KeyboardTask(bus, app_config.keyboard)
         buffer_task = BufferTask(bus, app_config.buffer)
         transcription_task = TranscriptionTask(bus, app_config.transcription, app_config.post)
         indicator_task = IndicatorTask(bus)
