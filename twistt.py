@@ -27,7 +27,7 @@ import json
 import os
 import sys
 import time
-from asyncio import create_task
+from asyncio import TimerHandle, create_task
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from enum import Enum
@@ -475,6 +475,8 @@ class Bus:
 
 
 class KeyboardTask:
+    CLIPBOARD_RESTORE_DELAY_S = 1.0
+
     class Combo(Enum):
         CTRL_V = (KEY_LEFTCTRL, KEY_V)
         CTRL_SHIFT_V = (KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V)
@@ -486,12 +488,6 @@ class KeyboardTask:
         RIGHT = ((KEY_RIGHT, DOWN), (KEY_RIGHT, UP))
 
     class Commands:
-        class Copy(NamedTuple):
-            text: str
-
-        class Paste(NamedTuple):
-            use_shift: bool
-
         class WriteText(NamedTuple):
             text: str
             use_shift_to_paste: bool
@@ -517,6 +513,8 @@ class KeyboardTask:
         self._delay_between_keys_ms = KEY_DEFAULT_DELAY
         self._delay_between_actions_s = KEY_DEFAULT_DELAY / 1000
         self._last_action_time = 0.0
+        self._previous_clipboard: Optional[str] = None
+        self._restore_clipboard_handle: Optional[asyncio.TimerHandle] = None
 
     async def run(self):
         try:
@@ -544,8 +542,50 @@ class KeyboardTask:
         if remaining > 0:
             await asyncio.sleep(remaining)
 
-    def _copy_paste(self, text: str, use_shift_to_paste: bool = False):
+    def _ensure_previous_clipboard_saved(self):
+        if self._previous_clipboard is not None:
+            return
+        try:
+            current = pyperclip.paste()
+        except pyperclip.PyperclipException:
+            return
+        if current is None:
+            current = ""
+        self._previous_clipboard = current
+
+    def _schedule_clipboard_restore(self):
+        if self._previous_clipboard is None:
+            return
+        if self._restore_clipboard_handle is not None:
+            self._restore_clipboard_handle.cancel()
+            self._restore_clipboard_handle = None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._restore_clipboard_handle = loop.call_later(
+            self.CLIPBOARD_RESTORE_DELAY_S, self._restore_clipboard_if_needed
+        )
+
+    def _restore_clipboard_if_needed(self):
+        self._restore_clipboard_handle = None
+        if self._previous_clipboard is None:
+            return
+        try:
+            pyperclip.copy(self._previous_clipboard)
+        except pyperclip.PyperclipException:
+            # Retry later if clipboard access failed
+            self._schedule_clipboard_restore()
+            return
+        self._previous_clipboard = None
+
+    def _copy_to_clipboard(self, text: str):
+        self._ensure_previous_clipboard_saved()
         pyperclip.copy(text)
+        self._schedule_clipboard_restore()
+
+    def _copy_paste(self, text: str, use_shift_to_paste: bool = False):
+        self._copy_to_clipboard(text)
         combo = self.Combo.CTRL_SHIFT_V.value if use_shift_to_paste else self.Combo.CTRL_V.value
         key_combination(list(combo))
 
@@ -580,13 +620,6 @@ class KeyboardTask:
 
     def _execute(self, cmd):
         match cmd:
-            case self.Commands.Copy(text=text):
-                pyperclip.copy(text)
-
-            case self.Commands.Paste(use_shift=use_shift):
-                combo = self.Combo.CTRL_SHIFT_V.value if use_shift else self.Combo.CTRL_V.value
-                key_combination(list(combo))
-
             case self.Commands.WriteText(text=text, use_shift_to_paste=use_shift_to_paste) if text:
                 self._write_text(text, use_shift_to_paste)
 
