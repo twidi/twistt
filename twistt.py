@@ -511,29 +511,37 @@ class KeyboardTask:
             await asyncio.sleep(remaining)
 
     def _execute(self, cmd):
-        if isinstance(cmd, self.Commands.Copy):
-            pyperclip.copy(cmd.text)
-        elif isinstance(cmd, self.Commands.Paste):
-            combo = self.Combo.CTRL_SHIFT_V.value if cmd.use_shift else self.Combo.CTRL_V.value
-            key_combination(list(combo))
-        elif isinstance(cmd, self.Commands.CopyPaste):
-            pyperclip.copy(cmd.text)
-            combo = self.Combo.CTRL_SHIFT_V.value if cmd.use_shift else self.Combo.CTRL_V.value
-            key_combination(list(combo))
-        elif isinstance(cmd, self.Commands.DeleteCharsBackward):
-            sequence = self.Stroke.BACKSPACE.value * cmd.count
-            key_seq(list(sequence), next_delay_ms=self._delay_between_keys_ms)
-        elif isinstance(cmd, self.Commands.DeleteCharsForward):
-            sequence = self.Stroke.DELETE.value * cmd.count
-            key_seq(list(sequence), next_delay_ms=self._delay_between_keys_ms)
-        elif isinstance(cmd, self.Commands.GoLeft):
-            sequence = self.Stroke.LEFT.value * cmd.count
-            key_seq(list(sequence), next_delay_ms=self._delay_between_keys_ms)
-        elif isinstance(cmd, self.Commands.GoRight):
-            sequence = self.Stroke.RIGHT.value * cmd.count
-            key_seq(list(sequence), next_delay_ms=self._delay_between_keys_ms)
-        else:  # pragma: no cover - defensive
-            raise ValueError(f"Unknown keyboard command: {cmd}")
+        match cmd:
+            case self.Commands.Copy(text=text):
+                pyperclip.copy(text)
+
+            case self.Commands.Paste(use_shift=use_shift):
+                combo = self.Combo.CTRL_SHIFT_V.value if use_shift else self.Combo.CTRL_V.value
+                key_combination(list(combo))
+
+            case self.Commands.CopyPaste(text=text, use_shift=use_shift):
+                pyperclip.copy(text)
+                combo = self.Combo.CTRL_SHIFT_V.value if use_shift else self.Combo.CTRL_V.value
+                key_combination(list(combo))
+
+            case self.Commands.DeleteCharsBackward(count=count):
+                sequence = self.Stroke.BACKSPACE.value * count
+                key_seq(list(sequence), next_delay_ms=self._delay_between_keys_ms)
+
+            case self.Commands.DeleteCharsForward(count=count):
+                sequence = self.Stroke.DELETE.value * count
+                key_seq(list(sequence), next_delay_ms=self._delay_between_keys_ms)
+
+            case self.Commands.GoLeft(count=count):
+                sequence = self.Stroke.LEFT.value * count
+                key_seq(list(sequence), next_delay_ms=self._delay_between_keys_ms)
+
+            case self.Commands.GoRight(count=count):
+                sequence = self.Stroke.RIGHT.value * count
+                key_seq(list(sequence), next_delay_ms=self._delay_between_keys_ms)
+
+            case _:  # pragma: no cover - defensive
+                raise ValueError(f"Unknown keyboard command: {cmd}")
 
 
 class HotKeyTask:
@@ -570,51 +578,53 @@ class HotKeyTask:
                             last_release_time[scancode] = current_time
                         continue
 
-                    if key_event.keystate == self.KEY_DOWN and not hotkey_pressed:
-                        if current_time - toggle_stop_time < toggle_cooldown:
-                            continue
-                        if current_time - last_release_time[scancode] < self.config.double_tap_window:
-                            is_toggle_mode = True
-                            active_hotkey = scancode
-                            hotkey_pressed = True
-                            name = next(k for k, v in F_KEY_CODES.items() if v == scancode)
-                            print(f"[Toggle mode activated with {name.upper()}]", file=sys.stderr)
-                        else:
+                    match key_event.keystate:
+                        case self.KEY_DOWN if not hotkey_pressed:
+                            if current_time - toggle_stop_time < toggle_cooldown:
+                                continue
+                            if current_time - last_release_time[scancode] < self.config.double_tap_window:
+                                is_toggle_mode = True
+                                active_hotkey = scancode
+                                hotkey_pressed = True
+                                name = next(k for k, v in F_KEY_CODES.items() if v == scancode)
+                                print(f"[Toggle mode activated with {name.upper()}]", file=sys.stderr)
+                            else:
+                                is_toggle_mode = False
+                                hotkey_pressed = True
+                                active_hotkey = scancode
+                            self.bus.shift_pressed.clear()
+                            if any(code in self.config.device.active_keys() for code in self.SHIFT_CODES):
+                                self.bus.shift_pressed.set()
+                            self.bus.recording.set()
+                            print(f"\n--- {datetime.now()} ---")
+
+                        case self.KEY_UP if hotkey_pressed and not is_toggle_mode:
+                            last_release_time[scancode] = current_time
+                            hotkey_pressed = False
+                            active_hotkey = None
+                            self.bus.recording.clear()
+                            self.bus.shift_pressed.clear()
+
+                        case self.KEY_UP if is_toggle_mode:
+                            last_release_time[scancode] = current_time
+                            hotkey_pressed = False
+
+                        case self.KEY_DOWN if is_toggle_mode:
                             is_toggle_mode = False
-                            hotkey_pressed = True
-                            active_hotkey = scancode
-                        self.bus.shift_pressed.clear()
-                        if any(code in self.config.device.active_keys() for code in self.SHIFT_CODES):
-                            self.bus.shift_pressed.set()
-                        self.bus.recording.set()
-                        print(f"\n--- {datetime.now()} ---")
-
-                    elif key_event.keystate == self.KEY_UP and hotkey_pressed and not is_toggle_mode:
-                        last_release_time[scancode] = current_time
-                        hotkey_pressed = False
-                        active_hotkey = None
-                        self.bus.recording.clear()
-                        self.bus.shift_pressed.clear()
-
-                    elif key_event.keystate == self.KEY_UP and is_toggle_mode:
-                        last_release_time[scancode] = current_time
-                        hotkey_pressed = False
-
-                    elif key_event.keystate == self.KEY_DOWN and is_toggle_mode:
-                        is_toggle_mode = False
-                        active_hotkey = None
-                        hotkey_pressed = False
-                        toggle_stop_time = current_time
-                        name = next(k for k, v in F_KEY_CODES.items() if v == scancode)
-                        print(f"[Toggle mode deactivated with {name.upper()}]", file=sys.stderr)
-                        self.bus.recording.clear()
-                        self.bus.shift_pressed.clear()
+                            active_hotkey = None
+                            hotkey_pressed = False
+                            toggle_stop_time = current_time
+                            name = next(k for k, v in F_KEY_CODES.items() if v == scancode)
+                            print(f"[Toggle mode deactivated with {name.upper()}]", file=sys.stderr)
+                            self.bus.recording.clear()
+                            self.bus.shift_pressed.clear()
 
                 elif self.bus.recording.is_set() and scancode in self.SHIFT_CODES:
-                    if key_event.keystate == self.KEY_DOWN:
-                        self.bus.shift_pressed.set()
-                    elif key_event.keystate == self.KEY_UP:
-                        self.bus.shift_pressed.clear()
+                    match key_event.keystate:
+                        case self.KEY_DOWN:
+                            self.bus.shift_pressed.set()
+                        case self.KEY_UP:
+                            self.bus.shift_pressed.clear()
 
         except asyncio.CancelledError:
             pass
@@ -824,14 +834,18 @@ class TranscriptionTask:
                     continue
                 event = json.loads(raw)
                 etype = event.get("type", "")
-                if etype == self.EVENT_SPEECH_STARTED:
-                    self.bus.speech_active.set()
-                elif etype == self.EVENT_DELTA:
-                    await self._handle_delta(event, current_transcription)
-                elif etype == self.EVENT_DONE:
-                    await self._handle_done(event, previous_transcriptions, current_transcription)
-                    if not self.bus.recording.is_set():
-                        break
+                match etype:
+                    case self.EVENT_SPEECH_STARTED:
+                        self.bus.speech_active.set()
+
+                    case self.EVENT_DELTA:
+                        await self._handle_delta(event, current_transcription)
+
+                    case self.EVENT_DONE:
+                        await self._handle_done(event, previous_transcriptions, current_transcription)
+                        if not self.bus.recording.is_set():
+                            break
+
         except asyncio.CancelledError:
             pass
 
@@ -1030,12 +1044,16 @@ NEW TEXT TO CORRECT:
         try:
             while not self.bus.stop.is_set():
                 cmd = await self.bus.post_commands.get()
-                if isinstance(cmd, self.Commands.Shutdown):
-                    break
-                if isinstance(cmd, self.Commands.ProcessSegment):
-                    await self._handle_segment(cmd)
-                elif isinstance(cmd, self.Commands.SessionComplete):
-                    await self._handle_session_complete(cmd)
+                match cmd:
+                    case self.Commands.Shutdown():
+                        break
+
+                    case self.Commands.ProcessSegment():
+                        await self._handle_segment(cmd)
+
+                    case self.Commands.SessionComplete():
+                        await self._handle_session_complete(cmd)
+
         except asyncio.CancelledError:
             pass
 
@@ -1217,10 +1235,11 @@ class BufferTask:
         async def _move_cursor_to(self, target_index: int):
             target_index = max(0, min(target_index, len(self.text)))
             delta = target_index - self.cursor
-            if delta > 0:
-                await self._enqueue(KeyboardTask.Commands.GoRight(delta))
-            elif delta < 0:
-                await self._enqueue(KeyboardTask.Commands.GoLeft(-delta))
+            match delta:
+                case _ if delta > 0:
+                    await self._enqueue(KeyboardTask.Commands.GoRight(delta))
+                case _ if delta < 0:
+                    await self._enqueue(KeyboardTask.Commands.GoLeft(-delta))
             self.cursor = target_index
 
         def start_session_if_needed(self):
@@ -1420,16 +1439,21 @@ class BufferTask:
         try:
             while not self.bus.stop.is_set():
                 cmd = await self.bus.buffer_commands.get()
-                if isinstance(cmd, self.Commands.Shutdown):
-                    break
-                if isinstance(cmd, self.Commands.InsertSegment):
-                    if cmd.in_session:
-                        self.manager.start_session_if_needed()
-                    await self.manager.insert_segment(cmd.seq_num, cmd.text)
-                elif isinstance(cmd, self.Commands.ApplyCorrection):
-                    await self.manager.apply_correction(cmd.seq_num, cmd.corrected_text)
-                elif isinstance(cmd, self.Commands.ApplySessionCorrection):
-                    await self.manager.apply_correction_session(cmd.corrected_text)
+                match cmd:
+                    case self.Commands.Shutdown():
+                        break
+
+                    case self.Commands.InsertSegment(in_session=in_session, seq_num=seq_num, text=text):
+                        if in_session:
+                            self.manager.start_session_if_needed()
+                        await self.manager.insert_segment(seq_num, text)
+
+                    case self.Commands.ApplyCorrection(seq_num=seq_num, corrected_text=corrected_text):
+                        await self.manager.apply_correction(seq_num, corrected_text)
+
+                    case self.Commands.ApplySessionCorrection(corrected_text=corrected_text):
+                        await self.manager.apply_correction_session(corrected_text)
+
         except asyncio.CancelledError:
             pass
 
