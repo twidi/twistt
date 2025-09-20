@@ -444,6 +444,7 @@ class Bus:
         self.shift_pressed = asyncio.Event()
         self.recording = asyncio.Event()
         self.speech_active = asyncio.Event()
+        self.keyboard_busy = asyncio.Event()
         self.post_active = asyncio.Event()
         self.stop = asyncio.Event()
 
@@ -496,12 +497,18 @@ class KeyboardTask:
             while not self.bus.stop.is_set():
                 cmd = await self.bus.keyboard_commands.get()
                 if isinstance(cmd, self.Commands.Shutdown):
+                    self.bus.keyboard_busy.clear()
                     break
+                self.bus.keyboard_busy.set()
                 await self._ensure_min_delay_between_actions()
                 self._execute(cmd)
                 self._last_action_time = time.perf_counter()
+                if self.bus.keyboard_commands.empty():
+                    self.bus.keyboard_busy.clear()
         except asyncio.CancelledError:
             pass
+        finally:
+            self.bus.keyboard_busy.clear()
 
     async def _ensure_min_delay_between_actions(self):
         if self._last_action_time == 0.0:
@@ -520,29 +527,26 @@ class KeyboardTask:
                 combo = self.Combo.CTRL_SHIFT_V.value if use_shift else self.Combo.CTRL_V.value
                 key_combination(list(combo))
 
-            case self.Commands.CopyPaste(text=text, use_shift=use_shift):
+            case self.Commands.CopyPaste(text=text, use_shift=use_shift) if text:
                 pyperclip.copy(text)
                 combo = self.Combo.CTRL_SHIFT_V.value if use_shift else self.Combo.CTRL_V.value
                 key_combination(list(combo))
 
-            case self.Commands.DeleteCharsBackward(count=count):
+            case self.Commands.DeleteCharsBackward(count=count) if count > 0:
                 sequence = self.Stroke.BACKSPACE.value * count
                 key_seq(list(sequence), next_delay_ms=self._delay_between_keys_ms)
 
-            case self.Commands.DeleteCharsForward(count=count):
+            case self.Commands.DeleteCharsForward(count=count) if count > 0:
                 sequence = self.Stroke.DELETE.value * count
                 key_seq(list(sequence), next_delay_ms=self._delay_between_keys_ms)
 
-            case self.Commands.GoLeft(count=count):
+            case self.Commands.GoLeft(count=count) if count > 0:
                 sequence = self.Stroke.LEFT.value * count
                 key_seq(list(sequence), next_delay_ms=self._delay_between_keys_ms)
 
-            case self.Commands.GoRight(count=count):
+            case self.Commands.GoRight(count=count) if count > 0:
                 sequence = self.Stroke.RIGHT.value * count
                 key_seq(list(sequence), next_delay_ms=self._delay_between_keys_ms)
-
-            case _:  # pragma: no cover - defensive
-                raise ValueError(f"Unknown keyboard command: {cmd}")
 
 
 class HotKeyTask:
@@ -1196,10 +1200,12 @@ class BufferTask:
             seq_num: int
             text: str
             in_session: bool
+            cursor_at_start: bool = False
 
         class ApplyCorrection(NamedTuple):
             seq_num: int
             corrected_text: str
+            cursor_at_start: bool = False
 
         class ApplySessionCorrection(NamedTuple):
             corrected_text: str
@@ -1212,6 +1218,8 @@ class BufferTask:
             self.bus = bus
 
         async def output_transcription(self, text: str):
+            if not text:
+                return
             try:
                 await self.bus.keyboard_commands.put(
                     KeyboardTask.Commands.CopyPaste(
@@ -1288,12 +1296,14 @@ class BufferTask:
 
             if move_cost_to_end <= move_cost_to_start:
                 await self._move_cursor_to(abs_end)
-                await self._enqueue(KeyboardTask.Commands.DeleteCharsBackward(delete_len))
+                if delete_len:
+                    await self._enqueue(KeyboardTask.Commands.DeleteCharsBackward(delete_len))
                 self.text = self.text[:abs_start] + self.text[abs_end:]
                 self.cursor = abs_start
             else:
                 await self._move_cursor_to(abs_start)
-                await self._enqueue(KeyboardTask.Commands.DeleteCharsForward(delete_len))
+                if delete_len:
+                    await self._enqueue(KeyboardTask.Commands.DeleteCharsForward(delete_len))
                 self.text = self.text[:abs_start] + self.text[abs_end:]
                 self.cursor = abs_start
 
@@ -1317,7 +1327,13 @@ class BufferTask:
             async with self.lock:
                 await self._finalize_cursor(self.cursor)
 
-        async def insert_segment(self, seq_num: int, text: str, in_session: bool):
+        async def insert_segment(
+            self,
+            seq_num: int,
+            text: str,
+            in_session: bool,
+            cursor_at_start: bool,
+        ):
             async with self.lock:
                 insert_len = len(text)
                 insert_index = 0
@@ -1333,8 +1349,9 @@ class BufferTask:
                     insert_pos = self.segments[next_seq]["start"]
 
                 await self._move_cursor_to(insert_pos)
-                with suppress(Exception):
-                    await self.output_adapter.output_transcription(text)
+                if text:
+                    with suppress(Exception):
+                        await self.output_adapter.output_transcription(text)
 
                 self.text = self.text[:insert_pos] + text + self.text[insert_pos:]
                 self.cursor = insert_pos + insert_len
@@ -1364,9 +1381,17 @@ class BufferTask:
                             self.session_segment_ids[0]
                         ]["start"]
 
-                await self._finalize_cursor(self.segments[seq_num]["start"] + len(self.segments[seq_num]["text_current"]))
+                target_pos = insert_pos if cursor_at_start else insert_pos + insert_len
+                await self._finalize_cursor(target_pos)
 
-        async def apply_correction(self, seq_num: int, corrected_text: str, replace_threshold: float = 0.7):
+        async def apply_correction(
+            self,
+            seq_num: int,
+            corrected_text: str,
+            *,
+            cursor_at_start: bool = False,
+            replace_threshold: float = 0.7,
+        ):
             async with self.lock:
                 seg = self.segments.get(seq_num)
                 if not seg:
@@ -1374,7 +1399,8 @@ class BufferTask:
                 old = seg["text_current"]
                 start_base = seg["start"]
                 if old == corrected_text:
-                    await self._finalize_cursor(start_base + len(old))
+                    target = start_base if cursor_at_start else start_base + len(old)
+                    await self._finalize_cursor(target)
                     return
                 try:
                     sm = difflib.SequenceMatcher(None, old, corrected_text)
@@ -1398,7 +1424,8 @@ class BufferTask:
                 if sm is None or ratio < (1.0 - replace_threshold):
                     abs_end = start_base + len(old)
                     await self._move_cursor_to(abs_end)
-                    await self._enqueue(KeyboardTask.Commands.DeleteCharsBackward(len(old)))
+                    if old:
+                        await self._enqueue(KeyboardTask.Commands.DeleteCharsBackward(len(old)))
                     self.text = self.text[:start_base] + self.text[abs_end:]
                     self.cursor = start_base
                     if corrected_text:
@@ -1407,8 +1434,8 @@ class BufferTask:
                         self.cursor += len(corrected_text)
                     seg["text_current"] = corrected_text
                     shift_following(len(corrected_text) - len(old))
-                    self.cursor = start_base + len(corrected_text)
-                    await self._finalize_cursor(self.cursor)
+                    target = start_base if cursor_at_start else start_base + len(corrected_text)
+                    await self._finalize_cursor(target)
                     return
 
                 lcp = self._common_prefix_len(old, corrected_text)
@@ -1425,8 +1452,8 @@ class BufferTask:
                 await self._replace_range(abs_start, abs_end, new_mid)
                 seg["text_current"] = corrected_text
                 shift_following(len(corrected_text) - len(old))
-                self.cursor = start_base + len(corrected_text)
-                await self._finalize_cursor(self.cursor)
+                target = start_base if cursor_at_start else start_base + len(corrected_text)
+                await self._finalize_cursor(target)
 
         async def apply_correction_session(self, corrected_text: str, replace_threshold: float = 0.7):
             async with self.lock:
@@ -1456,9 +1483,11 @@ class BufferTask:
                 if sm is None or ratio < (1.0 - replace_threshold) or tiny_unchanged:
                     abs_end = len(self.text)
                     await self._move_cursor_to(abs_end)
-                    await self._enqueue(KeyboardTask.Commands.DeleteCharsBackward(len(old)))
-                    with suppress(Exception):
-                        await self.output_adapter.output_transcription(corrected_text)
+                    if old:
+                        await self._enqueue(KeyboardTask.Commands.DeleteCharsBackward(len(old)))
+                    if corrected_text:
+                        with suppress(Exception):
+                            await self.output_adapter.output_transcription(corrected_text)
                     self.text = self.text[:start_base] + corrected_text
                     self.cursor = start_base + len(corrected_text)
                     running = start_base
@@ -1470,7 +1499,8 @@ class BufferTask:
                             running += seg_len
                     self.session_active = False
                     self.session_segment_ids = []
-                    await self._finalize_cursor(self.cursor)
+                    target = start_base + len(corrected_text)
+                    await self._finalize_cursor(target)
                     return
                 lcp = self._common_prefix_len(old, corrected_text)
                 max_suffix = min(len(old) - lcp, len(corrected_text) - lcp)
@@ -1486,8 +1516,8 @@ class BufferTask:
                 await self._replace_range(abs_start, abs_end, new_mid)
                 self.session_active = False
                 self.session_segment_ids = []
-                self.cursor = start_base + len(corrected_text)
-                await self._finalize_cursor(self.cursor)
+                target = start_base + len(corrected_text)
+                await self._finalize_cursor(target)
 
     def __init__(self, bus: Bus, config: Config.Buffer):
         self.bus = bus
@@ -1505,13 +1535,26 @@ class BufferTask:
                     case self.Commands.Shutdown():
                         break
 
-                    case self.Commands.InsertSegment(in_session=in_session, seq_num=seq_num, text=text):
+                    case self.Commands.InsertSegment(
+                        in_session=in_session,
+                        seq_num=seq_num,
+                        text=text,
+                        cursor_at_start=cursor_at_start,
+                    ):
                         if in_session:
                             self.manager.start_session_if_needed()
-                        await self.manager.insert_segment(seq_num, text, in_session)
+                        await self.manager.insert_segment(seq_num, text, in_session, cursor_at_start)
 
-                    case self.Commands.ApplyCorrection(seq_num=seq_num, corrected_text=corrected_text):
-                        await self.manager.apply_correction(seq_num, corrected_text)
+                    case self.Commands.ApplyCorrection(
+                        seq_num=seq_num,
+                        corrected_text=corrected_text,
+                        cursor_at_start=cursor_at_start,
+                    ):
+                        await self.manager.apply_correction(
+                            seq_num,
+                            corrected_text,
+                            cursor_at_start=cursor_at_start,
+                        )
 
                     case self.Commands.ApplySessionCorrection(corrected_text=corrected_text):
                         await self.manager.apply_correction_session(corrected_text)
@@ -1533,6 +1576,68 @@ class BufferTask:
             pass
 
 
+class IndicatorTask:
+    SEQ_NUM = 2_000_000_000
+    UPDATE_INTERVAL = 0.2
+
+    def __init__(self, bus: Bus):
+        self.bus = bus
+        self.current_text: str = ""
+        self.initialized = False
+
+    def _build_indicator_text(self) -> str:
+        states: list[str] = []
+        if self.bus.post_active.is_set():
+            states.append("post-processing")
+        if self.bus.speech_active.is_set():
+            states.append("transcribing")
+        if self.bus.recording.is_set():
+            states.append("listening")
+        if not states:
+            return ""
+        labels = ", ".join(f"{state}..." for state in states)
+        return f"({labels})"
+
+    async def _maybe_update(self):
+        desired = self._build_indicator_text()
+        if not self.initialized:
+            if not desired:
+                return
+            if self.bus.keyboard_busy.is_set():
+                return
+            await self.bus.buffer_commands.put(
+                BufferTask.Commands.InsertSegment(
+                    seq_num=self.SEQ_NUM,
+                    text=desired,
+                    in_session=False,
+                    cursor_at_start=True,
+                )
+            )
+            self.current_text = desired
+            self.initialized = True
+            return
+        if desired == self.current_text:
+            return
+        if self.bus.keyboard_busy.is_set():
+            return
+        await self.bus.buffer_commands.put(
+            BufferTask.Commands.ApplyCorrection(
+                seq_num=self.SEQ_NUM,
+                corrected_text=desired,
+                cursor_at_start=True,
+            )
+        )
+        self.current_text = desired
+
+    async def run(self):
+        try:
+            while not self.bus.stop.is_set():
+                await self._maybe_update()
+                await asyncio.sleep(self.UPDATE_INTERVAL)
+        except asyncio.CancelledError:
+            pass
+
+
 async def main_async():
     app_config = CommandLineParser.parse()
     if app_config is None:
@@ -1548,12 +1653,14 @@ async def main_async():
         keyboard_task = KeyboardTask(bus)
         buffer_task = BufferTask(bus, app_config.buffer)
         transcription_task = TranscriptionTask(bus, app_config.transcription, app_config.post)
+        indicator_task = IndicatorTask(bus)
 
         tasks.append(loop.create_task(hotkey_task.run()))
         tasks.append(loop.create_task(capture_task.run()))
         tasks.append(loop.create_task(keyboard_task.run()))
         tasks.append(loop.create_task(buffer_task.run()))
         tasks.append(loop.create_task(transcription_task.run()))
+        tasks.append(loop.create_task(indicator_task.run()))
 
         if app_config.post.enabled:
             post_task = PostTreatmentTask(bus, app_config.post)
