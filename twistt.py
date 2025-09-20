@@ -900,9 +900,7 @@ class TranscriptionTask:
             return
 
         print(" ", end="", flush=True)
-        final_text = transcript
-        if self.bus.recording.is_set():
-            final_text += " "
+        final_text = transcript + " "
 
         previous_text = "".join(previous_transcriptions)
 
