@@ -636,6 +636,7 @@ class TranscriptionTask:
     QUEUE_IDLE_SLEEP = 0.05
     CHUNK_TIMEOUT = 0.1
     OPENAI_BETA_HEADER = "realtime=v1"
+    STREAM_DELTAS = True
 
     def __init__(self, bus: Bus, config: Config.Transcription, post_config: Config.PostTreatment):
         self.bus = bus
@@ -647,6 +648,8 @@ class TranscriptionTask:
             "OpenAI-Beta": self.OPENAI_BETA_HEADER,
         }
         self.session_json = self._build_session_json()
+        self._active_seq_num: Optional[int] = None
+        self._active_in_session = False
 
     async def run(self):
         while not self.bus.stop.is_set():
@@ -773,72 +776,119 @@ class TranscriptionTask:
                 if etype == self.EVENT_SPEECH_STARTED:
                     self.bus.speech_active.set()
                 elif etype == self.EVENT_DELTA:
-                    delta = event.get("delta")
-                    if delta:
-                        current_transcription.append(delta)
-                        self.bus.speech_active.set()
-                        print(delta, end="", flush=True)
+                    await self._handle_delta(event, current_transcription)
                 elif etype == self.EVENT_DONE:
-                    await self._handle_done(previous_transcriptions, current_transcription)
+                    await self._handle_done(event, previous_transcriptions, current_transcription)
                     if not self.bus.recording.is_set():
                         break
         except asyncio.CancelledError:
             pass
 
-    async def _handle_done(self, previous_transcriptions, current_transcription):
-        if not current_transcription:
-            self.bus.speech_active.clear()
-            return
+    def _reset_active_sequence(self):
+        self._active_seq_num = None
+        self._active_in_session = False
 
-        full_text = "".join(current_transcription)
-        if self.bus.recording.is_set():
-            full_text += " "
-
+    def _should_stream_deltas(self) -> bool:
+        if not self.STREAM_DELTAS:
+            return False
         if self.config.output_mode is OutputMode.BATCH:
+            return not self.post_config.enabled or self.post_config.post_correct
+        if self.config.output_mode is OutputMode.FULL:
+            return self.post_config.enabled and self.post_config.post_correct
+        return False
+
+    async def _upsert_buffer_segment(self, text: str, in_session: bool) -> int:
+        seq = self._active_seq_num
+        if seq is None:
             seq = self.seq_counter
             self.seq_counter += 1
-            previous_text = "".join(previous_transcriptions)
+            await self.bus.buffer_commands.put(
+                BufferTask.Commands.InsertSegment(
+                    seq_num=seq,
+                    text=text,
+                    in_session=in_session,
+                )
+            )
+        else:
+            await self.bus.buffer_commands.put(
+                BufferTask.Commands.ApplyCorrection(
+                    seq_num=seq,
+                    corrected_text=text,
+                )
+            )
+        self._active_seq_num = seq
+        self._active_in_session = in_session
+        return seq
+
+    async def _handle_delta(self, event: dict, current_transcription: list[str]):
+        delta = event.get("delta")
+        if not delta:
+            return
+        current_transcription.append(delta)
+        self.bus.speech_active.set()
+        print(delta, end="", flush=True)
+        if not self._should_stream_deltas():
+            return
+        segment_text = "".join(current_transcription)
+        in_session = self.config.output_mode is OutputMode.FULL
+        await self._upsert_buffer_segment(segment_text, in_session)
+
+    async def _handle_done(
+            self,
+            event: dict,
+            previous_transcriptions: list[str],
+            current_transcription: list[str],
+    ):
+        transcript = event.get("transcript")
+        if transcript is None:
+            transcript = "".join(current_transcription)
+        if not transcript:
+            current_transcription.clear()
+            self.bus.speech_active.clear()
+            self._reset_active_sequence()
+            return
+
+        print(" ", end="", flush=True)
+        final_text = transcript
+        if self.bus.recording.is_set():
+            final_text += " "
+
+        previous_text = "".join(previous_transcriptions)
+
+        if self.config.output_mode is OutputMode.BATCH:
             if self.post_config.enabled:
                 if self.post_config.post_correct:
-                    await self.bus.buffer_commands.put(
-                        BufferTask.Commands.InsertSegment(
+                    seq = await self._upsert_buffer_segment(final_text, in_session=False)
+                    await self.bus.post_commands.put(
+                        PostTreatmentTask.Commands.ProcessSegment(
                             seq_num=seq,
-                            text=full_text,
-                            in_session=False,
+                            text=final_text,
+                            previous_text=previous_text,
+                            stream_output=False,
                         )
                     )
-                await self.bus.post_commands.put(
-                    PostTreatmentTask.Commands.ProcessSegment(
-                        seq_num=seq,
-                        text=full_text,
-                        previous_text=previous_text,
-                        stream_output=not self.post_config.post_correct,
+                else:
+                    seq = self.seq_counter
+                    self.seq_counter += 1
+                    await self.bus.post_commands.put(
+                        PostTreatmentTask.Commands.ProcessSegment(
+                            seq_num=seq,
+                            text=final_text,
+                            previous_text=previous_text,
+                            stream_output=True,
+                        )
                     )
-                )
             else:
-                await self.bus.buffer_commands.put(
-                    BufferTask.Commands.InsertSegment(
-                        seq_num=seq,
-                        text=full_text,
-                        in_session=False,
-                    )
-                )
-            previous_transcriptions.append(full_text)
+                await self._upsert_buffer_segment(final_text, in_session=False)
+            previous_transcriptions.append(final_text)
         else:
-            previous_transcriptions.append(full_text)
+            previous_transcriptions.append(final_text)
             if self.post_config.enabled and self.post_config.post_correct:
-                seq = self.seq_counter
-                self.seq_counter += 1
-                await self.bus.buffer_commands.put(
-                    BufferTask.Commands.InsertSegment(
-                        seq_num=seq,
-                        text=full_text,
-                        in_session=True,
-                    )
-                )
+                await self._upsert_buffer_segment(final_text, in_session=True)
 
         current_transcription.clear()
         self.bus.speech_active.clear()
+        self._reset_active_sequence()
 
     def _build_session_json(self) -> str:
         session_config = {
