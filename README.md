@@ -124,7 +124,7 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 # Output mode
 TWISTT_OUTPUT_MODE=batch  # batch (default) or full
 TWISTT_USE_TYPING=false  # Type ASCII characters via ydotool instead of copy/paste (slower)
-# Post-correct mode (apply corrections in-place with keyboard)
+# Post-correct mode (apply corrections in-place with keyboard; requires batch output mode)
 TWISTT_POST_CORRECT=false
 ```
 
@@ -143,7 +143,7 @@ TWISTT_POST_CORRECT=false
 | `--post-prompt-file` | `TWISTT_POST_TREATMENT_PROMPT_FILE` | - | File containing post-treatment prompt |
 | `--post-model` | `TWISTT_POST_TREATMENT_MODEL` | gpt-4o-mini | Model for post-treatment |
 | `--post-provider` | `TWISTT_POST_TREATMENT_PROVIDER` | openai | Provider for post-treatment (openai, cerebras, openrouter) |
-| `--post-correct` | `TWISTT_POST_CORRECT` | false | Apply post-treatment by correcting already-pasted text in-place |
+| `--post-correct` | `TWISTT_POST_CORRECT` | false | Apply post-treatment by correcting already-pasted text in-place (requires batch output mode) |
 | `--cerebras-api-key` | `TWISTT_CEREBRAS_API_KEY` or `CEREBRAS_API_KEY` | - | Cerebras API key |
 | `--openrouter-api-key` | `TWISTT_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` | - | OpenRouter API key |
 | `--output-mode` | `TWISTT_OUTPUT_MODE` | batch | Output mode: batch (incremental) or full (complete on release) |

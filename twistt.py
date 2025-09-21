@@ -81,6 +81,14 @@ class OutputMode(Enum):
     BATCH = "batch"
     FULL = "full"
 
+    @property
+    def is_batch(self) -> bool:
+        return self is OutputMode.BATCH
+
+    @property
+    def is_full(self) -> bool:
+        return self is OutputMode.FULL
+
 
 class Config:
     class HotKey(NamedTuple):
@@ -926,7 +934,6 @@ class TranscriptionTask:
         }
         self.session_json = self._build_session_json()
         self._active_seq_num: Optional[int] = None
-        self._active_in_session = False
         self._chars_since_stream = 0
 
     async def run(self):
@@ -976,24 +983,16 @@ class TranscriptionTask:
 
             if not previous_transcriptions:
                 continue
-            if self.config.output_mode is OutputMode.FULL:
+
+            if self.config.output_mode.is_full:
                 full_text = "".join(previous_transcriptions)
                 if self.post_config.enabled:
-                    if self.post_config.post_correct:
-                        self.seq_counter += 1
-                        await self.comm.queue_post_command(
-                            PostTreatmentTask.Commands.SessionComplete(
-                                text=full_text,
-                                stream_output=False,
-                            )
+                    await self.comm.queue_post_command(
+                        PostTreatmentTask.Commands.ProcessFullText(
+                            text=full_text,
+                            stream_output=True,
                         )
-                    else:
-                        await self.comm.queue_post_command(
-                            PostTreatmentTask.Commands.SessionComplete(
-                                text=full_text,
-                                stream_output=True,
-                            )
-                        )
+                    )
                 else:
                     seq = self.seq_counter
                     self.seq_counter += 1
@@ -1001,7 +1000,6 @@ class TranscriptionTask:
                         BufferTask.Commands.InsertSegment(
                             seq_num=seq,
                             text=full_text,
-                            in_session=False,
                         )
                     )
 
@@ -1066,19 +1064,16 @@ class TranscriptionTask:
 
     def _reset_active_sequence(self):
         self._active_seq_num = None
-        self._active_in_session = False
         self._chars_since_stream = 0
 
-    def _should_stream_deltas(self) -> bool:
+    def _should_output_deltas(self) -> bool:
         if not self.STREAM_DELTAS:
             return False
-        if self.config.output_mode is OutputMode.BATCH:
+        if self.config.output_mode.is_batch:
             return not self.post_config.enabled or self.post_config.post_correct
-        if self.config.output_mode is OutputMode.FULL:
-            return self.post_config.enabled and self.post_config.post_correct
         return False
 
-    async def _upsert_buffer_segment(self, text: str, in_session: bool) -> int:
+    async def _upsert_buffer_segment(self, text: str) -> int:
         seq = self._active_seq_num
         if seq is None:
             seq = self.seq_counter
@@ -1087,7 +1082,6 @@ class TranscriptionTask:
                 BufferTask.Commands.InsertSegment(
                     seq_num=seq,
                     text=text,
-                    in_session=in_session,
                 )
             )
         else:
@@ -1098,7 +1092,6 @@ class TranscriptionTask:
                 )
             )
         self._active_seq_num = seq
-        self._active_in_session = in_session
         return seq
 
     async def _handle_delta(self, event: dict, current_transcription: list[str]):
@@ -1108,14 +1101,13 @@ class TranscriptionTask:
         current_transcription.append(delta)
         self.comm.toggle_speech_active(True)
         print(delta, end="", flush=True)
-        if not self._should_stream_deltas():
+        if not self._should_output_deltas():
             return
         self._chars_since_stream += len(delta)
         if self._chars_since_stream < self.STREAM_DELTA_MIN_CHARS:
             return
         segment_text = "".join(current_transcription)
-        in_session = self.config.output_mode is OutputMode.FULL
-        await self._upsert_buffer_segment(segment_text, in_session)
+        await self._upsert_buffer_segment(segment_text)
         self._chars_since_stream = 0
 
     async def _handle_done(
@@ -1138,10 +1130,10 @@ class TranscriptionTask:
 
         previous_text = "".join(previous_transcriptions)
 
-        if self.config.output_mode is OutputMode.BATCH:
+        if self.config.output_mode.is_batch:
             if self.post_config.enabled:
                 if self.post_config.post_correct:
-                    seq = await self._upsert_buffer_segment(final_text, in_session=False)
+                    seq = await self._upsert_buffer_segment(final_text)
                     await self.comm.queue_post_command(
                         PostTreatmentTask.Commands.ProcessSegment(
                             seq_num=seq,
@@ -1162,12 +1154,9 @@ class TranscriptionTask:
                         )
                     )
             else:
-                await self._upsert_buffer_segment(final_text, in_session=False)
-            previous_transcriptions.append(final_text)
-        else:
-            previous_transcriptions.append(final_text)
-            if self.post_config.enabled and self.post_config.post_correct:
-                await self._upsert_buffer_segment(final_text, in_session=True)
+                await self._upsert_buffer_segment(final_text)
+
+        previous_transcriptions.append(final_text)
 
         current_transcription.clear()
         self.comm.toggle_speech_active(False)
@@ -1240,7 +1229,7 @@ NEW TEXT TO CORRECT:
             previous_text: str
             stream_output: bool
 
-        class SessionComplete(NamedTuple):
+        class ProcessFullText(NamedTuple):
             text: str
             stream_output: bool
 
@@ -1252,6 +1241,7 @@ NEW TEXT TO CORRECT:
         self.config = config
         self.client = self._build_client()
         self._buffer_seq_counter = 1_000_000
+        self._use_post_correction = self.config.post_correct and self.config.output_mode.is_batch
 
     def _next_buffer_seq(self) -> int:
         seq = self._buffer_seq_counter
@@ -1271,8 +1261,8 @@ NEW TEXT TO CORRECT:
                         case self.Commands.ProcessSegment():
                             await self._handle_segment(cmd)
 
-                        case self.Commands.SessionComplete():
-                            await self._handle_session_complete(cmd)
+                        case self.Commands.ProcessFullText():
+                            await self._handle_full_text(cmd)
 
         except CancelledError:
             pass
@@ -1282,17 +1272,16 @@ NEW TEXT TO CORRECT:
         async for piece in self._post_process(cmd.text, cmd.previous_text, cmd.stream_output):
             if piece is None:
                 break
-            if self.config.post_correct:
+            if self._use_post_correction:
                 chunks.append(piece)
             else:
                 await self.comm.queue_buffer_command(
                     BufferTask.Commands.InsertSegment(
                         seq_num=self._next_buffer_seq(),
                         text=piece,
-                        in_session=False,
                     )
                 )
-        if self.config.post_correct:
+        if self._use_post_correction:
             corrected = "".join(chunks) + " "
             await self.comm.queue_buffer_command(
                 BufferTask.Commands.ApplyCorrection(seq_num=cmd.seq_num, corrected_text=corrected)
@@ -1303,30 +1292,23 @@ NEW TEXT TO CORRECT:
                 BufferTask.Commands.InsertSegment(
                     seq_num=self._next_buffer_seq(),
                     text=" ",
-                    in_session=False,
                 )
             )
 
-    async def _handle_session_complete(self, cmd: "PostTreatmentTask.Commands.SessionComplete"):
+    async def _handle_full_text(self, cmd: "PostTreatmentTask.Commands.ProcessFullText"):
         chunks = []
         async for piece in self._post_process(cmd.text, "", cmd.stream_output):
             if piece is None:
                 break
-            if self.config.post_correct:
+            if self._use_post_correction:
                 chunks.append(piece)
             else:
                 await self.comm.queue_buffer_command(
                     BufferTask.Commands.InsertSegment(
                         seq_num=self._next_buffer_seq(),
                         text=piece,
-                        in_session=False,
                     )
                 )
-        if self.config.post_correct:
-            corrected = "".join(chunks)
-            await self.comm.queue_buffer_command(
-                BufferTask.Commands.ApplySessionCorrection(corrected_text=corrected)
-            )
 
     async def _post_process(
             self,
@@ -1335,7 +1317,7 @@ NEW TEXT TO CORRECT:
             stream_output: bool,
     ) -> AsyncIterator[Optional[str]]:
         system_message = self.SYSTEM_TEMPLATE.format(user_prompt=self.config.prompt)
-        if self.config.output_mode is OutputMode.FULL:
+        if self.config.output_mode.is_full:
             previous_context = "No previous transcription"
         else:
             previous_context = previous_text if previous_text else "No previous transcription"
@@ -1428,16 +1410,12 @@ class BufferTask:
         class InsertSegment(NamedTuple):
             seq_num: int
             text: str
-            in_session: bool
             position_cursor_at: Optional["BufferTask.PositionCursorAt"] = None
 
         class ApplyCorrection(NamedTuple):
             seq_num: int
             corrected_text: str
             position_cursor_at: Optional["BufferTask.PositionCursorAt"] = None
-
-        class ApplySessionCorrection(NamedTuple):
-            corrected_text: str
 
         class Shutdown(NamedTuple):
             pass
@@ -1470,9 +1448,6 @@ class BufferTask:
             self.segments = {}
             self.segment_order = []
             self.lock = asyncio.Lock()
-            self.session_active = False
-            self.session_start_index = 0
-            self.session_segment_ids = []
 
         async def _enqueue(self, command):
             await self.comm.queue_keyboard_command(command)
@@ -1486,12 +1461,6 @@ class BufferTask:
                 case _ if delta < 0:
                     await self._enqueue(OutputTask.Commands.GoLeft(-delta))
             self.cursor = target_index
-
-        def start_session_if_needed(self):
-            if not self.session_active:
-                self.session_active = True
-                self.session_start_index = len(self.text)
-                self.session_segment_ids = []
 
         @staticmethod
         def _common_prefix_len(a: str, b: str) -> int:
@@ -1556,7 +1525,6 @@ class BufferTask:
             self,
             seq_num: int,
             text: str,
-            in_session: bool,
             *,
             position_cursor_at: Optional["BufferTask.PositionCursorAt"] = None,
         ):
@@ -1593,48 +1561,23 @@ class BufferTask:
                     for sid in self.segment_order[insert_index + 1:]:
                         self.segments[sid]["start"] += insert_len
 
-                if self.session_active:
-                    if not in_session and insert_pos < self.session_start_index:
-                        self.session_start_index += insert_len
-                    if in_session and seq_num not in self.session_segment_ids:
-                        self.session_segment_ids.append(seq_num)
-                    if self.session_segment_ids:
-                        session_ids = set(self.session_segment_ids)
-                        self.session_segment_ids = [
-                            sid for sid in self.segment_order if sid in session_ids
-                        ]
-                        self.session_start_index = self.segments[
-                            self.session_segment_ids[0]
-                        ]["start"]
-
                 await self._move_cursor_at_edge(position_cursor_at, insert_pos, insert_len)
 
-        async def _apply_correction(
+        async def apply_correction(
             self,
-            seq_num: int | None,  # when None, it's for session
+            seq_num: int,
             corrected_text: str,
             *,
             position_cursor_at: Optional["BufferTask.PositionCursorAt"] = None,
             replace_threshold: float = 0.7,
         ):
-            for_session = seq_num is None
             async with self.lock:
-                if for_session:
-                    if not self.session_active:
-                        return
-                    start_base = self.session_start_index
-                    old = self.text[start_base:]
-                else:
-                    seg = self.segments.get(seq_num)
-                    if not seg:
-                        return
-                    start_base = seg["start"]
-                    old = seg["text_current"]
-
+                seg = self.segments.get(seq_num)
+                if not seg:
+                    return
+                start_base = seg["start"]
+                old = seg["text_current"]
                 if old == corrected_text:
-                    if for_session:
-                        self.session_active = False
-                        self.session_segment_ids = []
                     await self._move_cursor_at_edge(position_cursor_at, start_base, len(old))
                     return
 
@@ -1669,21 +1612,8 @@ class BufferTask:
                     abs_start = start_base
                     abs_end = start_base + len(old)
                     await self._replace_range(abs_start, abs_end, corrected_text)
-
-                    if for_session:
-                        running = start_base
-                        for sid in self.session_segment_ids:
-                            seg = self.segments.get(sid)
-                            if seg:
-                                seg_len = len(seg["text_current"])
-                                seg["start"] = running
-                                running += seg_len
-                        self.session_active = False
-                        self.session_segment_ids = []
-                    else:
-                        seg["text_current"] = corrected_text
-                        shift_following(len(corrected_text) - len(old))
-
+                    seg["text_current"] = corrected_text
+                    shift_following(len(corrected_text) - len(old))
                     await self._move_cursor_at_edge(position_cursor_at, start_base, len(corrected_text))
                     return
 
@@ -1699,43 +1629,10 @@ class BufferTask:
                 abs_start = start_base + lcp
                 abs_end = abs_start + old_mid_len
                 await self._replace_range(abs_start, abs_end, new_mid)
-                if for_session:
-                    self.session_active = False
-                    self.session_segment_ids = []
-                else:
-                    seg["text_current"] = corrected_text
-                    shift_following(len(corrected_text) - len(old))
+                seg["text_current"] = corrected_text
+                shift_following(len(corrected_text) - len(old))
 
                 await self._move_cursor_at_edge(position_cursor_at, start_base, len(corrected_text))
-
-        async def apply_correction(
-            self,
-            seq_num: int,
-            corrected_text: str,
-            *,
-            position_cursor_at: Optional["BufferTask.PositionCursorAt"] = None,
-            replace_threshold: float = 0.7,
-        ):
-            await self._apply_correction(
-                seq_num=seq_num,
-                corrected_text=corrected_text,
-                position_cursor_at=position_cursor_at,
-                replace_threshold=replace_threshold,
-            )
-
-        async def apply_correction_session(
-            self,
-            corrected_text: str,
-            *,
-            position_cursor_at: Optional["BufferTask.PositionCursorAt"] = None,
-            replace_threshold: float = 0.7
-        ):
-            await self._apply_correction(
-                seq_num=None,
-                corrected_text=corrected_text,
-                position_cursor_at=position_cursor_at,
-                replace_threshold=replace_threshold,
-            )
 
     def __init__(self, comm: Comm, config: Config.Buffer):
         self.comm = comm
@@ -1754,17 +1651,13 @@ class BufferTask:
                         break
 
                     case self.Commands.InsertSegment(
-                        in_session=in_session,
                         seq_num=seq_num,
                         text=text,
                         position_cursor_at=position_cursor_at,
                     ):
-                        if in_session:
-                            self.manager.start_session_if_needed()
                         await self.manager.insert_segment(
                             seq_num,
                             text,
-                            in_session,
                             position_cursor_at=position_cursor_at
                         )
 
@@ -1778,9 +1671,6 @@ class BufferTask:
                             corrected_text,
                             position_cursor_at=position_cursor_at,
                         )
-
-                    case self.Commands.ApplySessionCorrection(corrected_text=corrected_text):
-                        await self.manager.apply_correction_session(corrected_text)
 
         except CancelledError:
             pass
@@ -1846,7 +1736,6 @@ class IndicatorTask:
             BufferTask.Commands.InsertSegment(
                 seq_num=self.SEQ_NUM,
                 text=desired,
-                in_session=False,
                 position_cursor_at=BufferTask.PositionCursorAt.START,
             )
         )
