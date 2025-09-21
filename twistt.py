@@ -15,8 +15,6 @@
 # ]
 # ///
 
-"""Async reworked version of Twistt with pipeline responsibilities split into tasks."""
-
 from __future__ import annotations
 
 import argparse
@@ -27,9 +25,9 @@ import json
 import os
 import sys
 import time
-from asyncio import TimerHandle, create_task
+from asyncio import create_task, Queue, Event, CancelledError
 from collections.abc import AsyncIterator
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from enum import Enum
 from datetime import datetime
 from pathlib import Path
@@ -114,7 +112,7 @@ class Config:
         post_correct: bool
         output_mode: OutputMode
 
-    class Keyboard(NamedTuple):
+    class Output(NamedTuple):
         use_typing: bool
 
     class App(NamedTuple):
@@ -123,7 +121,7 @@ class Config:
         transcription: "Config.Transcription"
         post: "Config.PostTreatment"
         buffer: "Config.Buffer"
-        keyboard: "Config.Keyboard"
+        output: "Config.Output"
 
 
 class CommandLineParser:
@@ -389,7 +387,7 @@ class CommandLineParser:
                 post_correct=args.post_correct and post_treatment_enabled,
                 output_mode=output_mode,
             ),
-            keyboard=Config.Keyboard(use_typing=args.use_typing),
+            output=Config.Output(use_typing=args.use_typing),
         )
 
     @staticmethod
@@ -459,22 +457,151 @@ class CommandLineParser:
         return devices[selection]
 
 
-class Bus:
+class Comm:
     def __init__(self):
-        self.audio_chunks = janus.Queue()
-        self.post_commands: asyncio.Queue = asyncio.Queue()
-        self.buffer_commands: asyncio.Queue = asyncio.Queue()
-        self.keyboard_commands: asyncio.Queue = asyncio.Queue()
-        self.shift_pressed = asyncio.Event()
-        self.recording = asyncio.Event()
-        self.speech_active = asyncio.Event()
-        self.keyboard_busy = asyncio.Event()
-        self.post_active = asyncio.Event()
-        self.indicator_active = asyncio.Event()
-        self.stop = asyncio.Event()
+        self._audio_chunks = janus.Queue()
+        self._post_commands = Queue()
+        self._buffer_commands = Queue()
+        self._keyboard_commands = Queue()
+        self._is_shift_pressed = False
+        self._recording = Event()
+        self._is_speech_active = False
+        self._is_keyboard_busy = False
+        self._is_post_treatment_active = False
+        self._is_indicator_active = False
+        self._shutting_down = Event()
+
+    def queue_audio_chunks(self, data: bytes):
+        self._audio_chunks.sync_q.put_nowait(data)
+
+    @property
+    def has_audio_chunks(self):
+        return not self._audio_chunks.sync_q.empty()
+
+    async def wait_for_audio_chunk(self, timeout: float):
+        return await asyncio.wait_for(self._audio_chunks.async_q.get(), timeout=timeout)
+
+    def empty_audio_chunks(self):
+        with suppress(RuntimeError):
+            while self.has_audio_chunks:
+                self._audio_chunks.async_q.get_nowait()
+
+    async def close_audio_chunks(self):
+        self._audio_chunks.close()
+        await self._audio_chunks.wait_closed()
+
+    async def queue_post_command(self, cmd):
+        is_shutdown = isinstance(cmd, PostTreatmentTask.Commands.Shutdown)
+        if self.is_shutting_down and not is_shutdown:
+            self._is_post_treatment_active = False
+            return
+        self._is_post_treatment_active = not is_shutdown
+        await self._post_commands.put(cmd)
+
+    @asynccontextmanager
+    async def dequeue_post_command(self):
+        cmd = await self._post_commands.get()
+        is_shutdown = isinstance(cmd, PostTreatmentTask.Commands.Shutdown)
+        self._is_post_treatment_active = not is_shutdown
+        try:
+            yield cmd
+        finally:
+            if not is_shutdown:
+                self._is_post_treatment_active = not self._post_commands.empty()
+
+    async def queue_buffer_command(self, cmd):
+        await self._buffer_commands.put(cmd)
+
+    async def dequeue_buffer_command(self):
+        return await self._buffer_commands.get()
+
+    async def queue_keyboard_command(self, cmd):
+        is_shutdown = isinstance(cmd, OutputTask.Commands.Shutdown)
+        if self.is_shutting_down and not is_shutdown:
+            self.toggle_keyboard_busy(False)
+            return
+        self.toggle_keyboard_busy(not is_shutdown)
+        await self._keyboard_commands.put(cmd)
+
+    @asynccontextmanager
+    async def dequeue_keyboard_command(self):
+        cmd = await self._keyboard_commands.get()
+        is_shutdown = isinstance(cmd, OutputTask.Commands.Shutdown)
+        self.toggle_keyboard_busy(not is_shutdown)
+        try:
+            yield cmd
+        finally:
+            if not is_shutdown:
+                self.toggle_keyboard_busy(not self._keyboard_commands.empty())
+
+    @property
+    def is_shift_pressed(self):
+        return self._is_shift_pressed
+
+    def toggle_shift_pressed(self, flag: bool):
+        self._is_shift_pressed = flag
+
+    @property
+    def is_recording(self):
+        return self._recording.is_set()
+
+    def toggle_recording(self, flag: bool):
+        if flag:
+            self._recording.set()
+        else:
+            self._recording.clear()
+
+    def wait_for_recording_task(self):
+        return create_task(self._recording.wait())
+
+    @property
+    def is_speech_active(self):
+        return self._is_speech_active
+
+    def toggle_speech_active(self, flag: bool):
+        self._is_speech_active = flag
+
+    @property
+    def is_keyboard_busy(self):
+        return self._is_keyboard_busy
+
+    def toggle_keyboard_busy(self, flag: bool):
+        self._is_keyboard_busy = flag
+
+    @property
+    def is_post_treatment_active(self):
+        return self._is_post_treatment_active
+
+    @property
+    def is_indicator_active(self):
+        return self._is_indicator_active
+
+    def toggle_indicator_active(self, flag: bool):
+        self._is_indicator_active = flag
+
+    @property
+    def is_shutting_down(self):
+        return self._shutting_down.is_set()
+
+    async def wait_for_shutdown(self):
+        await self._shutting_down.wait()
+
+    def wait_for_shutdown_task(self):
+        return create_task(self._shutting_down.wait())
+
+    @property
+    def is_transcribing(self):
+        return self.is_recording or self.is_speech_active
+
+    async def shutdown(self, post_enabled: bool):
+        self._shutting_down.set()
+        if post_enabled:
+            await self.queue_post_command(PostTreatmentTask.Commands.Shutdown())
+        await self.queue_buffer_command(BufferTask.Commands.Shutdown())
+        await self.queue_keyboard_command(OutputTask.Commands.Shutdown())
 
 
-class KeyboardTask:
+class OutputTask:
     CLIPBOARD_RESTORE_DELAY_S = 1.0
 
     class Combo(Enum):
@@ -507,8 +634,8 @@ class KeyboardTask:
         class Shutdown(NamedTuple):
             pass
 
-    def __init__(self, bus: Bus, config: Config.Keyboard):
-        self.bus = bus
+    def __init__(self, comm: Comm, config: Config.Output):
+        self.comm = comm
         self.config = config
         self._delay_between_keys_ms = KEY_DEFAULT_DELAY
         self._delay_between_actions_s = KEY_DEFAULT_DELAY / 1000
@@ -518,21 +645,17 @@ class KeyboardTask:
 
     async def run(self):
         try:
-            while not self.bus.stop.is_set():
-                cmd = await self.bus.keyboard_commands.get()
-                if isinstance(cmd, self.Commands.Shutdown):
-                    self.bus.keyboard_busy.clear()
-                    break
-                self.bus.keyboard_busy.set()
-                await self._ensure_min_delay_between_actions()
-                self._execute(cmd)
-                self._last_action_time = time.perf_counter()
-                if self.bus.keyboard_commands.empty():
-                    self.bus.keyboard_busy.clear()
-        except asyncio.CancelledError:
+            while not self.comm.is_shutting_down:
+                async with self.comm.dequeue_keyboard_command() as cmd:
+                    if isinstance(cmd, self.Commands.Shutdown):
+                        break
+                    await self._ensure_min_delay_between_actions()
+                    self._execute(cmd)
+                    self._last_action_time = time.perf_counter()
+        except CancelledError:
             pass
         finally:
-            self.bus.keyboard_busy.clear()
+            self.comm.toggle_keyboard_busy(False)
 
     async def _ensure_min_delay_between_actions(self):
         if self._last_action_time == 0.0:
@@ -645,8 +768,8 @@ class HotKeyTask:
     KEY_DOWN = evdev.KeyEvent.key_down
     KEY_UP = evdev.KeyEvent.key_up
 
-    def __init__(self, bus: Bus, config: Config.HotKey):
-        self.bus = bus
+    def __init__(self, comm: Comm, config: Config.HotKey):
+        self.comm = comm
         self.config = config
 
     async def run(self):
@@ -656,16 +779,15 @@ class HotKeyTask:
         active_hotkey: Optional[int] = None
         toggle_stop_time = 0.0
         toggle_cooldown = 0.5
-        loop = asyncio.get_running_loop()
 
         try:
             async for event in self.config.device.async_read_loop():
-                if self.bus.stop.is_set():
+                if self.comm.is_shutting_down:
                     break
                 if event.type != ecodes.EV_KEY:
                     continue
                 key_event = categorize(event)
-                current_time = loop.time()
+                current_time = time.perf_counter()
                 scancode = key_event.scancode
 
                 if scancode in self.config.hotkey_codes:
@@ -673,6 +795,9 @@ class HotKeyTask:
                         if key_event.keystate == self.KEY_UP:
                             last_release_time[scancode] = current_time
                         continue
+
+                    shift_pressed = any(code in self.config.device.active_keys() for code in self.SHIFT_CODES)
+                    self.comm.toggle_shift_pressed(shift_pressed)
 
                     match key_event.keystate:
                         case self.KEY_DOWN if not hotkey_pressed:
@@ -688,18 +813,14 @@ class HotKeyTask:
                                 is_toggle_mode = False
                                 hotkey_pressed = True
                                 active_hotkey = scancode
-                            self.bus.shift_pressed.clear()
-                            if any(code in self.config.device.active_keys() for code in self.SHIFT_CODES):
-                                self.bus.shift_pressed.set()
-                            self.bus.recording.set()
+                            self.comm.toggle_recording(True)
                             print(f"\n--- {datetime.now()} ---")
 
                         case self.KEY_UP if hotkey_pressed and not is_toggle_mode:
                             last_release_time[scancode] = current_time
                             hotkey_pressed = False
                             active_hotkey = None
-                            self.bus.recording.clear()
-                            self.bus.shift_pressed.clear()
+                            self.comm.toggle_recording(False)
 
                         case self.KEY_UP if is_toggle_mode:
                             last_release_time[scancode] = current_time
@@ -712,17 +833,16 @@ class HotKeyTask:
                             toggle_stop_time = current_time
                             name = next(k for k, v in F_KEY_CODES.items() if v == scancode)
                             print(f"[Toggle mode deactivated with {name.upper()}]", file=sys.stderr)
-                            self.bus.recording.clear()
-                            self.bus.shift_pressed.clear()
+                            self.comm.toggle_recording(False)
 
-                elif self.bus.recording.is_set() and scancode in self.SHIFT_CODES:
+                elif self.comm.is_recording and scancode in self.SHIFT_CODES:
                     match key_event.keystate:
                         case self.KEY_DOWN:
-                            self.bus.shift_pressed.set()
+                            self.comm.toggle_shift_pressed(True)
                         case self.KEY_UP:
-                            self.bus.shift_pressed.clear()
+                            self.comm.toggle_shift_pressed(False)
 
-        except asyncio.CancelledError:
+        except CancelledError:
             pass
         finally:
             with suppress(Exception):
@@ -736,8 +856,8 @@ class CaptureTask:
     DTYPE = "int16"
     CHANNELS = 1
 
-    def __init__(self, bus: Bus, config: Config.Capture):
-        self.bus = bus
+    def __init__(self, comm: Comm, config: Config.Capture):
+        self.comm = comm
         self.config = config
         self._loop = asyncio.get_running_loop()
 
@@ -751,18 +871,17 @@ class CaptureTask:
         )
         try:
             with stream:
-                await self.bus.stop.wait()
-        except asyncio.CancelledError:
+                await self.comm.wait_for_shutdown()
+        except CancelledError:
             pass
         finally:
             stream.close()
-            self.bus.audio_chunks.close()
-            await self.bus.audio_chunks.wait_closed()
+            await self.comm.close_audio_chunks()
 
     def _callback(self, indata, frames, timeinfo, status):  # pragma: no cover - sounddevice callback
-        if self.bus.stop.is_set():
+        if self.comm.is_shutting_down:
             return
-        if not (self.bus.recording.is_set() or self.bus.speech_active.is_set()):
+        if not self.comm.is_transcribing:
             return
         try:
             data = np.frombuffer(indata, dtype=np.int16)
@@ -774,7 +893,7 @@ class CaptureTask:
 
             def _put():
                 with suppress(RuntimeError):
-                    self.bus.audio_chunks.sync_q.put_nowait(audio_bytes)
+                    self.comm.queue_audio_chunks(audio_bytes)
 
             self._loop.call_soon_threadsafe(_put)
         except Exception as exc:
@@ -796,8 +915,8 @@ class TranscriptionTask:
     STREAM_DELTAS = True
     STREAM_DELTA_MIN_CHARS = 10
 
-    def __init__(self, bus: Bus, config: Config.Transcription, post_config: Config.PostTreatment):
-        self.bus = bus
+    def __init__(self, comm: Comm, config: Config.Transcription, post_config: Config.PostTreatment):
+        self.comm = comm
         self.config = config
         self.post_config = post_config
         self.seq_counter = 0
@@ -811,9 +930,9 @@ class TranscriptionTask:
         self._chars_since_stream = 0
 
     async def run(self):
-        while not self.bus.stop.is_set():
-            recording_wait = asyncio.create_task(self.bus.recording.wait())
-            stop_wait = asyncio.create_task(self.bus.stop.wait())
+        while not self.comm.is_shutting_down:
+            recording_wait = self.comm.wait_for_recording_task()
+            stop_wait = self.comm.wait_for_shutdown_task()
             try:
                 done, _ = await asyncio.wait(
                     {recording_wait, stop_wait},
@@ -828,9 +947,9 @@ class TranscriptionTask:
                 await asyncio.shield(
                     asyncio.gather(recording_wait, stop_wait, return_exceptions=True)
                 )
-            if self.bus.stop.is_set():
+            if self.comm.is_shutting_down:
                 break
-            if not self.bus.recording.is_set():
+            if not self.comm.is_recording:
                 continue
             previous_transcriptions: list[str] = []
             current_transcription: list[str] = []
@@ -842,19 +961,17 @@ class TranscriptionTask:
                 ) as ws:
                     await ws.send(self.session_json)
 
-                    sender_task = asyncio.create_task(self._sender(ws))
-                    receiver_task = asyncio.create_task(
+                    sender_task = create_task(self._sender(ws))
+                    receiver_task = create_task(
                         self._receiver(ws, previous_transcriptions, current_transcription))
                     await asyncio.gather(sender_task, receiver_task)
-            except asyncio.CancelledError:
+            except CancelledError:
                 break
             except Exception as exc:
                 print(f"Error in transcription task: {exc}", file=sys.stderr)
             finally:
-                self.bus.speech_active.clear()
-                with suppress(RuntimeError):
-                    while not self.bus.audio_chunks.async_q.empty():
-                        self.bus.audio_chunks.async_q.get_nowait()
+                self.comm.toggle_speech_active(False)
+                self.comm.empty_audio_chunks()
                 print("")
 
             if not previous_transcriptions:
@@ -864,14 +981,14 @@ class TranscriptionTask:
                 if self.post_config.enabled:
                     if self.post_config.post_correct:
                         self.seq_counter += 1
-                        await self.bus.post_commands.put(
+                        await self.comm.queue_post_command(
                             PostTreatmentTask.Commands.SessionComplete(
                                 text=full_text,
                                 stream_output=False,
                             )
                         )
                     else:
-                        await self.bus.post_commands.put(
+                        await self.comm.queue_post_command(
                             PostTreatmentTask.Commands.SessionComplete(
                                 text=full_text,
                                 stream_output=True,
@@ -880,7 +997,7 @@ class TranscriptionTask:
                 else:
                     seq = self.seq_counter
                     self.seq_counter += 1
-                    await self.bus.buffer_commands.put(
+                    await self.comm.queue_buffer_command(
                         BufferTask.Commands.InsertSegment(
                             seq_num=seq,
                             text=full_text,
@@ -891,19 +1008,19 @@ class TranscriptionTask:
     async def _sender(self, ws):
         try:
             while True:
-                if self.bus.stop.is_set():
+                if self.comm.is_shutting_down:
                     break
                 try:
-                    queue_empty = self.bus.audio_chunks.async_q.empty()
+                    queue_empty = not self.comm.has_audio_chunks
                 except RuntimeError:
                     break
-                if not (self.bus.recording.is_set() or self.bus.speech_active.is_set()) and queue_empty:
+                if not self.comm.is_transcribing and queue_empty:
                     await asyncio.sleep(self.QUEUE_IDLE_SLEEP)
-                    if not self.bus.recording.is_set() and not self.bus.speech_active.is_set():
+                    if not self.comm.is_transcribing:
                         break
                     continue
                 try:
-                    chunk = await asyncio.wait_for(self.bus.audio_chunks.async_q.get(), timeout=self.CHUNK_TIMEOUT)
+                    chunk = await self.comm.wait_for_audio_chunk(self.CHUNK_TIMEOUT)
                 except asyncio.TimeoutError:
                     continue
                 except RuntimeError:
@@ -916,35 +1033,35 @@ class TranscriptionTask:
                         }
                     )
                 )
-        except asyncio.CancelledError:
+        except CancelledError:
             pass
 
     async def _receiver(self, ws, previous_transcriptions, current_transcription):
         try:
             while True:
-                if self.bus.stop.is_set():
+                if self.comm.is_shutting_down:
                     break
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=self.CHUNK_TIMEOUT)
                 except asyncio.TimeoutError:
-                    if not self.bus.recording.is_set() and not self.bus.speech_active.is_set():
+                    if not self.comm.is_transcribing:
                         break
                     continue
                 event = json.loads(raw)
                 etype = event.get("type", "")
                 match etype:
                     case self.EVENT_SPEECH_STARTED:
-                        self.bus.speech_active.set()
+                        self.comm.toggle_speech_active(True)
 
                     case self.EVENT_DELTA:
                         await self._handle_delta(event, current_transcription)
 
                     case self.EVENT_DONE:
                         await self._handle_done(event, previous_transcriptions, current_transcription)
-                        if not self.bus.recording.is_set():
+                        if not self.comm.is_recording:
                             break
 
-        except asyncio.CancelledError:
+        except CancelledError:
             pass
 
     def _reset_active_sequence(self):
@@ -966,7 +1083,7 @@ class TranscriptionTask:
         if seq is None:
             seq = self.seq_counter
             self.seq_counter += 1
-            await self.bus.buffer_commands.put(
+            await self.comm.queue_buffer_command(
                 BufferTask.Commands.InsertSegment(
                     seq_num=seq,
                     text=text,
@@ -974,7 +1091,7 @@ class TranscriptionTask:
                 )
             )
         else:
-            await self.bus.buffer_commands.put(
+            await self.comm.queue_buffer_command(
                 BufferTask.Commands.ApplyCorrection(
                     seq_num=seq,
                     corrected_text=text,
@@ -989,7 +1106,7 @@ class TranscriptionTask:
         if not delta:
             return
         current_transcription.append(delta)
-        self.bus.speech_active.set()
+        self.comm.toggle_speech_active(True)
         print(delta, end="", flush=True)
         if not self._should_stream_deltas():
             return
@@ -1012,7 +1129,7 @@ class TranscriptionTask:
             transcript = "".join(current_transcription)
         if not transcript:
             current_transcription.clear()
-            self.bus.speech_active.clear()
+            self.comm.toggle_speech_active(False)
             self._reset_active_sequence()
             return
 
@@ -1025,7 +1142,7 @@ class TranscriptionTask:
             if self.post_config.enabled:
                 if self.post_config.post_correct:
                     seq = await self._upsert_buffer_segment(final_text, in_session=False)
-                    await self.bus.post_commands.put(
+                    await self.comm.queue_post_command(
                         PostTreatmentTask.Commands.ProcessSegment(
                             seq_num=seq,
                             text=final_text,
@@ -1036,7 +1153,7 @@ class TranscriptionTask:
                 else:
                     seq = self.seq_counter
                     self.seq_counter += 1
-                    await self.bus.post_commands.put(
+                    await self.comm.queue_post_command(
                         PostTreatmentTask.Commands.ProcessSegment(
                             seq_num=seq,
                             text=final_text,
@@ -1053,7 +1170,7 @@ class TranscriptionTask:
                 await self._upsert_buffer_segment(final_text, in_session=True)
 
         current_transcription.clear()
-        self.bus.speech_active.clear()
+        self.comm.toggle_speech_active(False)
         self._reset_active_sequence()
 
     def _build_session_json(self) -> str:
@@ -1130,8 +1247,8 @@ NEW TEXT TO CORRECT:
         class Shutdown(NamedTuple):
             pass
 
-    def __init__(self, bus: Bus, config: Config.PostTreatment):
-        self.bus = bus
+    def __init__(self, comm: Comm, config: Config.PostTreatment):
+        self.comm = comm
         self.config = config
         self.client = self._build_client()
         self._buffer_seq_counter = 1_000_000
@@ -1145,79 +1262,71 @@ NEW TEXT TO CORRECT:
         if not self.config.enabled:
             return
         try:
-            while not self.bus.stop.is_set():
-                cmd = await self.bus.post_commands.get()
-                match cmd:
-                    case self.Commands.Shutdown():
-                        break
+            while not self.comm.is_shutting_down:
+                async with self.comm.dequeue_post_command() as cmd:
+                    match cmd:
+                        case self.Commands.Shutdown():
+                            break
 
-                    case self.Commands.ProcessSegment():
-                        await self._handle_segment(cmd)
+                        case self.Commands.ProcessSegment():
+                            await self._handle_segment(cmd)
 
-                    case self.Commands.SessionComplete():
-                        await self._handle_session_complete(cmd)
+                        case self.Commands.SessionComplete():
+                            await self._handle_session_complete(cmd)
 
-        except asyncio.CancelledError:
+        except CancelledError:
             pass
 
     async def _handle_segment(self, cmd: "PostTreatmentTask.Commands.ProcessSegment"):
-        self.bus.post_active.set()
-        try:
-            chunks = []
-            async for piece in self._post_process(cmd.text, cmd.previous_text, cmd.stream_output):
-                if piece is None:
-                    break
-                if self.config.post_correct:
-                    chunks.append(piece)
-                else:
-                    await self.bus.buffer_commands.put(
-                        BufferTask.Commands.InsertSegment(
-                            seq_num=self._next_buffer_seq(),
-                            text=piece,
-                            in_session=False,
-                        )
-                    )
+        chunks = []
+        async for piece in self._post_process(cmd.text, cmd.previous_text, cmd.stream_output):
+            if piece is None:
+                break
             if self.config.post_correct:
-                corrected = "".join(chunks) + " "
-                await self.bus.buffer_commands.put(
-                    BufferTask.Commands.ApplyCorrection(seq_num=cmd.seq_num, corrected_text=corrected)
-                )
+                chunks.append(piece)
             else:
-                # Add trailing space
-                await self.bus.buffer_commands.put(
+                await self.comm.queue_buffer_command(
                     BufferTask.Commands.InsertSegment(
                         seq_num=self._next_buffer_seq(),
-                        text=" ",
+                        text=piece,
                         in_session=False,
                     )
                 )
-        finally:
-            self.bus.post_active.clear()
+        if self.config.post_correct:
+            corrected = "".join(chunks) + " "
+            await self.comm.queue_buffer_command(
+                BufferTask.Commands.ApplyCorrection(seq_num=cmd.seq_num, corrected_text=corrected)
+            )
+        else:
+            # Add trailing space
+            await self.comm.queue_buffer_command(
+                BufferTask.Commands.InsertSegment(
+                    seq_num=self._next_buffer_seq(),
+                    text=" ",
+                    in_session=False,
+                )
+            )
 
     async def _handle_session_complete(self, cmd: "PostTreatmentTask.Commands.SessionComplete"):
-        self.bus.post_active.set()
-        try:
-            chunks = []
-            async for piece in self._post_process(cmd.text, "", cmd.stream_output):
-                if piece is None:
-                    break
-                if self.config.post_correct:
-                    chunks.append(piece)
-                else:
-                    await self.bus.buffer_commands.put(
-                        BufferTask.Commands.InsertSegment(
-                            seq_num=self._next_buffer_seq(),
-                            text=piece,
-                            in_session=False,
-                        )
-                    )
+        chunks = []
+        async for piece in self._post_process(cmd.text, "", cmd.stream_output):
+            if piece is None:
+                break
             if self.config.post_correct:
-                corrected = "".join(chunks)
-                await self.bus.buffer_commands.put(
-                    BufferTask.Commands.ApplySessionCorrection(corrected_text=corrected)
+                chunks.append(piece)
+            else:
+                await self.comm.queue_buffer_command(
+                    BufferTask.Commands.InsertSegment(
+                        seq_num=self._next_buffer_seq(),
+                        text=piece,
+                        in_session=False,
+                    )
                 )
-        finally:
-            self.bus.post_active.clear()
+        if self.config.post_correct:
+            corrected = "".join(chunks)
+            await self.comm.queue_buffer_command(
+                BufferTask.Commands.ApplySessionCorrection(corrected_text=corrected)
+            )
 
     async def _post_process(
             self,
@@ -1334,17 +1443,17 @@ class BufferTask:
             pass
 
     class ClipboardOutputAdapter:
-        def __init__(self, bus: Bus):
-            self.bus = bus
+        def __init__(self, comm: Comm):
+            self.comm = comm
 
         async def output_transcription(self, text: str):
             if not text:
                 return
             try:
-                await self.bus.keyboard_commands.put(
-                    KeyboardTask.Commands.WriteText(
+                await self.comm.queue_keyboard_command(
+                    OutputTask.Commands.WriteText(
                         text=text,
-                        use_shift_to_paste=self.bus.shift_pressed.is_set(),
+                        use_shift_to_paste=self.comm.is_shift_pressed,
                     )
                 )
             except Exception as exc:  # pragma: no cover - defensive
@@ -1355,7 +1464,7 @@ class BufferTask:
 
         def __init__(self, output_adapter):
             self.output_adapter = output_adapter
-            self.bus = output_adapter.bus
+            self.comm = output_adapter.comm
             self.text = ""
             self.cursor = 0
             self.segments = {}
@@ -1366,16 +1475,16 @@ class BufferTask:
             self.session_segment_ids = []
 
         async def _enqueue(self, command):
-            await self.bus.keyboard_commands.put(command)
+            await self.comm.queue_keyboard_command(command)
 
         async def _move_cursor_to(self, target_index: int):
             target_index = max(0, min(target_index, len(self.text)))
             delta = target_index - self.cursor
             match delta:
                 case _ if delta > 0:
-                    await self._enqueue(KeyboardTask.Commands.GoRight(delta))
+                    await self._enqueue(OutputTask.Commands.GoRight(delta))
                 case _ if delta < 0:
-                    await self._enqueue(KeyboardTask.Commands.GoLeft(-delta))
+                    await self._enqueue(OutputTask.Commands.GoLeft(-delta))
             self.cursor = target_index
 
         def start_session_if_needed(self):
@@ -1416,13 +1525,13 @@ class BufferTask:
             if move_cost_to_end <= move_cost_to_start:
                 await self._move_cursor_to(abs_end)
                 if delete_len:
-                    await self._enqueue(KeyboardTask.Commands.DeleteCharsBackward(delete_len))
+                    await self._enqueue(OutputTask.Commands.DeleteCharsBackward(delete_len))
                 self.text = self.text[:abs_start] + self.text[abs_end:]
                 self.cursor = abs_start
             else:
                 await self._move_cursor_to(abs_start)
                 if delete_len:
-                    await self._enqueue(KeyboardTask.Commands.DeleteCharsForward(delete_len))
+                    await self._enqueue(OutputTask.Commands.DeleteCharsForward(delete_len))
                 self.text = self.text[:abs_start] + self.text[abs_end:]
                 self.cursor = abs_start
 
@@ -1438,9 +1547,9 @@ class BufferTask:
             if target != self.cursor:
                 await self._move_cursor_to(target)
 
-        async def enforce_cursor_policy(self):
+        async def move_cursor_at_end_if_done(self):
             async with self.lock:
-                if not self.bus.indicator_active.is_set() and (target := len(self.text)) != self.cursor:
+                if not self.comm.is_indicator_active and (target := len(self.text)) != self.cursor:
                     await self._move_cursor_to(target)
 
         async def insert_segment(
@@ -1500,23 +1609,35 @@ class BufferTask:
 
                 await self._move_cursor_at_edge(position_cursor_at, insert_pos, insert_len)
 
-        async def apply_correction(
+        async def _apply_correction(
             self,
-            seq_num: int,
+            seq_num: int | None,  # when None, it's for session
             corrected_text: str,
             *,
             position_cursor_at: Optional["BufferTask.PositionCursorAt"] = None,
             replace_threshold: float = 0.7,
         ):
+            for_session = seq_num is None
             async with self.lock:
-                seg = self.segments.get(seq_num)
-                if not seg:
-                    return
-                old = seg["text_current"]
-                start_base = seg["start"]
+                if for_session:
+                    if not self.session_active:
+                        return
+                    start_base = self.session_start_index
+                    old = self.text[start_base:]
+                else:
+                    seg = self.segments.get(seq_num)
+                    if not seg:
+                        return
+                    start_base = seg["start"]
+                    old = seg["text_current"]
+
                 if old == corrected_text:
+                    if for_session:
+                        self.session_active = False
+                        self.session_segment_ids = []
                     await self._move_cursor_at_edge(position_cursor_at, start_base, len(old))
                     return
+
                 try:
                     sm = difflib.SequenceMatcher(None, old, corrected_text)
                     ratio = sm.ratio()
@@ -1536,54 +1657,6 @@ class BufferTask:
                             other = self.segments[s]
                             other["start"] += delta
 
-                if sm is None or ratio < (1.0 - replace_threshold):
-                    abs_start = start_base
-                    abs_end = start_base + len(old)
-                    await self._replace_range(abs_start, abs_end, corrected_text)
-                    seg["text_current"] = corrected_text
-                    shift_following(len(corrected_text) - len(old))
-                    await self._move_cursor_at_edge(position_cursor_at, start_base, len(corrected_text))
-                    return
-
-                lcp = self._common_prefix_len(old, corrected_text)
-                max_suffix = min(len(old) - lcp, len(corrected_text) - lcp)
-                lcs = self._common_suffix_len(old, corrected_text, max_allowed=max_suffix)
-                old_mid_len = len(old) - lcp - lcs
-                new_mid = (
-                    corrected_text[lcp: len(corrected_text) - lcs]
-                    if len(corrected_text) - lcp - lcs > 0
-                    else ""
-                )
-                abs_start = start_base + lcp
-                abs_end = abs_start + old_mid_len
-                await self._replace_range(abs_start, abs_end, new_mid)
-                seg["text_current"] = corrected_text
-                shift_following(len(corrected_text) - len(old))
-                await self._move_cursor_at_edge(position_cursor_at, start_base, len(corrected_text))
-
-        async def apply_correction_session(
-            self,
-            corrected_text: str,
-            *,
-            position_cursor_at: Optional["BufferTask.PositionCursorAt"] = None,
-            replace_threshold: float = 0.7
-        ):
-            async with self.lock:
-                if not self.session_active:
-                    return
-                start_base = self.session_start_index
-                old = self.text[start_base:]
-                if old == corrected_text:
-                    self.session_active = False
-                    self.session_segment_ids = []
-                    await self._move_cursor_at_edge(position_cursor_at, start_base, len(corrected_text))
-                    return
-                try:
-                    sm = difflib.SequenceMatcher(None, old, corrected_text)
-                    ratio = sm.ratio()
-                except Exception:
-                    sm = None
-                    ratio = 0.0
                 lcp_for_check = self._common_prefix_len(old, corrected_text)
                 lcs_for_check = self._common_suffix_len(
                     old,
@@ -1596,17 +1669,24 @@ class BufferTask:
                     abs_start = start_base
                     abs_end = start_base + len(old)
                     await self._replace_range(abs_start, abs_end, corrected_text)
-                    running = start_base
-                    for sid in self.session_segment_ids:
-                        seg = self.segments.get(sid)
-                        if seg:
-                            seg_len = len(seg["text_current"])
-                            seg["start"] = running
-                            running += seg_len
-                    self.session_active = False
-                    self.session_segment_ids = []
+
+                    if for_session:
+                        running = start_base
+                        for sid in self.session_segment_ids:
+                            seg = self.segments.get(sid)
+                            if seg:
+                                seg_len = len(seg["text_current"])
+                                seg["start"] = running
+                                running += seg_len
+                        self.session_active = False
+                        self.session_segment_ids = []
+                    else:
+                        seg["text_current"] = corrected_text
+                        shift_following(len(corrected_text) - len(old))
+
                     await self._move_cursor_at_edge(position_cursor_at, start_base, len(corrected_text))
                     return
+
                 lcp = self._common_prefix_len(old, corrected_text)
                 max_suffix = min(len(old) - lcp, len(corrected_text) - lcp)
                 lcs = self._common_suffix_len(old, corrected_text, max_allowed=max_suffix)
@@ -1619,22 +1699,56 @@ class BufferTask:
                 abs_start = start_base + lcp
                 abs_end = abs_start + old_mid_len
                 await self._replace_range(abs_start, abs_end, new_mid)
-                self.session_active = False
-                self.session_segment_ids = []
+                if for_session:
+                    self.session_active = False
+                    self.session_segment_ids = []
+                else:
+                    seg["text_current"] = corrected_text
+                    shift_following(len(corrected_text) - len(old))
+
                 await self._move_cursor_at_edge(position_cursor_at, start_base, len(corrected_text))
 
-    def __init__(self, bus: Bus, config: Config.Buffer):
-        self.bus = bus
+        async def apply_correction(
+            self,
+            seq_num: int,
+            corrected_text: str,
+            *,
+            position_cursor_at: Optional["BufferTask.PositionCursorAt"] = None,
+            replace_threshold: float = 0.7,
+        ):
+            await self._apply_correction(
+                seq_num=seq_num,
+                corrected_text=corrected_text,
+                position_cursor_at=position_cursor_at,
+                replace_threshold=replace_threshold,
+            )
+
+        async def apply_correction_session(
+            self,
+            corrected_text: str,
+            *,
+            position_cursor_at: Optional["BufferTask.PositionCursorAt"] = None,
+            replace_threshold: float = 0.7
+        ):
+            await self._apply_correction(
+                seq_num=None,
+                corrected_text=corrected_text,
+                position_cursor_at=position_cursor_at,
+                replace_threshold=replace_threshold,
+            )
+
+    def __init__(self, comm: Comm, config: Config.Buffer):
+        self.comm = comm
         self.config = config
-        self.adapter = BufferTask.ClipboardOutputAdapter(bus)
+        self.adapter = BufferTask.ClipboardOutputAdapter(comm)
         self.manager = BufferTask.Manager(self.adapter)
         self._idle_cursor_task: Optional[asyncio.Task] = None
 
     async def run(self):
         try:
-            self._idle_cursor_task = asyncio.create_task(self._idle_cursor_monitor())
-            while not self.bus.stop.is_set():
-                cmd = await self.bus.buffer_commands.get()
+            self._idle_cursor_task = create_task(self._idle_cursor_monitor())
+            while not self.comm.is_shutting_down:
+                cmd = await self.comm.dequeue_buffer_command()
                 match cmd:
                     case self.Commands.Shutdown():
                         break
@@ -1668,20 +1782,20 @@ class BufferTask:
                     case self.Commands.ApplySessionCorrection(corrected_text=corrected_text):
                         await self.manager.apply_correction_session(corrected_text)
 
-        except asyncio.CancelledError:
+        except CancelledError:
             pass
         finally:
             if self._idle_cursor_task:
                 self._idle_cursor_task.cancel()
-                with suppress(asyncio.CancelledError):
+                with suppress(CancelledError):
                     await self._idle_cursor_task
 
     async def _idle_cursor_monitor(self):
         try:
-            while not self.bus.stop.is_set():
-                await self.manager.enforce_cursor_policy()
+            while not self.comm.is_shutting_down:
+                await self.manager.move_cursor_at_end_if_done()
                 await asyncio.sleep(0.2)
-        except asyncio.CancelledError:
+        except CancelledError:
             pass
 
 
@@ -1689,37 +1803,37 @@ class IndicatorTask:
     SEQ_NUM = 2_000_000_000
     UPDATE_INTERVAL = 0.2
 
-    def __init__(self, bus: Bus):
-        self.bus = bus
+    def __init__(self, comm: Comm):
+        self.comm = comm
         self.current_text: str = ""
         self.initialized = False
 
     def _build_indicator_text(self) -> str:
-        if self.bus.post_active.is_set() or self.bus.speech_active.is_set() or self.bus.recording.is_set():
+        if self.comm.is_post_treatment_active or self.comm.is_speech_active or self.comm.is_recording:
             return "(Twistting...)"
         return ""
 
     async def _clear_indicator_active_flag_soon(self):
         await asyncio.sleep(1)
         if not self._build_indicator_text():
-            self.bus.indicator_active.clear()
+            self.comm.toggle_indicator_active(False)
 
     async def _maybe_update(self):
         desired = self._build_indicator_text()
         if desired:
-            self.bus.indicator_active.set()
+            self.comm.toggle_indicator_active(True)
         else:
             create_task(self._clear_indicator_active_flag_soon())
 
         if desired == self.current_text:
             return
-        if self.bus.keyboard_busy.is_set():
+        if self.comm.is_keyboard_busy:
             return
 
         self.current_text = desired
 
         if self.initialized:
-            await self.bus.buffer_commands.put(
+            await self.comm.queue_buffer_command(
                 BufferTask.Commands.ApplyCorrection(
                     seq_num=self.SEQ_NUM,
                     corrected_text=desired,
@@ -1728,7 +1842,7 @@ class IndicatorTask:
             )
             return
 
-        await self.bus.buffer_commands.put(
+        await self.comm.queue_buffer_command(
             BufferTask.Commands.InsertSegment(
                 seq_num=self.SEQ_NUM,
                 text=desired,
@@ -1740,13 +1854,13 @@ class IndicatorTask:
 
     async def run(self):
         try:
-            while not self.bus.stop.is_set():
+            while not self.comm.is_shutting_down:
                 await self._maybe_update()
                 await asyncio.sleep(self.UPDATE_INTERVAL)
-        except asyncio.CancelledError:
+        except CancelledError:
             pass
         finally:
-            self.bus.indicator_active.clear()
+            self.comm.toggle_indicator_active(False)
 
 
 async def main_async():
@@ -1754,47 +1868,41 @@ async def main_async():
     if app_config is None:
         return
 
-    bus = Bus()
+    comm = Comm()
     tasks = []
     try:
-        loop = asyncio.get_running_loop()
+        hotkey_task = HotKeyTask(comm, app_config.hotkey)
+        capture_task = CaptureTask(comm, app_config.capture)
+        output_task = OutputTask(comm, app_config.output)
+        buffer_task = BufferTask(comm, app_config.buffer)
+        transcription_task = TranscriptionTask(comm, app_config.transcription, app_config.post)
+        indicator_task = IndicatorTask(comm)
 
-        hotkey_task = HotKeyTask(bus, app_config.hotkey)
-        capture_task = CaptureTask(bus, app_config.capture)
-        keyboard_task = KeyboardTask(bus, app_config.keyboard)
-        buffer_task = BufferTask(bus, app_config.buffer)
-        transcription_task = TranscriptionTask(bus, app_config.transcription, app_config.post)
-        indicator_task = IndicatorTask(bus)
-
-        tasks.append(loop.create_task(hotkey_task.run()))
-        tasks.append(loop.create_task(capture_task.run()))
-        tasks.append(loop.create_task(keyboard_task.run()))
-        tasks.append(loop.create_task(buffer_task.run()))
-        tasks.append(loop.create_task(transcription_task.run()))
-        tasks.append(loop.create_task(indicator_task.run()))
+        tasks.append(create_task(hotkey_task.run()))
+        tasks.append(create_task(capture_task.run()))
+        tasks.append(create_task(output_task.run()))
+        tasks.append(create_task(buffer_task.run()))
+        tasks.append(create_task(transcription_task.run()))
+        tasks.append(create_task(indicator_task.run()))
 
         if app_config.post.enabled:
-            post_task = PostTreatmentTask(bus, app_config.post)
-            tasks.append(loop.create_task(post_task.run()))
+            post_task = PostTreatmentTask(comm, app_config.post)
+            tasks.append(create_task(post_task.run()))
 
-        await bus.stop.wait()
+        await comm.wait_for_shutdown()
 
-    except (KeyboardInterrupt, asyncio.CancelledError):
+    except (KeyboardInterrupt, CancelledError):
         print("\nExit.")
 
     finally:
-        bus.stop.set()
-        if app_config.post.enabled:
-            await bus.post_commands.put(PostTreatmentTask.Commands.Shutdown())
-        await bus.buffer_commands.put(BufferTask.Commands.Shutdown())
-        await bus.keyboard_commands.put(KeyboardTask.Commands.Shutdown())
+        await comm.shutdown(app_config.post.enabled)
 
         for task in tasks:
             task.cancel()
         for task in tasks:
             try:
                 await task
-            except asyncio.CancelledError:
+            except CancelledError:
                 pass
         with suppress(Exception):
             app_config.hotkey.device.close()
