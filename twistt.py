@@ -101,7 +101,7 @@ class Config:
 
     class Transcription(NamedTuple):
         api_key: str
-        model: TranscriptionTask.Model
+        model: TranscriptionViaOpenAITask.Model
         language: Optional[str]
         output_mode: OutputMode
 
@@ -164,7 +164,7 @@ class CommandLineParser:
         prefix = CommandLineParser.ENV_PREFIX
 
         default_hotkeys = os.getenv(f"{prefix}HOTKEY", os.getenv(f"{prefix}HOTKEYS", "F9"))
-        default_model = os.getenv(f"{prefix}MODEL", TranscriptionTask.Model.GPT_4O_TRANSCRIBE.value)
+        default_model = os.getenv(f"{prefix}MODEL", TranscriptionViaOpenAITask.Model.GPT_4O_TRANSCRIBE.value)
         default_language = os.getenv(f"{prefix}LANGUAGE")
         default_gain = float(os.getenv(f"{prefix}GAIN", "1.0"))
         default_api_key = os.getenv(f"{prefix}OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
@@ -189,7 +189,7 @@ class CommandLineParser:
         parser.add_argument(
             "--model",
             default=default_model,
-            choices=[m.value for m in TranscriptionTask.Model],
+            choices=[m.value for m in TranscriptionViaOpenAITask.Model],
             help=f"OpenAI model to use for transcription (env: {prefix}MODEL)",
         )
         parser.add_argument(
@@ -303,7 +303,7 @@ class CommandLineParser:
             post_prompt = args.post_prompt
             post_treatment_enabled = True
 
-        transcription_model = TranscriptionTask.Model(args.model)
+        transcription_model = TranscriptionViaOpenAITask.Model(args.model)
         output_mode = OutputMode(args.output_mode)
         post_provider_enum = PostTreatmentTask.Provider(args.post_provider)
 
@@ -908,18 +908,10 @@ class CaptureTask:
             print(f"Error in microphone callback: {exc}", file=sys.stderr)
 
 
-class TranscriptionTask:
-    class Model(Enum):
-        GPT_4O_TRANSCRIBE = "gpt-4o-transcribe"
-        GPT_4O_MINI_TRANSCRIBE = "gpt-4o-mini-transcribe"
-
-    RT_URL = "wss://api.openai.com/v1/realtime?intent=transcription"
-    EVENT_SPEECH_STARTED = "input_audio_buffer.speech_started"
-    EVENT_DELTA = "conversation.item.input_audio_transcription.delta"
-    EVENT_DONE = "conversation.item.input_audio_transcription.completed"
+class BaseTranscriptionTask:
+    WS_URL = ""
     QUEUE_IDLE_SLEEP = 0.05
     CHUNK_TIMEOUT = 0.1
-    OPENAI_BETA_HEADER = "realtime=v1"
     STREAM_DELTAS = True
     STREAM_DELTA_MIN_CHARS = 10
 
@@ -928,13 +920,12 @@ class TranscriptionTask:
         self.config = config
         self.post_config = post_config
         self.seq_counter = 0
-        self.headers = {
-            "Authorization": f"Bearer {self.config.api_key}",
-            "OpenAI-Beta": self.OPENAI_BETA_HEADER,
-        }
-        self.session_json = self._build_session_json()
+        self.headers: dict[str, str] = {}
         self._active_seq_num: Optional[int] = None
         self._chars_since_stream = 0
+
+    async def on_connected(self, ws):
+        pass
 
     async def run(self):
         while not self.comm.is_shutting_down:
@@ -962,11 +953,11 @@ class TranscriptionTask:
             current_transcription: list[str] = []
             try:
                 async with websockets.connect(
-                        self.RT_URL,
+                        self.WS_URL,
                         additional_headers=self.headers,
                         max_size=None,
                 ) as ws:
-                    await ws.send(self.session_json)
+                    await self.on_connected(ws)
 
                     sender_task = create_task(self._sender(ws))
                     receiver_task = create_task(
@@ -1003,6 +994,9 @@ class TranscriptionTask:
                         )
                     )
 
+    async def send_audio_chunk(self, ws, chunk: bytes):
+        pass
+
     async def _sender(self, ws):
         try:
             while True:
@@ -1023,44 +1017,12 @@ class TranscriptionTask:
                     continue
                 except RuntimeError:
                     break
-                await ws.send(
-                    json.dumps(
-                        {
-                            "type": "input_audio_buffer.append",
-                            "audio": base64.b64encode(chunk).decode("ascii"),
-                        }
-                    )
-                )
+                await self.send_audio_chunk(ws, chunk)
         except CancelledError:
             pass
 
     async def _receiver(self, ws, previous_transcriptions, current_transcription):
-        try:
-            while True:
-                if self.comm.is_shutting_down:
-                    break
-                try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=self.CHUNK_TIMEOUT)
-                except asyncio.TimeoutError:
-                    if not self.comm.is_transcribing:
-                        break
-                    continue
-                event = json.loads(raw)
-                etype = event.get("type", "")
-                match etype:
-                    case self.EVENT_SPEECH_STARTED:
-                        self.comm.toggle_speech_active(True)
-
-                    case self.EVENT_DELTA:
-                        await self._handle_delta(event, current_transcription)
-
-                    case self.EVENT_DONE:
-                        await self._handle_done(event, previous_transcriptions, current_transcription)
-                        if not self.comm.is_recording:
-                            break
-
-        except CancelledError:
-            pass
+        raise NotImplementedError
 
     def _reset_active_sequence(self):
         self._active_seq_num = None
@@ -1162,8 +1124,27 @@ class TranscriptionTask:
         self.comm.toggle_speech_active(False)
         self._reset_active_sequence()
 
-    def _build_session_json(self) -> str:
-        session_config = {
+
+class TranscriptionViaOpenAITask(BaseTranscriptionTask):
+    class Model(Enum):
+        GPT_4O_TRANSCRIBE = "gpt-4o-transcribe"
+        GPT_4O_MINI_TRANSCRIBE = "gpt-4o-mini-transcribe"
+
+    WS_URL = "wss://api.openai.com/v1/realtime?intent=transcription"
+    EVENT_SPEECH_STARTED = "input_audio_buffer.speech_started"
+    EVENT_DELTA = "conversation.item.input_audio_transcription.delta"
+    EVENT_DONE = "conversation.item.input_audio_transcription.completed"
+
+    def __init__(self, comm: Comm, config: Config.Transcription, post_config: Config.PostTreatment):
+        super().__init__(comm, config, post_config)
+        self.headers = {
+            "Authorization": f"Bearer {self.config.api_key}",
+            "OpenAI-Beta": "realtime=v1",
+        }
+        self._first_message = self._build_first_message()
+
+    def _build_first_message(self) -> str:
+        data = {
             "type": "transcription_session.update",
             "session": {
                 "input_audio_format": "pcm16",
@@ -1183,8 +1164,50 @@ class TranscriptionTask:
             },
         }
         if self.config.language:
-            session_config["session"]["input_audio_transcription"]["language"] = self.config.language
-        return json.dumps(session_config)
+            data["session"]["input_audio_transcription"]["language"] = self.config.language
+        return json.dumps(data)
+
+    async def on_connected(self, ws):
+        await super().on_connected(ws)
+        await ws.send(self._first_message)
+
+    async def send_audio_chunk(self, ws, chunk: bytes):
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "input_audio_buffer.append",
+                    "audio": base64.b64encode(chunk).decode("ascii"),
+                }
+            )
+        )
+
+    async def _receiver(self, ws, previous_transcriptions, current_transcription):
+        try:
+            while True:
+                if self.comm.is_shutting_down:
+                    break
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=self.CHUNK_TIMEOUT)
+                except asyncio.TimeoutError:
+                    if not self.comm.is_transcribing:
+                        break
+                    continue
+                event = json.loads(raw)
+                etype = event.get("type", "")
+                match etype:
+                    case self.EVENT_SPEECH_STARTED:
+                        self.comm.toggle_speech_active(True)
+
+                    case self.EVENT_DELTA:
+                        await self._handle_delta(event, current_transcription)
+
+                    case self.EVENT_DONE:
+                        await self._handle_done(event, previous_transcriptions, current_transcription)
+                        if not self.comm.is_recording:
+                            break
+
+        except CancelledError:
+            pass
 
 
 class PostTreatmentTask:
@@ -1764,7 +1787,7 @@ async def main_async():
         capture_task = CaptureTask(comm, app_config.capture)
         output_task = OutputTask(comm, app_config.output)
         buffer_task = BufferTask(comm, app_config.buffer)
-        transcription_task = TranscriptionTask(comm, app_config.transcription, app_config.post)
+        transcription_task = TranscriptionViaOpenAITask(comm, app_config.transcription, app_config.post)
         indicator_task = IndicatorTask(comm)
 
         tasks.append(create_task(hotkey_task.run()))
