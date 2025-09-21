@@ -501,21 +501,21 @@ class Comm:
     async def queue_post_command(self, cmd):
         is_shutdown = isinstance(cmd, PostTreatmentTask.Commands.Shutdown)
         if self.is_shutting_down and not is_shutdown:
-            self._is_post_treatment_active = False
+            self.toggle_post_treatment_active(False)
             return
-        self._is_post_treatment_active = not is_shutdown
+        self.toggle_post_treatment_active(not is_shutdown)
         await self._post_commands.put(cmd)
 
     @asynccontextmanager
     async def dequeue_post_command(self):
         cmd = await self._post_commands.get()
         is_shutdown = isinstance(cmd, PostTreatmentTask.Commands.Shutdown)
-        self._is_post_treatment_active = not is_shutdown
+        self.toggle_post_treatment_active(not is_shutdown)
         try:
             yield cmd
         finally:
             if not is_shutdown:
-                self._is_post_treatment_active = not self._post_commands.empty()
+                self.toggle_post_treatment_active(not self._post_commands.empty())
 
     async def queue_buffer_command(self, cmd):
         await self._buffer_commands.put(cmd)
@@ -579,6 +579,9 @@ class Comm:
     @property
     def is_post_treatment_active(self):
         return self._is_post_treatment_active
+
+    def toggle_post_treatment_active(self, flag: bool):
+        self._is_post_treatment_active = flag
 
     @property
     def is_indicator_active(self):
@@ -967,6 +970,11 @@ class BaseTranscriptionTask:
                 break
             except Exception as exc:
                 print(f"Error in transcription task: {exc}", file=sys.stderr)
+            else:
+                # in full mode, the command are created later, and because we mark the end of "speech_active" here
+                # we'll lose the indicator, so we mark the post-treatment as active right now if we have some
+                if self.config.output_mode.is_full and self.post_config.enabled and previous_transcriptions:
+                        self.comm.toggle_post_treatment_active(True)
             finally:
                 self.comm.toggle_speech_active(False)
                 self.comm.empty_audio_chunks()
@@ -1117,6 +1125,11 @@ class BaseTranscriptionTask:
                     )
             else:
                 await self._upsert_buffer_segment(final_text)
+        else:
+            # in full mode, the command are created later, and because we mark the end of "speech_active" here
+            # we'll lose the indicator, so we mark the post-treatment as active right now if we have some
+            if self.post_config.enabled and final_text:
+                self.comm.toggle_post_treatment_active(True)
 
         previous_transcriptions.append(final_text)
 
