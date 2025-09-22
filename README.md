@@ -269,8 +269,8 @@ Post-treatment uses AI to improve transcription accuracy by correcting errors, f
 
 You can choose between different AI providers for transcription:
 
-- **OpenAI**: Uses OpenAI's GPT transcribe models (`gpt-4o-transcribe` (default) `gpt-4o-mini-transcribe`)
-- **Deepgram**: Uses Deepgram's Nova models (`nova-2`, `nova-3`). Really real time but more expensive.
+- **OpenAI**: Uses OpenAI's GPT transcribe models (`gpt-4o-transcribe` (default) `gpt-4o-mini-transcribe`). Better to not use `--use-typing`.
+- **Deepgram**: Uses Deepgram's Nova models (`nova-2`, `nova-3`). Really real time but more expensive. Great with `--use-typing`
 
 #### Post-Treatment
 
@@ -374,7 +374,7 @@ We maintain a curated list of potential enhancements in IDEAS.md. If you have su
 
 ## Author
 
-Stephane "Twidi" Angel
+Stephane "Twidi" Angel, with the help of @claude and @codex
 
 ## License
 
