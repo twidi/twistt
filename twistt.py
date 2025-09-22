@@ -25,11 +25,13 @@ import json
 import os
 import sys
 import time
+import urllib.parse
 from asyncio import create_task, Queue, Event, CancelledError
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from enum import Enum
 from datetime import datetime
+from functools import cached_property
 from pathlib import Path
 from typing import NamedTuple, Optional
 
@@ -100,8 +102,9 @@ class Config:
         gain: float
 
     class Transcription(NamedTuple):
+        provider: BaseTranscriptionTask.Provider
         api_key: str
-        model: TranscriptionViaOpenAITask.Model
+        model: OpenAITranscriptionTask.Model | DeepgramTranscriptionTask.Model
         language: Optional[str]
 
     class PostTreatment(NamedTuple):
@@ -109,9 +112,7 @@ class Config:
         prompt: Optional[str]
         provider: PostTreatmentTask.Provider
         model: str
-        openai_api_key: Optional[str]
-        cerebras_api_key: Optional[str]
-        openrouter_api_key: Optional[str]
+        api_key: Optional[str]
         correct: bool
 
     class Output(NamedTuple):
@@ -158,10 +159,11 @@ class CommandLineParser:
         prefix = CommandLineParser.ENV_PREFIX
 
         default_hotkeys = os.getenv(f"{prefix}HOTKEY", os.getenv(f"{prefix}HOTKEYS", "F9"))
-        default_model = os.getenv(f"{prefix}MODEL", TranscriptionViaOpenAITask.Model.GPT_4O_TRANSCRIBE.value)
+        default_model = os.getenv(f"{prefix}MODEL", OpenAITranscriptionTask.Model.GPT_4O_TRANSCRIBE.value)
         default_language = os.getenv(f"{prefix}LANGUAGE")
         default_gain = float(os.getenv(f"{prefix}GAIN", "1.0"))
-        default_api_key = os.getenv(f"{prefix}OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+        default_openai_api_key = os.getenv(f"{prefix}OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+        default_deepgram_api_key = os.getenv(f"{prefix}DEEPGRAM_API_KEY") or os.getenv("DEEPGRAM_API_KEY")
         ydotool_socket = os.getenv(f"{prefix}YDOTOOL_SOCKET") or os.getenv("YDOTOOL_SOCKET")
         default_post_prompt = os.getenv(f"{prefix}POST_TREATMENT_PROMPT", "")
         default_post_prompt_file = os.getenv(f"{prefix}POST_TREATMENT_PROMPT_FILE", "")
@@ -183,8 +185,8 @@ class CommandLineParser:
         parser.add_argument(
             "--model",
             default=default_model,
-            choices=[m.value for m in TranscriptionViaOpenAITask.Model],
-            help=f"OpenAI model to use for transcription (env: {prefix}MODEL)",
+            choices=[m.value for m in OpenAITranscriptionTask.Model] + [m.value for m in DeepgramTranscriptionTask.Model],
+            help=f"OpenAI or Deepgram model to use for transcription (env: {prefix}MODEL)",
         )
         parser.add_argument(
             "--language",
@@ -198,9 +200,14 @@ class CommandLineParser:
             help=f"Microphone amplification factor, 1.0=normal, 2.0=double (env: {prefix}GAIN)",
         )
         parser.add_argument(
-            "--api-key",
-            default=default_api_key,
+            "--openai-api-key",
+            default=default_openai_api_key,
             help=f"OpenAI API key (env: {prefix}OPENAI_API_KEY or OPENAI_API_KEY)",
+        )
+        parser.add_argument(
+            "--deepgram-api-key",
+            default=default_deepgram_api_key,
+            help=f"Deepgram API key (env: {prefix}DEEPGRAM_API_KEY or DEEPGRAM_API_KEY)",
         )
         parser.add_argument(
             "--ydotool-socket",
@@ -268,13 +275,26 @@ class CommandLineParser:
 
         args = parser.parse_args()
 
-        if not args.api_key:
-            print("ERROR: OpenAI API key is not defined", file=sys.stderr)
-            print(
-                f"Please set OPENAI_API_KEY or {prefix}OPENAI_API_KEY environment variable (can optionally be in a .env file)",
-                file=sys.stderr,
-            )
-            print("Or pass it via --api-key argument", file=sys.stderr)
+        provider: BaseTranscriptionTask.Provider
+        try:
+            transcription_model = OpenAITranscriptionTask.Model(args.model)
+            provider = BaseTranscriptionTask.Provider.OPENAI
+        except ValueError:
+            transcription_model = DeepgramTranscriptionTask.Model(args.model)
+            provider = BaseTranscriptionTask.Provider.DEEPGRAM
+
+        if provider is BaseTranscriptionTask.Provider.OPENAI and not args.openai_api_key:
+            print(f"""\
+ERROR: OpenAI API key is not defined (for "{transcription_model.value}" transcription model)
+Please set OPENAI_API_KEY or {prefix}OPENAI_API_KEY environment variable or pass it via --openai-api-key argument\
+""", file=sys.stderr)
+            return None
+
+        if provider is BaseTranscriptionTask.Provider.DEEPGRAM and not args.deepgram_api_key:
+            print(f"""\
+ERROR: Deepgram API key is not defined (for" {transcription_model.value}" transcription model)
+Please set DEEPGRAM_API_KEY or {prefix}DEEPGRAM_API_KEY environment variable or pass it via --deepgram-api-key argument\
+""", file=sys.stderr)
             return None
 
         post_prompt = None
@@ -297,23 +317,27 @@ class CommandLineParser:
             post_prompt = args.post_prompt
             post_treatment_enabled = True
 
-        transcription_model = TranscriptionViaOpenAITask.Model(args.model)
         output_mode = OutputMode(args.output_mode)
-        post_provider_enum = PostTreatmentTask.Provider(args.post_provider)
+        post_provider = PostTreatmentTask.Provider(args.post_provider)
 
         if post_treatment_enabled:
-            if post_provider_enum is PostTreatmentTask.Provider.CEREBRAS and not args.cerebras_api_key:
-                print("ERROR: Cerebras API key is not defined for post-treatment", file=sys.stderr)
-                print(f"Please set CEREBRAS_API_KEY or {prefix}CEREBRAS_API_KEY environment variable", file=sys.stderr)
-                print("Or pass it via --cerebras-api-key argument", file=sys.stderr)
+            if post_provider is PostTreatmentTask.Provider.OPENAI and not args.openai_api_key:
+                print(f"""\
+ERROR: OpenAI API key is not defined (for "{args.post_model}" post-treatment model)
+Please set OPENAI_API_KEY or {prefix}OPENAI_API_KEY environment variable or pass it via --openai-api-key argument\
+""", file=sys.stderr)
                 return None
-            if post_provider_enum is PostTreatmentTask.Provider.OPENROUTER and not args.openrouter_api_key:
-                print("ERROR: OpenRouter API key is not defined for post-treatment", file=sys.stderr)
-                print(
-                    f"Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable",
-                    file=sys.stderr,
-                )
-                print("Or pass it via --openrouter-api-key argument", file=sys.stderr)
+            if post_provider is PostTreatmentTask.Provider.CEREBRAS and not args.cerebras_api_key:
+                print(f"""\
+ERROR: Cerebras API key is not defined (for" {args.post_model}" post-treatment model)
+Please set CEREBRAS_API_KEY or {prefix}CEREBRAS_API_KEY environment variable or pass it via --cerebras-api-key argument\
+""", file=sys.stderr)
+                return None
+            if post_provider is PostTreatmentTask.Provider.OPENROUTER and not args.openrouter_api_key:
+                print(f"""\
+ERROR: OpenRouter API key is not defined (for "{args.post_model}" post-treatment model)
+Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable or pass it via --openrouter-api-key argument\
+""", file=sys.stderr)
                 return None
 
         try:
@@ -332,7 +356,7 @@ class CommandLineParser:
             os.environ["YDOTOOL_SOCKET"] = args.ydotool_socket
         pydotool_init()
 
-        print(f"Transcription model: {transcription_model.value}")
+        print(f'Transcription model: "{transcription_model.value}" from "{provider.value}"')
         if args.language:
             print(f"Language: {args.language}")
         else:
@@ -340,12 +364,12 @@ class CommandLineParser:
         if args.gain != 1.0:
             print(f"Audio gain: {args.gain}x")
         if post_treatment_enabled:
-            print(f"Post-treatment: Enabled (provider: {post_provider_enum.value}, model: {args.post_model})")
+            print(f'Post-treatment: Enabled via "{args.post_model}" from {post_provider.value}"')
             if post_prompt:
                 preview = post_prompt[:50] + "..." if len(post_prompt) > 50 else post_prompt
                 print(f"Post-treatment prompt: {preview}")
             if args.post_correct:
-                print("Post-correct mode: Enabled (waits for correction, then edits in-place)")
+                print("Post-treatment correct mode: Enabled (waits for correction, then edits in-place)")
         hotkeys_display = ", ".join([k.strip().upper() for k in args.hotkey.split(",")])
         print(
             f"Using key(s) '{hotkeys_display}': hold for push-to-talk, double-tap to toggle (press same key again to stop)."
@@ -353,13 +377,14 @@ class CommandLineParser:
         print(f"Listening on {keyboard.name}.")
         if args.use_typing:
             print(
-                "ASCII characters will be typed directly; non-ASCII text still uses clipboard paste via Ctrl+V or Ctrl+Shift+V."
+                "ASCII characters will be typed directly; non-ASCII text still uses clipboard paste via Ctrl+V "
+                "(or Ctrl+Shift+V if Shift is pressed at any time)."
             )
         else:
             print(
                 "Text will be pasted by simulating Ctrl+V (or Ctrl+Shift+V if Shift is pressed at any time)."
             )
-        print("Press Ctrl+C to stop the script.")
+        print("Press Ctrl+C to stop the program.")
 
         return Config.App(
             hotkey=Config.HotKey(
@@ -369,18 +394,17 @@ class CommandLineParser:
             ),
             capture=Config.Capture(gain=args.gain),
             transcription=Config.Transcription(
-                api_key=args.api_key,
+                provider=provider,
+                api_key=args.openai_api_key if provider is BaseTranscriptionTask.Provider.OPENAI else args.deepgram_api_key,
                 model=transcription_model,
                 language=args.language,
             ),
             post=Config.PostTreatment(
                 enabled=post_treatment_enabled,
                 prompt=post_prompt,
-                provider=post_provider_enum,
+                provider=post_provider,
                 model=args.post_model,
-                openai_api_key=args.api_key,
-                cerebras_api_key=args.cerebras_api_key,
-                openrouter_api_key=args.openrouter_api_key,
+                api_key=args.openai_api_key if post_provider is PostTreatmentTask.Provider.OPENAI else args.openrouter_api_key if post_provider is PostTreatmentTask.Provider.OPENROUTER else args.cerebras_api_key,
                 correct=args.post_correct and post_treatment_enabled,
             ),
             output=Config.Output(mode=output_mode, use_typing=args.use_typing),
@@ -849,23 +873,18 @@ class HotKeyTask:
 
 
 class CaptureTask:
-    SAMPLERATE = 24_000
-    BLOCK_MS = 40
-    BLOCK_SIZE = int(SAMPLERATE * BLOCK_MS / 1000)
-    DTYPE = "int16"
-    CHANNELS = 1
-
     def __init__(self, comm: Comm, config: Config.App):
         self.comm = comm
         self.config = config
         self._loop = asyncio.get_running_loop()
 
     async def run(self):
+        sample_rate = OpenAITranscriptionTask.SAMPLE_RATE if self.config.transcription.provider is BaseTranscriptionTask.Provider.OPENAI else DeepgramTranscriptionTask.SAMPLE_RATE
         stream = sd.RawInputStream(
-            samplerate=self.SAMPLERATE,
-            blocksize=self.BLOCK_SIZE,
-            dtype=self.DTYPE,
-            channels=self.CHANNELS,
+            samplerate=sample_rate,
+            blocksize=int(sample_rate * 40 / 1000),
+            dtype="int16",
+            channels=1,
             callback=self._callback,
         )
         try:
@@ -900,19 +919,30 @@ class CaptureTask:
 
 
 class BaseTranscriptionTask:
-    WS_URL = ""
+    SAMPLE_RATE = 24_000
     QUEUE_IDLE_SLEEP = 0.05
     CHUNK_TIMEOUT = 0.1
     STREAM_DELTAS = True
     STREAM_DELTA_MIN_CHARS = 10
 
+    class Provider(Enum):
+        OPENAI = "openai"
+        DEEPGRAM = "deepgram"
+
     def __init__(self, comm: Comm, config: Config.App):
         self.comm = comm
         self.config = config
         self.seq_counter = 0
-        self.headers: dict[str, str] = {}
         self._active_seq_num: Optional[int] = None
         self._chars_since_stream = 0
+
+    @cached_property
+    def ws_url(self) -> str:
+        raise NotImplementedError
+
+    @cached_property
+    def ws_headers(self) -> dict[str, str] :
+        return {}
 
     async def on_connected(self, ws):
         pass
@@ -943,8 +973,8 @@ class BaseTranscriptionTask:
             current_transcription: list[str] = []
             try:
                 async with websockets.connect(
-                        self.WS_URL,
-                        additional_headers=self.headers,
+                        self.ws_url,
+                        additional_headers=self.ws_headers,
                         max_size=None,
                 ) as ws:
                     await self.on_connected(ws)
@@ -1016,8 +1046,26 @@ class BaseTranscriptionTask:
         except CancelledError:
             pass
 
-    async def _receiver(self, ws, previous_transcriptions, current_transcription):
+    async def on_data(self, raw, previous_transcriptions, current_transcription) -> bool:
         raise NotImplementedError
+
+    async def _receiver(self, ws, previous_transcriptions, current_transcription):
+        try:
+            while True:
+                if self.comm.is_shutting_down:
+                    break
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=self.CHUNK_TIMEOUT)
+                except asyncio.TimeoutError:
+                    if not self.comm.is_transcribing:
+                        break
+                    continue
+                should_continue = await self.on_data(raw, previous_transcriptions, current_transcription)
+                if not should_continue:
+                    break
+
+        except CancelledError:
+            pass
 
     def _reset_active_sequence(self):
         self._active_seq_num = None
@@ -1051,39 +1099,49 @@ class BaseTranscriptionTask:
         self._active_seq_num = seq
         return seq
 
-    async def _handle_delta(self, event: dict, current_transcription: list[str]):
-        delta = event.get("delta")
-        if not delta:
-            return
-        current_transcription.append(delta)
+    async def _handle_start_of_speech(self):
         self.comm.toggle_speech_active(True)
-        print(delta, end="", flush=True)
+
+    async def _handle_new_delta(self, text: str | None, current_transcription: list[str]):
+        if not text:
+            return
+        self.comm.toggle_speech_active(True)
+        current_transcription.append(text)
+        print(text, end="", flush=True)
         if not self._should_output_deltas():
             return
-        self._chars_since_stream += len(delta)
+        self._chars_since_stream += len(text)
         if self._chars_since_stream < self.STREAM_DELTA_MIN_CHARS:
             return
         segment_text = "".join(current_transcription)
         await self._upsert_buffer_segment(segment_text)
         self._chars_since_stream = 0
 
-    async def _handle_done(
-            self,
-            event: dict,
-            previous_transcriptions: list[str],
-            current_transcription: list[str],
-    ):
-        transcript = event.get("transcript")
-        if transcript is None:
-            transcript = "".join(current_transcription)
-        if not transcript:
+    async def _handle_update_last_delta(self, text: str | None, current_transcription: list[str]):
+        if text is None:
+            return
+        self.comm.toggle_speech_active(True)
+        if current_transcription:
+            current_transcription[-1] = text
+        else:
+            current_transcription.append(text)
+        print("\n", text, end="", flush=True)
+        if not self._should_output_deltas():
+            return
+        segment_text = "".join(current_transcription)
+        await self._upsert_buffer_segment(segment_text)
+
+    async def _handle_done_segment(self, text: str | None, previous_transcriptions: list[str], current_transcription: list[str]):
+        if text is None:
+            text = "".join(current_transcription)
+        if not text:
             current_transcription.clear()
             self.comm.toggle_speech_active(False)
             self._reset_active_sequence()
             return
 
         print(" ", end="", flush=True)
-        final_text = transcript + " "
+        final_text = text + " "
 
         previous_text = "".join(previous_transcriptions)
 
@@ -1125,25 +1183,31 @@ class BaseTranscriptionTask:
         self._reset_active_sequence()
 
 
-class TranscriptionViaOpenAITask(BaseTranscriptionTask):
+class OpenAITranscriptionTask(BaseTranscriptionTask):
     class Model(Enum):
         GPT_4O_TRANSCRIBE = "gpt-4o-transcribe"
         GPT_4O_MINI_TRANSCRIBE = "gpt-4o-mini-transcribe"
 
     WS_URL = "wss://api.openai.com/v1/realtime?intent=transcription"
-    EVENT_SPEECH_STARTED = "input_audio_buffer.speech_started"
-    EVENT_DELTA = "conversation.item.input_audio_transcription.delta"
-    EVENT_DONE = "conversation.item.input_audio_transcription.completed"
 
-    def __init__(self, comm: Comm, config: Config.App):
-        super().__init__(comm, config)
-        self.headers = {
+    class Event(Enum):
+        SPEECH_STARTED = "input_audio_buffer.speech_started"
+        DELTA = "conversation.item.input_audio_transcription.delta"
+        DONE = "conversation.item.input_audio_transcription.completed"
+
+    @cached_property
+    def ws_url(self) -> str:
+        return self.WS_URL
+
+    @cached_property
+    def ws_headers(self) -> dict[str, str] :
+        return {
             "Authorization": f"Bearer {self.config.transcription.api_key}",
             "OpenAI-Beta": "realtime=v1",
         }
-        self._first_message = self._build_first_message()
 
-    def _build_first_message(self) -> str:
+    @cached_property
+    def _first_message(self) -> str:
         data = {
             "type": "transcription_session.update",
             "session": {
@@ -1181,33 +1245,113 @@ class TranscriptionViaOpenAITask(BaseTranscriptionTask):
             )
         )
 
-    async def _receiver(self, ws, previous_transcriptions, current_transcription):
+    async def on_data(self, raw, previous_transcriptions, current_transcription) -> bool:
+        event = json.loads(raw)
+
         try:
-            while True:
-                if self.comm.is_shutting_down:
-                    break
-                try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=self.CHUNK_TIMEOUT)
-                except asyncio.TimeoutError:
-                    if not self.comm.is_transcribing:
-                        break
-                    continue
-                event = json.loads(raw)
-                etype = event.get("type", "")
-                match etype:
-                    case self.EVENT_SPEECH_STARTED:
-                        self.comm.toggle_speech_active(True)
+            event_type = self.Event(event.get("type", ""))
+        except ValueError:
+            return True
 
-                    case self.EVENT_DELTA:
-                        await self._handle_delta(event, current_transcription)
+        match event_type:
+            case self.Event.SPEECH_STARTED:
+                await self._handle_start_of_speech()
 
-                    case self.EVENT_DONE:
-                        await self._handle_done(event, previous_transcriptions, current_transcription)
-                        if not self.comm.is_recording:
-                            break
+            case self.Event.DELTA:
+                await self._handle_new_delta(event.get("delta"), current_transcription)
 
-        except CancelledError:
-            pass
+            case self.Event.DONE:
+                await self._handle_done_segment(event.get("transcript"), previous_transcriptions, current_transcription)
+                if not self.comm.is_recording:
+                    return False
+
+        return True
+
+
+class DeepgramTranscriptionTask(BaseTranscriptionTask):
+    SAMPLE_RATE = 16_000
+
+    class Model(Enum):
+        NOVA_2 = "nova-2"
+        NOVA_2_GENERAL = "nova-2-general"
+        NOVA_3 = "nova-3"
+        NOVA_3_GENERAL = "nova-3-general"
+
+    WS_URL = "wss://api.deepgram.com/v1/listen"
+
+    class Event(Enum):
+        SPEECH_STARTED = "SpeechStarted"
+        DELTA = "Results"
+        # DONE = "UtteranceEnd"
+
+    def __init__(self, comm: Comm, config: Config.App):
+        super().__init__(comm, config)
+        self.last_message_was_final = True
+        self.speech_in_progress = False
+
+    @cached_property
+    def ws_url(self) -> str:
+        params = {
+            "model": self.config.transcription.model.value,
+            "encoding": "linear16",
+            "sample_rate": str(self.SAMPLE_RATE),
+            "channels": "1",
+            "smart_format": "true",
+            "interim_results": "true",
+            "vad_events": "true",
+            "utterance_end_ms": "1500",
+        }
+        if self.config.transcription.language:
+            params["language"] = self.config.transcription.language
+        return self.WS_URL + "?" + urllib.parse.urlencode(params)
+
+    @cached_property
+    def ws_headers(self) -> dict[str, str] :
+        return {"Authorization": f"Token {self.config.transcription.api_key}"}
+
+    async def send_audio_chunk(self, ws, chunk: bytes):
+        await ws.send(chunk)
+
+    async def on_data(self, raw, previous_transcriptions, current_transcription) -> bool:
+        event = json.loads(raw)
+
+        try:
+            event_type = self.Event(event.get("type", ""))
+        except ValueError:
+            return True
+
+        match event_type:
+            case self.Event.SPEECH_STARTED:
+                if not self.speech_in_progress:
+                    await self._handle_start_of_speech()
+                    self.speech_in_progress = True
+
+            case self.Event.DELTA:
+                chanel = event.get("channel", {})
+                alternatives = chanel.get("alternatives", []) or [{}]
+                transcript = alternatives[0].get("transcript", "")
+                speech_final = bool(event.get("speech_final", False))
+                is_final = speech_final or bool(event.get("is_final", False))  # doc says it implies is_final being True so we enforce it
+
+                if transcript:
+                    if is_final and not speech_final:
+                        transcript += " "
+                    if self.last_message_was_final:
+                        self.speech_in_progress = True
+                        await self._handle_new_delta(transcript, current_transcription)
+                    else:
+                        self.speech_in_progress = True
+                        await self._handle_update_last_delta(transcript, current_transcription)
+                    if speech_final:
+                        # print(event)
+                        self.speech_in_progress = False
+                        await self._handle_done_segment(None, previous_transcriptions, current_transcription)
+
+                    self.last_message_was_final = is_final
+
+        return True
+
+
 
 
 class PostTreatmentTask:
@@ -1222,11 +1366,11 @@ class PostTreatmentTask:
         "HTTP-Referer": "https://github.com/twidi/twistt/",
         "X-Title": "Twistt",
     }
-    SYSTEM_TEMPLATE = """You are a real-time transcription correction assistant.
+    SYSTEM_TEMPLATE = """You are a real-time speech to text transcription correction assistant.
 
 CRITICAL RULES:
-1. You receive a context of previous transcriptions AND a new text
-2. You must ONLY correct and return the NEW text
+1. You receive a context of previous speech to text transcriptions AND a new one
+2. You must ONLY correct and return the NEW one
 3. NEVER include or repeat the previous transcriptions in your response
 4. Return ONLY the corrected text, without formatting or explanation
 5. Correct obvious errors (spelling, punctuation, coherence)
@@ -1403,15 +1547,11 @@ NEW TEXT TO CORRECT:
 
     def _build_client(self) -> AsyncOpenAI:
         if self.config.post.provider is PostTreatmentTask.Provider.OPENAI:
-            return AsyncOpenAI(api_key=self.config.post.openai_api_key)
+            return AsyncOpenAI(api_key=self.config.post.api_key)
         if self.config.post.provider is PostTreatmentTask.Provider.CEREBRAS:
-            if not self.config.post.cerebras_api_key:
-                raise ValueError("Cerebras API key is required when using Cerebras provider")
-            return AsyncOpenAI(api_key=self.config.post.cerebras_api_key, base_url="https://api.cerebras.ai/v1")
+            return AsyncOpenAI(api_key=self.config.post.api_key, base_url="https://api.cerebras.ai/v1")
         if self.config.post.provider is PostTreatmentTask.Provider.OPENROUTER:
-            if not self.config.post.openrouter_api_key:
-                raise ValueError("OpenRouter API key is required when using OpenRouter provider")
-            return AsyncOpenAI(api_key=self.config.post.openrouter_api_key, base_url="https://openrouter.ai/api/v1")
+            return AsyncOpenAI(api_key=self.config.post.api_key, base_url="https://openrouter.ai/api/v1")
         raise ValueError(f"Unknown post-treatment provider: {self.config.post.provider.value}")
 
 
@@ -1787,7 +1927,7 @@ async def main_async():
         capture_task = CaptureTask(comm, app_config)
         output_task = OutputTask(comm, app_config)
         buffer_task = BufferTask(comm, app_config)
-        transcription_task = TranscriptionViaOpenAITask(comm, app_config)
+        transcription_task = (OpenAITranscriptionTask if app_config.transcription.provider is BaseTranscriptionTask.Provider.OPENAI else DeepgramTranscriptionTask)(comm, app_config)
         indicator_task = IndicatorTask(comm)
 
         tasks.append(create_task(hotkey_task.run()))

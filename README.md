@@ -1,14 +1,14 @@
 # Twistt - Push-to-Talk Transcription Tool
 
-A Linux speech-to-text transcription tool using OpenAI's API with push-to-talk functionality.
+A Linux speech-to-text transcription tool using OpenAI or Deepgram for STT with push-to-talk functionality.
 
 ## Features
 
 - **Push-to-Talk**: Hold a function key (F1-F12) to record and transcribe
 - **Toggle mode**: Double-tap the key to start recording, press again to stop
 - **Smart transcription**: Text appears when you pause or stop speaking
-- **Auto-paste**: Automatically pastes transcribed text at cursor position
-- **Multi-language support**: Transcribe in any language supported by OpenAI
+- **Auto-output**: Automatically outputs transcribed text at cursor position
+- **Multi-language support**: Transcribe in any language supported by the provider
 - **Configurable audio gain**: Amplify microphone input if needed
 - **Multiple model support**: Choose between `gpt-4o-transcribe` and `gpt-4o-mini-transcribe`
 - **Post-treatment**: Optional AI-powered correction of transcribed text for improved accuracy
@@ -17,8 +17,9 @@ A Linux speech-to-text transcription tool using OpenAI's API with push-to-talk f
 
 - Linux (tested on X11 and Wayland)
 - Python 3.11+
-- `ydotool` for simulating keyboard input (paste functionality)
-- OpenAI API key
+- `ydotool` for simulating keyboard input (by pasting or typing + pasting)
+- OpenAI or Deepgram API key for transcription (depending on provider)
+- OpenAI, Cerebras, or OpenRouter API key for post-treatment (if used)
 - Microphone access
 
 ## Installation
@@ -49,7 +50,7 @@ python twistt.py --help
 
 ### System Dependencies
 
-**ydotool** is required for paste functionality. It's a replacement for xdotool that works on both X11 and Wayland, used here to simulate Ctrl+V keyboard input.
+**ydotool** is required for output. It's a replacement for xdotool that works on both X11 and Wayland, used here to simulate typing and pasting.
 
 **Important**: The versions available in Debian/Ubuntu repositories are too old. You'll need to build from source.
 
@@ -88,7 +89,7 @@ WantedBy=multi-user.target
 
 ### API Key Setup
 
-Set your OpenAI API key using one of these methods (in order of priority):
+Set your OpenAI API key(s) using one of these methods (in order of priority):
 
 1. **Command line argument**: `--api-key YOUR_KEY`
 2. **User config file**: `~/.config/twistt/config.env`
@@ -97,15 +98,23 @@ Set your OpenAI API key using one of these methods (in order of priority):
 
 Example `.env` or `config.env` file:
 ```env
-# OpenAI API key (required)
+# STT provider selection (openai | deepgram)
+TWISTT_PROVIDER=openai
+
+# OpenAI API key (required if provider=openai)
 TWISTT_OPENAI_API_KEY=sk-...
 # or
 OPENAI_API_KEY=sk-...
 
+# Deepgram API key (required if provider=deepgram)
+TWISTT_DEEPGRAM_API_KEY=dg_...
+# or
+DEEPGRAM_API_KEY=dg_...
+
 # Optional settings
 TWISTT_HOTKEY=F9           # Single hotkey
 TWISTT_HOTKEYS=F8,F9,F10   # Multiple hotkeys (comma-separated)
-TWISTT_MODEL=gpt-4o-transcribe
+TWISTT_MODEL=gpt-4o-transcribe   # For OpenAI; for Deepgram use e.g. nova-2-general
 TWISTT_LANGUAGE=en  # Leave empty or omit for auto-detect
 TWISTT_GAIN=1.0
 TWISTT_DOUBLE_TAP_WINDOW=0.5  # Time window for double-tap detection
@@ -130,24 +139,25 @@ TWISTT_POST_CORRECT=false
 
 ### Available Options
 
-| Option | Environment Variable | Default | Description |
-|--------|---------------------|---------|-------------|
-| `--hotkey` | `TWISTT_HOTKEY` or `TWISTT_HOTKEYS` | F9 | Push-to-talk key(s) (F1-F12), comma-separated for multiple |
-| `--double-tap-window` | `TWISTT_DOUBLE_TAP_WINDOW` | 0.5 | Time window in seconds for double-tap detection |
-| `--model` | `TWISTT_MODEL` | gpt-4o-transcribe | Transcription model |
-| `--language` | `TWISTT_LANGUAGE` | Auto-detect | Transcription language (ISO 639-1) |
-| `--gain` | `TWISTT_GAIN` | 1.0 | Microphone amplification |
-| `--api-key` | `TWISTT_OPENAI_API_KEY` or `OPENAI_API_KEY` | - | OpenAI API key |
-| `--ydotool-socket` | `TWISTT_YDOTOOL_SOCKET` or `YDOTOOL_SOCKET` | Auto-detect | Path to ydotool socket |
-| `--post-prompt` | `TWISTT_POST_TREATMENT_PROMPT` | - | Post-treatment instructions |
-| `--post-prompt-file` | `TWISTT_POST_TREATMENT_PROMPT_FILE` | - | File containing post-treatment prompt |
-| `--post-model` | `TWISTT_POST_TREATMENT_MODEL` | gpt-4o-mini | Model for post-treatment |
-| `--post-provider` | `TWISTT_POST_TREATMENT_PROVIDER` | openai | Provider for post-treatment (openai, cerebras, openrouter) |
-| `--post-correct` | `TWISTT_POST_CORRECT` | false | Apply post-treatment by correcting already-pasted text in-place (requires batch output mode) |
-| `--cerebras-api-key` | `TWISTT_CEREBRAS_API_KEY` or `CEREBRAS_API_KEY` | - | Cerebras API key |
-| `--openrouter-api-key` | `TWISTT_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` | - | OpenRouter API key |
-| `--output-mode` | `TWISTT_OUTPUT_MODE` | batch | Output mode: batch (incremental) or full (complete on release) |
-| `--use-typing` | `TWISTT_USE_TYPING` | false | Type ASCII characters directly (slower); clipboard still handles non-ASCII |
+| Option                 | Environment Variable                                | Default           | Description                                                                                 |
+|------------------------|-----------------------------------------------------|-------------------|---------------------------------------------------------------------------------------------|
+| `--hotkey`             | `TWISTT_HOTKEY` or `TWISTT_HOTKEYS`                 | F9                | Push-to-talk key(s) (F1-F12), comma-separated for multiple                                  |
+| `--double-tap-window`  | `TWISTT_DOUBLE_TAP_WINDOW`                          | 0.5               | Time window in seconds for double-tap detection                                             |
+| `--model`              | `TWISTT_MODEL`                                      | gpt-4o-transcribe | Transcription model (for OpenAI or Deepgram)                                                |
+| `--language`           | `TWISTT_LANGUAGE`                                   | Auto-detect       | Transcription language (ISO 639-1)                                                          |
+| `--gain`               | `TWISTT_GAIN`                                       | 1.0               | Microphone amplification                                                                    |
+| `--openai-api-key`     | `TWISTT_OPENAI_API_KEY` or `OPENAI_API_KEY`         | -                 | OpenAI API key                                                                              |
+| `--deepgram-api-key`   | `TWISTT_DEEPGRAM_API_KEY` or `DEEPGRAM_API_KEY`     | -                 | Deepgram API key                                                                            |
+| `--ydotool-socket`     | `TWISTT_YDOTOOL_SOCKET` or `YDOTOOL_SOCKET`         | Auto-detect       | Path to ydotool socket                                                                      |
+| `--post-prompt`        | `TWISTT_POST_TREATMENT_PROMPT`                      | -                 | Post-treatment instructions                                                                 |
+| `--post-prompt-file`   | `TWISTT_POST_TREATMENT_PROMPT_FILE`                 | -                 | File containing post-treatment prompt                                                       |
+| `--post-model`         | `TWISTT_POST_TREATMENT_MODEL`                       | gpt-4o-mini       | Model for post-treatment                                                                    |
+| `--post-provider`      | `TWISTT_POST_TREATMENT_PROVIDER`                    | openai            | Provider for post-treatment (openai, cerebras, openrouter)                                  |
+| `--post-correct`       | `TWISTT_POST_CORRECT`                               | false             | Apply post-treatment by correcting already-output text in-place (only in batch output mode) |
+| `--cerebras-api-key`   | `TWISTT_CEREBRAS_API_KEY` or `CEREBRAS_API_KEY`     | -                 | Cerebras API key                                                                            |
+| `--openrouter-api-key` | `TWISTT_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` | -                 | OpenRouter API key                                                                          |
+| `--output-mode`        | `TWISTT_OUTPUT_MODE`                                | batch             | Output mode: batch (incremental) or full (complete on release)                              |
+| `--use-typing`         | `TWISTT_USE_TYPING`                                 | false             | Type ASCII characters directly (slower); clipboard still handles non-ASCII                  |
 
 ## Usage
 
@@ -184,14 +194,17 @@ TWISTT_POST_CORRECT=false
 # Use OpenRouter for post-treatment (access to many models)
 ./twistt.py --post-prompt "Fix errors" --post-provider openrouter --post-model meta-llama/llama-3.2-3b-instruct
 
-# Post-correct mode: paste raw immediately, correct in-place when fully ready
+# Post-treatment correct mode: output raw immediately then update in place via post-treatment
 ./twistt.py --post-prompt "Fix grammar" --post-correct
 
-# Use full output mode (wait for release to process/paste)
+# Use full output mode (wait for hotkey release to output/process)
 ./twistt.py --output-mode full
 
-# Type ASCII characters directly (slower; clipboard still handles non-ASCII)
+# Type ASCII characters directly (slower; non-ASCII characters are still handled via clipboard)
 ./twistt.py --use-typing
+
+# Use Deepgram as provider
+TWISTT_PROVIDER=deepgram TWISTT_DEEPGRAM_API_KEY=dg_xxx ./twistt.py --model nova-2-general --language fr
 ```
 
 ### How It Works
@@ -204,7 +217,7 @@ Twistt supports two recording modes:
 3. **Hold to record**: Press and hold one of your configured hotkeys (default: F9)
 4. **Speak**: Talk while holding the key
 5. **Release to transcribe**: Let go of the key
-6. **Auto-paste**: Text is automatically pasted at cursor position
+6. **Auto-output**: Text is automatically output at cursor position
 
 #### Toggle Mode (Double-Tap)
 1. **Start the script**: Run `./twistt.py`
@@ -212,21 +225,23 @@ Twistt supports two recording modes:
 3. **Double-tap to start**: Press-release-press the same hotkey quickly (within 0.5s)
 4. **Speak freely**: Recording continues without holding any key
 5. **Press to stop**: Press the same hotkey once to stop recording (only the hotkey that started toggle mode can stop it)
-6. **Auto-paste**: Text is automatically pasted
+6. **Auto-output**: Text is automatically output at cursor position
 
-The transcription appears in the terminal when you pause or stop speaking.
+The transcription appears where the cursor is located.
+
+An indicator ("(Twisting...)" text) is shown at the cursor position when recording is active, or text is being output or post-treatment is running. 
 
 ### Output Modes
 
-Twistt supports two output modes that control when text is processed and pasted:
+Twistt supports two output modes that control when text is processed and output:
 
-- **batch mode** (default): Text is processed and can be pasted incrementally as you speak. Each pause triggers processing of that segment. With post-treatment enabled, each segment maintains context from previous segments.
+- **batch mode** (default): Text is processed and can be output incrementally as you speak. Each pause triggers processing of that segment. With post-treatment enabled, each segment maintains context from previous segments.
 
-- **full mode**: All text is accumulated while you hold the key and only processed/pasted when you release it. With post-treatment, the entire text is processed at once without maintaining context between sessions. This mode is useful when you want to speak a complete thought before any processing occurs.
+- **full mode**: All text is accumulated while you hold the key and only processed/output when you release it. With post-treatment, the entire text is processed at once without maintaining context between sessions. This mode is useful when you want to speak a complete thought before any processing occurs.
 
 ### Tips
 
-- **Shift mode**: Press Shift at any time while recording to paste with Ctrl+Shift+V (useful for terminals). Shift can be pressed:
+- **Shift mode**: Press Shift at any time while recording to use Ctrl+Shift+V instead of Ctrl+V to paste (useful for terminals). Shift can be pressed:
   - When starting recording (together with the hotkey)
   - At any moment while holding the hotkey
   - The earliest Shift press is remembered for the entire recording session
@@ -249,6 +264,15 @@ The script automatically detects your physical keyboard. If multiple keyboards a
 Post-treatment uses AI to improve transcription accuracy by correcting errors, fixing punctuation, and applying custom transformations. It's activated automatically when you provide a prompt.
 
 ### Supported Providers
+
+#### Transcription
+
+You can choose between different AI providers for transcription:
+
+- **OpenAI**: Uses OpenAI's GPT transcribe models (`gpt-4o-transcribe` (default) `gpt-4o-mini-transcribe`)
+- **Deepgram**: Uses Deepgram's Nova models (`nova-2`, `nova-3`). Really real time but more expensive.
+
+#### Post-Treatment
 
 You can choose between different AI providers for post-treatment:
 
@@ -327,7 +351,6 @@ Leave the language parameter empty to use auto-detection.
 ### "ydotool error"
 - Ensure ydotool daemon is running: `sudo ydotoold &`
 - If using a custom socket path, set it via `YDOTOOL_SOCKET` environment variable or `--ydotool-socket` argument
-- Text will still be copied to clipboard, use Ctrl+V to paste manually
 
 ### "Permission denied on /dev/input/eventX"
 - Add your user to the `input` group: `sudo usermod -a -G input $USER`
@@ -344,7 +367,6 @@ Leave the language parameter empty to use auto-detection.
 - The API key is sent only to OpenAI's servers
 - Audio is processed in real-time and not stored locally
 - Transcriptions are only kept in memory during the session
-- Transcribed text remains in clipboard after paste (allows manual paste if needed)
 
 ## Ideas
 
