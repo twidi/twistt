@@ -93,7 +93,7 @@ class OutputMode(Enum):
 class Config:
     class HotKey(NamedTuple):
         device: InputDevice
-        hotkey_codes: list[int]
+        codes: list[int]
         double_tap_window: float
 
     class Capture(NamedTuple):
@@ -103,7 +103,6 @@ class Config:
         api_key: str
         model: TranscriptionViaOpenAITask.Model
         language: Optional[str]
-        output_mode: OutputMode
 
     class PostTreatment(NamedTuple):
         enabled: bool
@@ -113,14 +112,10 @@ class Config:
         openai_api_key: Optional[str]
         cerebras_api_key: Optional[str]
         openrouter_api_key: Optional[str]
-        post_correct: bool
-        output_mode: OutputMode
-
-    class Buffer(NamedTuple):
-        post_correct: bool
-        output_mode: OutputMode
+        correct: bool
 
     class Output(NamedTuple):
+        mode: OutputMode
         use_typing: bool
 
     class App(NamedTuple):
@@ -128,7 +123,6 @@ class Config:
         capture: "Config.Capture"
         transcription: "Config.Transcription"
         post: "Config.PostTreatment"
-        buffer: "Config.Buffer"
         output: "Config.Output"
 
 
@@ -370,7 +364,7 @@ class CommandLineParser:
         return Config.App(
             hotkey=Config.HotKey(
                 device=keyboard,
-                hotkey_codes=hotkey_codes,
+                codes=hotkey_codes,
                 double_tap_window=args.double_tap_window,
             ),
             capture=Config.Capture(gain=args.gain),
@@ -378,7 +372,6 @@ class CommandLineParser:
                 api_key=args.api_key,
                 model=transcription_model,
                 language=args.language,
-                output_mode=output_mode,
             ),
             post=Config.PostTreatment(
                 enabled=post_treatment_enabled,
@@ -388,14 +381,9 @@ class CommandLineParser:
                 openai_api_key=args.api_key,
                 cerebras_api_key=args.cerebras_api_key,
                 openrouter_api_key=args.openrouter_api_key,
-                post_correct=args.post_correct and post_treatment_enabled,
-                output_mode=output_mode,
+                correct=args.post_correct and post_treatment_enabled,
             ),
-            buffer=Config.Buffer(
-                post_correct=args.post_correct and post_treatment_enabled,
-                output_mode=output_mode,
-            ),
-            output=Config.Output(use_typing=args.use_typing),
+            output=Config.Output(mode=output_mode, use_typing=args.use_typing),
         )
 
     @staticmethod
@@ -645,7 +633,7 @@ class OutputTask:
         class Shutdown(NamedTuple):
             pass
 
-    def __init__(self, comm: Comm, config: Config.Output):
+    def __init__(self, comm: Comm, config: Config.App):
         self.comm = comm
         self.config = config
         self._delay_between_keys_ms = KEY_DEFAULT_DELAY
@@ -724,7 +712,7 @@ class OutputTask:
         key_combination(list(combo))
 
     def _write_text(self, text: str, use_shift_to_paste: bool = False):
-        if not self.config.use_typing:
+        if not self.config.output.use_typing:
             self._copy_paste(text, use_shift_to_paste)
             return
 
@@ -779,20 +767,20 @@ class HotKeyTask:
     KEY_DOWN = evdev.KeyEvent.key_down
     KEY_UP = evdev.KeyEvent.key_up
 
-    def __init__(self, comm: Comm, config: Config.HotKey):
+    def __init__(self, comm: Comm, config: Config.App):
         self.comm = comm
         self.config = config
 
     async def run(self):
         hotkey_pressed = False
-        last_release_time = {code: 0.0 for code in self.config.hotkey_codes}
+        last_release_time = {code: 0.0 for code in self.config.hotkey.codes}
         is_toggle_mode = False
         active_hotkey: Optional[int] = None
         toggle_stop_time = 0.0
         toggle_cooldown = 0.5
 
         try:
-            async for event in self.config.device.async_read_loop():
+            async for event in self.config.hotkey.device.async_read_loop():
                 if self.comm.is_shutting_down:
                     break
                 if event.type != ecodes.EV_KEY:
@@ -801,20 +789,20 @@ class HotKeyTask:
                 current_time = time.perf_counter()
                 scancode = key_event.scancode
 
-                if scancode in self.config.hotkey_codes:
+                if scancode in self.config.hotkey.codes:
                     if active_hotkey is not None and scancode != active_hotkey:
                         if key_event.keystate == self.KEY_UP:
                             last_release_time[scancode] = current_time
                         continue
 
-                    shift_pressed = any(code in self.config.device.active_keys() for code in self.SHIFT_CODES)
+                    shift_pressed = any(code in self.config.hotkey.device.active_keys() for code in self.SHIFT_CODES)
                     self.comm.toggle_shift_pressed(shift_pressed)
 
                     match key_event.keystate:
                         case self.KEY_DOWN if not hotkey_pressed:
                             if current_time - toggle_stop_time < toggle_cooldown:
                                 continue
-                            if current_time - last_release_time[scancode] < self.config.double_tap_window:
+                            if current_time - last_release_time[scancode] < self.config.hotkey.double_tap_window:
                                 is_toggle_mode = True
                                 active_hotkey = scancode
                                 hotkey_pressed = True
@@ -857,7 +845,7 @@ class HotKeyTask:
             pass
         finally:
             with suppress(Exception):
-                self.config.device.close()
+                self.config.hotkey.device.close()
 
 
 class CaptureTask:
@@ -867,7 +855,7 @@ class CaptureTask:
     DTYPE = "int16"
     CHANNELS = 1
 
-    def __init__(self, comm: Comm, config: Config.Capture):
+    def __init__(self, comm: Comm, config: Config.App):
         self.comm = comm
         self.config = config
         self._loop = asyncio.get_running_loop()
@@ -896,8 +884,8 @@ class CaptureTask:
             return
         try:
             data = np.frombuffer(indata, dtype=np.int16)
-            if self.config.gain != 1.0:
-                amplified = np.clip(data * self.config.gain, -32768, 32767)
+            if self.config.capture.gain != 1.0:
+                amplified = np.clip(data * self.config.capture.gain, -32768, 32767)
                 audio_bytes = amplified.astype(np.int16).tobytes()
             else:
                 audio_bytes = data.tobytes()
@@ -918,10 +906,9 @@ class BaseTranscriptionTask:
     STREAM_DELTAS = True
     STREAM_DELTA_MIN_CHARS = 10
 
-    def __init__(self, comm: Comm, config: Config.Transcription, post_config: Config.PostTreatment):
+    def __init__(self, comm: Comm, config: Config.App):
         self.comm = comm
         self.config = config
-        self.post_config = post_config
         self.seq_counter = 0
         self.headers: dict[str, str] = {}
         self._active_seq_num: Optional[int] = None
@@ -973,8 +960,8 @@ class BaseTranscriptionTask:
             else:
                 # in full mode, the command are created later, and because we mark the end of "speech_active" here
                 # we'll lose the indicator, so we mark the post-treatment as active right now if we have some
-                if self.config.output_mode.is_full and self.post_config.enabled and previous_transcriptions:
-                        self.comm.toggle_post_treatment_active(True)
+                if self.config.output.mode.is_full and self.config.post.enabled and previous_transcriptions:
+                    self.comm.toggle_post_treatment_active(True)
             finally:
                 self.comm.toggle_speech_active(False)
                 self.comm.empty_audio_chunks()
@@ -983,9 +970,9 @@ class BaseTranscriptionTask:
             if not previous_transcriptions:
                 continue
 
-            if self.config.output_mode.is_full:
+            if self.config.output.mode.is_full:
                 full_text = "".join(previous_transcriptions)
-                if self.post_config.enabled:
+                if self.config.post.enabled:
                     await self.comm.queue_post_command(
                         PostTreatmentTask.Commands.ProcessFullText(
                             text=full_text,
@@ -1039,8 +1026,8 @@ class BaseTranscriptionTask:
     def _should_output_deltas(self) -> bool:
         if not self.STREAM_DELTAS:
             return False
-        if self.config.output_mode.is_batch:
-            return not self.post_config.enabled or self.post_config.post_correct
+        if self.config.output.mode.is_batch:
+            return not self.config.post.enabled or self.config.post.correct
         return False
 
     async def _upsert_buffer_segment(self, text: str) -> int:
@@ -1100,9 +1087,9 @@ class BaseTranscriptionTask:
 
         previous_text = "".join(previous_transcriptions)
 
-        if self.config.output_mode.is_batch:
-            if self.post_config.enabled:
-                if self.post_config.post_correct:
+        if self.config.output.mode.is_batch:
+            if self.config.post.enabled:
+                if self.config.post.correct:
                     seq = await self._upsert_buffer_segment(final_text)
                     await self.comm.queue_post_command(
                         PostTreatmentTask.Commands.ProcessSegment(
@@ -1128,7 +1115,7 @@ class BaseTranscriptionTask:
         else:
             # in full mode, the command are created later, and because we mark the end of "speech_active" here
             # we'll lose the indicator, so we mark the post-treatment as active right now if we have some
-            if self.post_config.enabled and final_text:
+            if self.config.post.enabled and final_text:
                 self.comm.toggle_post_treatment_active(True)
 
         previous_transcriptions.append(final_text)
@@ -1148,10 +1135,10 @@ class TranscriptionViaOpenAITask(BaseTranscriptionTask):
     EVENT_DELTA = "conversation.item.input_audio_transcription.delta"
     EVENT_DONE = "conversation.item.input_audio_transcription.completed"
 
-    def __init__(self, comm: Comm, config: Config.Transcription, post_config: Config.PostTreatment):
-        super().__init__(comm, config, post_config)
+    def __init__(self, comm: Comm, config: Config.App):
+        super().__init__(comm, config)
         self.headers = {
-            "Authorization": f"Bearer {self.config.api_key}",
+            "Authorization": f"Bearer {self.config.transcription.api_key}",
             "OpenAI-Beta": "realtime=v1",
         }
         self._first_message = self._build_first_message()
@@ -1168,7 +1155,7 @@ class TranscriptionViaOpenAITask(BaseTranscriptionTask):
                     "silence_duration_ms": 500,
                 },
                 "input_audio_transcription": {
-                    "model": self.config.model.value,
+                    "model": self.config.transcription.model.value,
                 },
                 "input_audio_noise_reduction": {
                     "type": "near_field",
@@ -1176,8 +1163,8 @@ class TranscriptionViaOpenAITask(BaseTranscriptionTask):
                 "include": ["item.input_audio_transcription.logprobs"],
             },
         }
-        if self.config.language:
-            data["session"]["input_audio_transcription"]["language"] = self.config.language
+        if self.config.transcription.language:
+            data["session"]["input_audio_transcription"]["language"] = self.config.transcription.language
         return json.dumps(data)
 
     async def on_connected(self, ws):
@@ -1272,12 +1259,12 @@ NEW TEXT TO CORRECT:
         class Shutdown(NamedTuple):
             pass
 
-    def __init__(self, comm: Comm, config: Config.PostTreatment):
+    def __init__(self, comm: Comm, config: Config.App):
         self.comm = comm
         self.config = config
         self.client = self._build_client()
         self._buffer_seq_counter = 1_000_000
-        self._use_post_correction = self.config.post_correct and self.config.output_mode.is_batch
+        self._use_post_correction = self.config.post.correct and self.config.output.mode.is_batch
 
     def _next_buffer_seq(self) -> int:
         seq = self._buffer_seq_counter
@@ -1285,7 +1272,7 @@ NEW TEXT TO CORRECT:
         return seq
 
     async def run(self):
-        if not self.config.enabled:
+        if not self.config.post.enabled:
             return
         try:
             while not self.comm.is_shutting_down:
@@ -1352,8 +1339,8 @@ NEW TEXT TO CORRECT:
             previous_text: str,
             stream_output: bool,
     ) -> AsyncIterator[Optional[str]]:
-        system_message = self.SYSTEM_TEMPLATE.format(user_prompt=self.config.prompt)
-        if self.config.output_mode.is_full:
+        system_message = self.SYSTEM_TEMPLATE.format(user_prompt=self.config.post.prompt)
+        if self.config.output.mode.is_full:
             previous_context = "No previous transcription"
         else:
             previous_context = previous_text if previous_text else "No previous transcription"
@@ -1362,7 +1349,7 @@ NEW TEXT TO CORRECT:
             current_text=text,
         )
         create_kwargs = {
-            "model": self.config.model,
+            "model": self.config.post.model,
             "messages": [
                 {"role": "system", "content": system_message},
                 {"role": "user", "content": user_message},
@@ -1370,7 +1357,7 @@ NEW TEXT TO CORRECT:
             "temperature": 0.1,
             "stream": True,
         }
-        if self.config.provider is PostTreatmentTask.Provider.OPENROUTER:
+        if self.config.post.provider is PostTreatmentTask.Provider.OPENROUTER:
             create_kwargs["extra_headers"] = self.OPENROUTER_EXTRA_HEADERS
         try:
             stream = await asyncio.wait_for(
@@ -1415,17 +1402,17 @@ NEW TEXT TO CORRECT:
         yield None
 
     def _build_client(self) -> AsyncOpenAI:
-        if self.config.provider is PostTreatmentTask.Provider.OPENAI:
-            return AsyncOpenAI(api_key=self.config.openai_api_key)
-        if self.config.provider is PostTreatmentTask.Provider.CEREBRAS:
-            if not self.config.cerebras_api_key:
+        if self.config.post.provider is PostTreatmentTask.Provider.OPENAI:
+            return AsyncOpenAI(api_key=self.config.post.openai_api_key)
+        if self.config.post.provider is PostTreatmentTask.Provider.CEREBRAS:
+            if not self.config.post.cerebras_api_key:
                 raise ValueError("Cerebras API key is required when using Cerebras provider")
-            return AsyncOpenAI(api_key=self.config.cerebras_api_key, base_url="https://api.cerebras.ai/v1")
-        if self.config.provider is PostTreatmentTask.Provider.OPENROUTER:
-            if not self.config.openrouter_api_key:
+            return AsyncOpenAI(api_key=self.config.post.cerebras_api_key, base_url="https://api.cerebras.ai/v1")
+        if self.config.post.provider is PostTreatmentTask.Provider.OPENROUTER:
+            if not self.config.post.openrouter_api_key:
                 raise ValueError("OpenRouter API key is required when using OpenRouter provider")
-            return AsyncOpenAI(api_key=self.config.openrouter_api_key, base_url="https://openrouter.ai/api/v1")
-        raise ValueError(f"Unknown post-treatment provider: {self.config.provider.value}")
+            return AsyncOpenAI(api_key=self.config.post.openrouter_api_key, base_url="https://openrouter.ai/api/v1")
+        raise ValueError(f"Unknown post-treatment provider: {self.config.post.provider.value}")
 
 
 class BufferTask:
@@ -1670,7 +1657,7 @@ class BufferTask:
 
                 await self._move_cursor_at_edge(position_cursor_at, start_base, len(corrected_text))
 
-    def __init__(self, comm: Comm, config: Config.Buffer):
+    def __init__(self, comm: Comm, config: Config.App):
         self.comm = comm
         self.config = config
         self.adapter = BufferTask.ClipboardOutputAdapter(comm)
@@ -1796,11 +1783,11 @@ async def main_async():
     comm = Comm()
     tasks = []
     try:
-        hotkey_task = HotKeyTask(comm, app_config.hotkey)
-        capture_task = CaptureTask(comm, app_config.capture)
-        output_task = OutputTask(comm, app_config.output)
-        buffer_task = BufferTask(comm, app_config.buffer)
-        transcription_task = TranscriptionViaOpenAITask(comm, app_config.transcription, app_config.post)
+        hotkey_task = HotKeyTask(comm, app_config)
+        capture_task = CaptureTask(comm, app_config)
+        output_task = OutputTask(comm, app_config)
+        buffer_task = BufferTask(comm, app_config)
+        transcription_task = TranscriptionViaOpenAITask(comm, app_config)
         indicator_task = IndicatorTask(comm)
 
         tasks.append(create_task(hotkey_task.run()))
@@ -1811,7 +1798,7 @@ async def main_async():
         tasks.append(create_task(indicator_task.run()))
 
         if app_config.post.enabled:
-            post_task = PostTreatmentTask(comm, app_config.post)
+            post_task = PostTreatmentTask(comm, app_config)
             tasks.append(create_task(post_task.run()))
 
         await comm.wait_for_shutdown()
