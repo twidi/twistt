@@ -162,8 +162,10 @@ TWISTT_POST_CORRECT=false
 | `--openrouter-api-key` | `TWISTT_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` | -                 | OpenRouter API key                                                                                                                                |
 | `--output-mode`        | `TWISTT_OUTPUT_MODE`                                | batch             | Output mode: batch (incremental) or full (complete on release)                                                                                    |
 | `--use-typing`         | `TWISTT_USE_TYPING`                                 | false             | Type ASCII characters directly (slower); clipboard still handles non-ASCII                                                                        |
+| `--save-config`        | -                                                   | false             | Persist provided command-line values to `~/.config/twistt/config.env`                                                                             |
 
 Selecting a microphone sets the `PULSE_SOURCE` environment variable for Twistt only, so your system default input stays untouched. Run `./twistt.py --microphone` without a value to pick from the list even if an environment variable is set.
+Use `--save-config` to capture only the options you explicitly pass on the command line; existing keys in the config file are preserved.
 
 ## Usage
 
@@ -211,6 +213,9 @@ Selecting a microphone sets the `PULSE_SOURCE` environment variable for Twistt o
 
 # Use Deepgram as provider
 TWISTT_PROVIDER=deepgram TWISTT_DEEPGRAM_API_KEY=dg_xxx ./twistt.py --model nova-2-general --language fr
+
+# Save your preferred options for next time
+./twistt.py --language fr --gain 2.0 --microphone "Elgato Wave 3" --save-config
 ```
 
 ### How It Works

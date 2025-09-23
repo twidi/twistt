@@ -136,6 +136,27 @@ class CommandLineParser:
     ENV_PREFIX = "TWISTT_"
     _PROMPT_FOR_MICROPHONE = object()
     _PROMPT_FOR_KEYBOARD = object()
+    _DEST_TO_ENV = {
+        "hotkey": f"{ENV_PREFIX}HOTKEY",
+        "model": f"{ENV_PREFIX}MODEL",
+        "language": f"{ENV_PREFIX}LANGUAGE",
+        "gain": f"{ENV_PREFIX}GAIN",
+        "microphone": f"{ENV_PREFIX}MICROPHONE",
+        "openai_api_key": f"{ENV_PREFIX}OPENAI_API_KEY",
+        "deepgram_api_key": f"{ENV_PREFIX}DEEPGRAM_API_KEY",
+        "ydotool_socket": f"{ENV_PREFIX}YDOTOOL_SOCKET",
+        "post_prompt": f"{ENV_PREFIX}POST_TREATMENT_PROMPT",
+        "post_prompt_file": f"{ENV_PREFIX}POST_TREATMENT_PROMPT_FILE",
+        "post_model": f"{ENV_PREFIX}POST_TREATMENT_MODEL",
+        "post_provider": f"{ENV_PREFIX}POST_TREATMENT_PROVIDER",
+        "post_correct": f"{ENV_PREFIX}POST_CORRECT",
+        "cerebras_api_key": f"{ENV_PREFIX}CEREBRAS_API_KEY",
+        "openrouter_api_key": f"{ENV_PREFIX}OPENROUTER_API_KEY",
+        "output_mode": f"{ENV_PREFIX}OUTPUT_MODE",
+        "double_tap_window": f"{ENV_PREFIX}DOUBLE_TAP_WINDOW",
+        "use_typing": f"{ENV_PREFIX}USE_TYPING",
+        "keyboard": f"{ENV_PREFIX}KEYBOARD",
+    }
 
     @classmethod
     def get_env(
@@ -150,9 +171,7 @@ class CommandLineParser:
     def get_env_bool(
         cls, name: str, default: bool = False, prefix_optional: bool = False
     ):
-        return cls._env_truthy(
-            CommandLineParser.get_env(name, str(default), prefix_optional)
-        )
+        return cls._env_truthy(cls.get_env(name, str(default), prefix_optional))
 
     @classmethod
     def parse(cls) -> Optional[Config.App]:
@@ -324,8 +343,14 @@ class CommandLineParser:
                 f"value to pick interactively (env: {prefix}KEYBOARD)"
             ),
         )
+        parser.add_argument(
+            "--save-config",
+            action="store_true",
+            help="Persist provided command-line options into the user config file (~/.config/twistt/config.env)",
+        )
 
         args = parser.parse_args()
+        cli_overrides = cls._collect_cli_destinations(parser)
 
         provider: BaseTranscriptionTask.Provider
         try:
@@ -522,6 +547,14 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
         print(f"Recording from {mic_display_name}.")
         print("Press Ctrl+C to stop the program.")
 
+        if args.save_config:
+            cls.save_config(
+                args=args,
+                provided_dests=cli_overrides,
+                keyboard=keyboard,
+                microphone=microphone,
+            )
+
         return Config.App(
             hotkey=Config.HotKey(
                 device=keyboard,
@@ -566,6 +599,128 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
         user_config_path = config_dir / "config.env"
         if user_config_path.exists():
             load_dotenv(dotenv_path=user_config_path, override=True)
+
+    @classmethod
+    def save_config(
+        cls,
+        args: argparse.Namespace,
+        provided_dests: set[str],
+        keyboard: InputDevice,
+        microphone: sc.Microphone,
+    ) -> None:
+        overrides = cls._prepare_config_overrides(
+            args=args,
+            provided_dests=provided_dests,
+            keyboard=keyboard,
+            microphone=microphone,
+        )
+        if not overrides:
+            print("No command-line options to save; config file left untouched.")
+            return
+        path = cls._write_user_config(overrides)
+        print(f"Saved configuration overrides to {path}.")
+
+    @classmethod
+    def _collect_cli_destinations(cls, parser: argparse.ArgumentParser) -> set[str]:
+        option_actions = parser._option_string_actions
+        provided_dests: set[str] = set()
+        for token in sys.argv[1:]:
+            if token == "--":
+                break
+            option_key = token
+            if token.startswith("--") and "=" in token:
+                option_key = token.split("=", 1)[0]
+            action = option_actions.get(option_key)
+            if action is None and token.startswith("-") and len(token) > 2:
+                action = option_actions.get(token[:2])
+            if action is None or action.dest is argparse.SUPPRESS:
+                continue
+            provided_dests.add(action.dest)
+        provided_dests.discard("save_config")
+        return provided_dests
+
+    @classmethod
+    def _prepare_config_overrides(
+        cls,
+        args: argparse.Namespace,
+        provided_dests: set[str],
+        keyboard: InputDevice,
+        microphone: sc.Microphone,
+    ) -> dict[str, str]:
+        overrides: dict[str, str] = {}
+        for dest, env_key in cls._DEST_TO_ENV.items():
+            if dest not in provided_dests:
+                continue
+            if dest == "microphone":
+                mic_name = getattr(microphone, "name", None)
+                if not mic_name:
+                    continue
+                overrides[env_key] = mic_name
+                continue
+            if dest == "keyboard":
+                keyboard_name = getattr(keyboard, "name", None)
+                if not keyboard_name:
+                    continue
+                overrides[env_key] = keyboard_name
+                continue
+            if dest in {"post_correct", "use_typing"}:
+                overrides[env_key] = "true" if getattr(args, dest) else "false"
+                continue
+            value = getattr(args, dest, None)
+            if value is None:
+                continue
+            overrides[env_key] = str(value)
+        return overrides
+
+    @staticmethod
+    def _format_env_value(value: str) -> str:
+        if value == "":
+            return ""
+        special_chars = set(" #\"'\\\n\r\t=")
+        if any(char in special_chars for char in value):
+            escaped = (
+                value.replace("\\", "\\\\")
+                .replace("\n", "\\n")
+                .replace("\r", "\\r")
+                .replace("\"", "\\\"")
+            )
+            return f'"{escaped}"'
+        return value
+
+    @classmethod
+    def _write_user_config(cls, overrides: Mapping[str, str]) -> Path:
+        formatted = {key: cls._format_env_value(str(val)) for key, val in overrides.items()}
+        config_dir = Path(user_config_dir("twistt", ensure_exists=True))
+        config_dir.mkdir(parents=True, exist_ok=True)
+        user_config_path = config_dir / "config.env"
+        remaining = dict(formatted)
+        lines: list[str]
+        if user_config_path.exists():
+            existing_lines = user_config_path.read_text(encoding="utf-8").splitlines()
+            lines = []
+            for line in existing_lines:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    lines.append(line)
+                    continue
+                key, sep, _ = line.partition("=")
+                if not sep:
+                    lines.append(line)
+                    continue
+                key_clean = key.strip()
+                if key_clean in remaining:
+                    lines.append(f"{key_clean}={remaining.pop(key_clean)}")
+                else:
+                    lines.append(line)
+        else:
+            lines = []
+        for key, value in remaining.items():
+            lines.append(f"{key}={value}")
+        content = "\n".join(lines).rstrip("\n")
+        if content:
+            content += "\n"
+        user_config_path.write_text(content, encoding="utf-8")
+        return user_config_path
 
     @staticmethod
     def _env_truthy(val: Optional[str]) -> bool:
