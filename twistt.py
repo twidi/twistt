@@ -1451,6 +1451,7 @@ class OpenAITranscriptionTask(BaseTranscriptionTask):
 
 class DeepgramTranscriptionTask(BaseTranscriptionTask):
     SAMPLE_RATE = 16_000
+    IDLE_TIMEOUT_SECONDS = 2.0
 
     class Model(Enum):
         NOVA_2 = "nova-2"
@@ -1467,8 +1468,10 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
 
     def __init__(self, comm: Comm, config: Config.App):
         super().__init__(comm, config)
-        self.last_message_was_final = True
-        self.speech_in_progress = False
+        self._last_message_was_final = True
+        self._speech_in_progress = False
+        self._has_transcript_since_done_segment = False
+        self._last_transcript_time = time.perf_counter()
 
     @cached_property
     def ws_url(self) -> str:
@@ -1505,9 +1508,9 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
 
         match event_type:
             case self.Event.SPEECH_STARTED:
-                if not self.speech_in_progress:
+                if not self._speech_in_progress:
                     await self._handle_start_of_speech()
-                    self.speech_in_progress = True
+                    self._speech_in_progress = True
 
             case self.Event.DELTA:
                 chanel = event.get("channel", {})
@@ -1516,25 +1519,41 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
                 speech_final = bool(event.get("speech_final", False))
                 # doc says that speech_final being True implies is_final being True so we enforce it
                 is_final = speech_final or bool(event.get("is_final", False))
+                now = time.perf_counter()
+
+                timeout_with_no_transcript = (
+                    not transcript
+                    and now - self._last_transcript_time >= self.IDLE_TIMEOUT_SECONDS
+                )
+                if timeout_with_no_transcript:
+                    speech_final = True
 
                 if transcript:
+                    self._has_transcript_since_done_segment = True
+                    self._last_transcript_time = now
                     if is_final and not speech_final:
                         transcript += " "
-                    if self.last_message_was_final:
-                        self.speech_in_progress = True
+                    if self._last_message_was_final:
+                        self._speech_in_progress = True
                         await self._handle_new_delta(transcript, current_transcription)
                     else:
-                        self.speech_in_progress = True
+                        self._speech_in_progress = True
                         await self._handle_update_last_delta(
                             transcript, current_transcription
                         )
-                    if speech_final:
-                        self.speech_in_progress = False
+
+                if speech_final:
+                    self._speech_in_progress = False
+                    if (
+                        self._has_transcript_since_done_segment
+                        or not timeout_with_no_transcript
+                    ):
+                        self._has_transcript_since_done_segment = False
                         await self._handle_done_segment(
                             None, previous_transcriptions, current_transcription
                         )
 
-                    self.last_message_was_final = is_final
+                self._last_message_was_final = is_final
 
                 if speech_final and not self.comm.is_recording:
                     return False
