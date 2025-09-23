@@ -175,8 +175,12 @@ class CommandLineParser:
 
     @classmethod
     def parse(cls) -> Optional[Config.App]:
+        env_config_path = os.getenv(f"{cls.ENV_PREFIX}CONFIG")
         config_override_path = cls._extract_config_path_from_argv()
-        if not cls._load_env_files(config_override_path):
+        effective_config_path = config_override_path or (
+            Path(env_config_path).expanduser() if env_config_path else None
+        )
+        if not cls._load_env_files(effective_config_path):
             return None
 
         epilog = """Configuration files:
@@ -204,7 +208,7 @@ class CommandLineParser:
 
         parser.add_argument(
             "--config",
-            default=None,
+            default=effective_config_path,
             help="Path to config file to load instead of the default user config (~/.config/twistt/config.env)",
         )
 
@@ -355,10 +359,10 @@ class CommandLineParser:
             "--save-config",
             nargs="?",
             const=True,
-            default=False,
+            default=effective_config_path or False,
             help=(
                 "Persist provided command-line options into a config file. "
-                "Without a value defaults to ~/.config/twistt/config.env."
+                "Without a value defaults to ~/.config/twistt/config.env or TWISTT_CONFIG if set."
             ),
         )
 
