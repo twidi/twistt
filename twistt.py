@@ -176,6 +176,7 @@ class CommandLineParser:
         default_output_mode = os.getenv(f"{prefix}OUTPUT_MODE", OutputMode.BATCH.value)
         default_double_tap_window = float(os.getenv(f"{prefix}DOUBLE_TAP_WINDOW", "0.5"))
         default_use_typing = CommandLineParser._env_truthy(os.getenv(f"{prefix}USE_TYPING"))
+        default_keyboard_filter = os.getenv(f"{prefix}KEYBOARD")
 
         parser.add_argument(
             "--hotkey",
@@ -273,6 +274,11 @@ class CommandLineParser:
                 f" (env: {prefix}USE_TYPING)"
             ),
         )
+        parser.add_argument(
+            "--keyboard",
+            default=default_keyboard_filter,
+            help=f"Text filter for selecting the keyboard input device (env: {prefix}KEYBOARD)",
+        )
 
         args = parser.parse_args()
 
@@ -356,7 +362,8 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
             return None
 
         try:
-            keyboard = CommandLineParser._find_keyboard()
+            keyboard_filter = args.keyboard.strip() if args.keyboard else None
+            keyboard = CommandLineParser._find_keyboard(filter_text=keyboard_filter)
         except Exception as exc:
             print(f"ERROR: Unable to find keyboard: {exc}", file=sys.stderr)
             return None
@@ -448,9 +455,16 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
         return codes
 
     @staticmethod
-    def _find_keyboard() -> InputDevice:
+    def _find_keyboard(filter_text: Optional[str] = None) -> InputDevice:
         devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
         physical_keyboards = []
+        filter_value = filter_text.strip().lower() if filter_text else None
+
+        def matches_filter(device: InputDevice) -> bool:
+            if not filter_value:
+                return True
+            return filter_value in device.name.lower() or filter_value in device.path.lower()
+
         for device in devices:
             capabilities = device.capabilities(verbose=False)
             if ecodes.EV_KEY not in capabilities:
@@ -470,20 +484,29 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
             if ecodes.KEY_F1 not in keys or ecodes.KEY_F12 not in keys:
                 continue
             physical_keyboards.append(device)
-        if len(physical_keyboards) == 1:
-            return physical_keyboards[0]
-        if physical_keyboards:
+
+        filtered_physical_keyboards = [device for device in physical_keyboards if matches_filter(device)]
+        filtered_devices = [device for device in devices if matches_filter(device)] if filter_value else devices
+
+        if filter_value and not filtered_devices:
+            raise RuntimeError(f'No input devices matched filter "{filter_text}"')
+
+        candidate_physical = filtered_physical_keyboards if filter_value else physical_keyboards
+        if len(candidate_physical) == 1:
+            return candidate_physical[0]
+        if candidate_physical:
             print("\nMultiple physical keyboards found:")
-            for idx, device in enumerate(physical_keyboards):
+            for idx, device in enumerate(candidate_physical):
                 print(f"  {idx}: {device.path} - {device.name}")
             selection = int(input("Select your keyboard: "))
-            return physical_keyboards[selection]
+            return candidate_physical[selection]
         print("\nNo physical keyboard detected automatically.")
+        devices_to_list = filtered_devices
         print("Available devices:")
-        for idx, device in enumerate(devices):
+        for idx, device in enumerate(devices_to_list):
             print(f"  {idx}: {device.path} - {device.name}")
         selection = int(input("Select your keyboard manually: "))
-        return devices[selection]
+        return devices_to_list[selection]
 
 
 class Comm:

@@ -118,6 +118,7 @@ TWISTT_MODEL=gpt-4o-transcribe   # For OpenAI; for Deepgram use e.g. nova-2-gene
 TWISTT_LANGUAGE=en  # Leave empty or omit for auto-detect
 TWISTT_GAIN=1.0
 TWISTT_DOUBLE_TAP_WINDOW=0.5  # Time window for double-tap detection
+TWISTT_KEYBOARD=keychron  # Optional text filter to auto-select matching keyboard
 TWISTT_YDOTOOL_SOCKET=/run/user/1000/.ydotool_socket  # Optional, auto-detected by default
 
 # Post-treatment settings (optional)
@@ -142,6 +143,7 @@ TWISTT_POST_CORRECT=false
 | Option                 | Environment Variable                                | Default           | Description                                                                                 |
 |------------------------|-----------------------------------------------------|-------------------|---------------------------------------------------------------------------------------------|
 | `--hotkey`             | `TWISTT_HOTKEY` or `TWISTT_HOTKEYS`                 | F9                | Push-to-talk key(s) (F1-F12), comma-separated for multiple                                  |
+| `--keyboard`           | `TWISTT_KEYBOARD`                                   | -                 | Filter text for automatically selecting the keyboard input device                           |
 | `--double-tap-window`  | `TWISTT_DOUBLE_TAP_WINDOW`                          | 0.5               | Time window in seconds for double-tap detection                                             |
 | `--model`              | `TWISTT_MODEL`                                      | gpt-4o-transcribe | Transcription model (for OpenAI or Deepgram)                                                |
 | `--language`           | `TWISTT_LANGUAGE`                                   | Auto-detect       | Transcription language (ISO 639-1)                                                          |
@@ -257,7 +259,7 @@ Twistt supports two output modes that control when text is processed and output:
 
 ## Keyboard Detection
 
-The script automatically detects your physical keyboard. If multiple keyboards are found, you'll be prompted to select one. Virtual keyboards are automatically filtered out.
+The script automatically detects your physical keyboard. If multiple keyboards are found, you'll be prompted to select one. Virtual keyboards are automatically filtered out. Set `--keyboard "partial name"` or `TWISTT_KEYBOARD=partial name` to pre-filter devices and auto-select when only one match remains.
 
 ## Post-Treatment (Optional)
 
