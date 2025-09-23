@@ -1463,7 +1463,7 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
     class Event(Enum):
         SPEECH_STARTED = "SpeechStarted"
         DELTA = "Results"
-        # DONE = "UtteranceEnd"
+        DONE = "UtteranceEnd"
 
     def __init__(self, comm: Comm, config: Config.App):
         super().__init__(comm, config)
@@ -1514,9 +1514,8 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
                 alternatives = chanel.get("alternatives", []) or [{}]
                 transcript = alternatives[0].get("transcript", "")
                 speech_final = bool(event.get("speech_final", False))
-                is_final = speech_final or bool(
-                    event.get("is_final", False)
-                )  # doc says it implies is_final being True so we enforce it
+                # doc says that speech_final being True implies is_final being True so we enforce it
+                is_final = speech_final or bool(event.get("is_final", False))
 
                 if transcript:
                     if is_final and not speech_final:
@@ -1536,6 +1535,13 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
                         )
 
                     self.last_message_was_final = is_final
+
+                if speech_final and not self.comm.is_recording:
+                    return False
+
+            case self.Event.DONE:
+                if not self.comm.is_recording:
+                    return False
 
         return True
 
