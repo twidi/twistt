@@ -166,7 +166,30 @@ TWISTT_POST_CORRECT=false
 | `--save-config [PATH]` | `TWISTT_CONFIG`                                     | false                         | Persist provided command-line values to a config file (defaults to `~/.config/twistt/config.env` or `TWISTT_CONFIG` if set)                       |
 
 Selecting a microphone sets the `PULSE_SOURCE` environment variable for Twistt only, so your system default input stays untouched. Run `./twistt.py --microphone` without a value to pick from the list even if an environment variable is set.
-Use `--config` (or `TWISTT_CONFIG`) to load settings from a specific file while leaving the default user config untouched. Use `--save-config` to capture only the options you explicitly pass on the command line; existing keys in the config file are preserved. Provide a path (or set `TWISTT_CONFIG`) to control which file gets written. `TWISTT_CONFIG` is read only from the process environment, do not place it in `.env` files or `config.env`.
+
+Use `--config` (or `TWISTT_CONFIG`) to load settings from a specific file while leaving the default user config untouched. Use `--save-config` to capture only the options you explicitly pass on the command line; existing keys in the config file are preserved. Provide a path (or set `TWISTT_CONFIG`) to control which file gets written. `TWISTT_CONFIG` is read only from the process environment—do not place it in `.env` files or `config.env`.
+
+### Config Inheritance
+
+Config files can define `TWISTT_PARENT_CONFIG` to inherit from another config file. Values in the child file take precedence. This allows creating presets that only specify what differs from a base configuration:
+
+```bash
+# base.env - shared settings
+TWISTT_OPENAI_API_KEY=sk-...
+TWISTT_OUTPUT_MODE=batch
+TWISTT_POST_TREATMENT_PROMPT=Please correct any errors
+
+# work.env - inherits base, changes hotkey
+TWISTT_PARENT_CONFIG=base.env
+TWISTT_HOTKEY=F8
+
+# gaming.env - inherits base, different settings
+TWISTT_PARENT_CONFIG=base.env
+TWISTT_HOTKEY=F9
+TWISTT_OUTPUT_MODE=full
+```
+
+Parent paths can be relative (resolved from the child config's directory) or absolute. Circular references are detected and will cause an error.
 
 ## Usage
 
