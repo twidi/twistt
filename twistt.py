@@ -373,7 +373,7 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
         if args.gain != 1.0:
             print(f"Audio gain: {args.gain}x")
         if post_treatment_enabled:
-            print(f'Post-treatment: Enabled via "{args.post_model}" from {post_provider.value}"')
+            print(f'Post-treatment: Enabled via "{args.post_model}" from "{post_provider.value}"')
             if post_prompt:
                 preview = post_prompt[:50] + "..." if len(post_prompt) > 50 else post_prompt
                 print(f"Post-treatment prompt: {preview}")
