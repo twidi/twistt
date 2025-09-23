@@ -1603,29 +1603,11 @@ class BufferTask:
         class Shutdown(NamedTuple):
             pass
 
-    class ClipboardOutputAdapter:
-        def __init__(self, comm: Comm):
-            self.comm = comm
-
-        async def output_transcription(self, text: str):
-            if not text:
-                return
-            try:
-                await self.comm.queue_keyboard_command(
-                    OutputTask.Commands.WriteText(
-                        text=text,
-                        use_shift_to_paste=self.comm.is_shift_pressed,
-                    )
-                )
-            except Exception as exc:  # pragma: no cover - defensive
-                print(f"Error outputting transcription: {exc}", file=sys.stderr)
-
     class Manager:
         """Maintain a mirror of pasted text and apply minimal corrections via keyboard."""
 
-        def __init__(self, output_adapter):
-            self.output_adapter = output_adapter
-            self.comm = output_adapter.comm
+        def __init__(self, comm: Comm):
+            self.comm = comm
             self.text = ""
             self.cursor = 0
             self.segments = {}
@@ -1634,6 +1616,16 @@ class BufferTask:
 
         async def _enqueue(self, command):
             await self.comm.queue_keyboard_command(command)
+
+        async def output_transcription(self, text: str):
+            if not text:
+                return
+            await self._enqueue(
+                OutputTask.Commands.WriteText(
+                    text=text,
+                    use_shift_to_paste=self.comm.is_shift_pressed,
+                )
+            )
 
         async def _move_cursor_to(self, target_index: int):
             target_index = max(0, min(target_index, len(self.text)))
@@ -1669,7 +1661,7 @@ class BufferTask:
             if delete_len == 0:
                 await self._move_cursor_to(abs_start)
                 if replacement:
-                    await self.output_adapter.output_transcription(replacement)
+                    await self.output_transcription(replacement)
                     self.text = self.text[:abs_start] + replacement + self.text[abs_start:]
                     self.cursor = abs_start + len(replacement)
                 return
@@ -1688,7 +1680,7 @@ class BufferTask:
                 self.cursor = abs_start
 
             if replacement:
-                await self.output_adapter.output_transcription(replacement)
+                await self.output_transcription(replacement)
                 self.text = self.text[:self.cursor] + replacement + self.text[self.cursor:]
                 self.cursor += len(replacement)
 
@@ -1727,8 +1719,7 @@ class BufferTask:
 
                 await self._move_cursor_to(insert_pos)
                 if text:
-                    with suppress(Exception):
-                        await self.output_adapter.output_transcription(text)
+                    await self.output_transcription(text)
 
                 self.text = self.text[:insert_pos] + text + self.text[insert_pos:]
                 self.cursor = insert_pos + insert_len
@@ -1820,8 +1811,7 @@ class BufferTask:
     def __init__(self, comm: Comm, config: Config.App):
         self.comm = comm
         self.config = config
-        self.adapter = BufferTask.ClipboardOutputAdapter(comm)
-        self.manager = BufferTask.Manager(self.adapter)
+        self.manager = BufferTask.Manager(comm)
         self._idle_cursor_task: Optional[asyncio.Task] = None
 
     async def run(self):
