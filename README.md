@@ -162,10 +162,12 @@ TWISTT_POST_CORRECT=false
 | `--openrouter-api-key` | `TWISTT_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` | -                 | OpenRouter API key                                                                                                                                |
 | `--output-mode`        | `TWISTT_OUTPUT_MODE`                                | batch             | Output mode: batch (incremental) or full (complete on release)                                                                                    |
 | `--use-typing`         | `TWISTT_USE_TYPING`                                 | false             | Type ASCII characters directly (slower); clipboard still handles non-ASCII                                                                        |
-| `--save-config`        | -                                                   | false             | Persist provided command-line values to `~/.config/twistt/config.env`                                                                             |
+| `--config PATH`        | -                                                   | `~/.config/twistt/config.env` | Load configuration overrides from the specified file instead of the default user config                                                            |
+| `--save-config [PATH]` | -                                                   | false             | Persist provided command-line values to a config file (defaults to `~/.config/twistt/config.env`)                                                 |
 
 Selecting a microphone sets the `PULSE_SOURCE` environment variable for Twistt only, so your system default input stays untouched. Run `./twistt.py --microphone` without a value to pick from the list even if an environment variable is set.
-Use `--save-config` to capture only the options you explicitly pass on the command line; existing keys in the config file are preserved.
+Use `--save-config` to capture only the options you explicitly pass on the command line; existing keys in the config file are preserved. Provide a path (e.g. `--save-config ~/twistt/custom.env`) to write to a specific file.
+Use `--config` to load settings from a specific file while leaving the default user config untouched.
 
 ## Usage
 
@@ -216,6 +218,12 @@ TWISTT_PROVIDER=deepgram TWISTT_DEEPGRAM_API_KEY=dg_xxx ./twistt.py --model nova
 
 # Save your preferred options for next time
 ./twistt.py --language fr --gain 2.0 --microphone "Elgato Wave 3" --save-config
+
+# Save to a custom config file
+./twistt.py --language fr --gain 2.0 --save-config ~/.config/twistt/presets/french.env
+
+# Load a custom preset before launching
+./twistt.py --config ~/.config/twistt/presets/french.env
 ```
 
 ### How It Works

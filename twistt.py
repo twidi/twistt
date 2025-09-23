@@ -175,7 +175,9 @@ class CommandLineParser:
 
     @classmethod
     def parse(cls) -> Optional[Config.App]:
-        cls._load_env_files()
+        config_override_path = cls._extract_config_path_from_argv()
+        if not cls._load_env_files(config_override_path):
+            return None
 
         epilog = """Configuration files:
   The script loads configuration from two .env files (if they exist):
@@ -199,6 +201,12 @@ class CommandLineParser:
         )
 
         prefix = cls.ENV_PREFIX
+
+        parser.add_argument(
+            "--config",
+            default=None,
+            help="Path to config file to load instead of the default user config (~/.config/twistt/config.env)",
+        )
 
         default_hotkeys = cls.get_env("HOTKEY", cls.get_env("HOTKEYS"))
         default_model = cls.get_env(
@@ -345,8 +353,13 @@ class CommandLineParser:
         )
         parser.add_argument(
             "--save-config",
-            action="store_true",
-            help="Persist provided command-line options into the user config file (~/.config/twistt/config.env)",
+            nargs="?",
+            const=True,
+            default=False,
+            help=(
+                "Persist provided command-line options into a config file. "
+                "Without a value defaults to ~/.config/twistt/config.env."
+            ),
         )
 
         args = parser.parse_args()
@@ -547,12 +560,23 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
         print(f"Recording from {mic_display_name}.")
         print("Press Ctrl+C to stop the program.")
 
-        if args.save_config:
+        save_config_value = args.save_config
+        save_config_requested = save_config_value is True or isinstance(
+            save_config_value, str
+        )
+        save_config_path = None
+        if isinstance(save_config_value, str):
+            stripped = save_config_value.strip()
+            if stripped:
+                save_config_path = Path(stripped).expanduser()
+
+        if save_config_requested:
             cls.save_config(
                 args=args,
                 provided_dests=cli_overrides,
                 keyboard=keyboard,
                 microphone=microphone,
+                config_path=save_config_path,
             )
 
         return Config.App(
@@ -589,16 +613,26 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
             output=Config.Output(mode=output_mode, use_typing=args.use_typing),
         )
 
-    @staticmethod
-    def _load_env_files() -> None:
+    @classmethod
+    def _load_env_files(cls, config_path: Path | None = None) -> bool:
         script_dir = Path(__file__).parent
         env_path = script_dir / ".env"
         if env_path.exists():
             load_dotenv(dotenv_path=env_path)
-        config_dir = Path(user_config_dir("twistt", ensure_exists=False))
-        user_config_path = config_dir / "config.env"
-        if user_config_path.exists():
-            load_dotenv(dotenv_path=user_config_path, override=True)
+
+        if config_path is None:
+            config_dir = Path(user_config_dir("twistt", ensure_exists=False))
+            user_config_path = config_dir / "config.env"
+            if user_config_path.exists():
+                load_dotenv(dotenv_path=user_config_path, override=True)
+            return True
+
+        target = Path(config_path).expanduser()
+        if not target.exists():
+            print(f"ERROR: Config file not found: {target}", file=sys.stderr)
+            return False
+        load_dotenv(dotenv_path=target, override=True)
+        return True
 
     @classmethod
     def save_config(
@@ -607,6 +641,7 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
         provided_dests: set[str],
         keyboard: InputDevice,
         microphone: sc.Microphone,
+        config_path: Path | None = None,
     ) -> None:
         overrides = cls._prepare_config_overrides(
             args=args,
@@ -617,7 +652,7 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
         if not overrides:
             print("No command-line options to save; config file left untouched.")
             return
-        path = cls._write_user_config(overrides)
+        path = cls._write_user_config(overrides, config_path=config_path)
         print(f"Saved configuration overrides to {path}.")
 
     @classmethod
@@ -688,15 +723,21 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
         return value
 
     @classmethod
-    def _write_user_config(cls, overrides: Mapping[str, str]) -> Path:
+    def _write_user_config(
+        cls, overrides: Mapping[str, str], config_path: Path | None = None
+    ) -> Path:
         formatted = {key: cls._format_env_value(str(val)) for key, val in overrides.items()}
-        config_dir = Path(user_config_dir("twistt", ensure_exists=True))
-        config_dir.mkdir(parents=True, exist_ok=True)
-        user_config_path = config_dir / "config.env"
+        if config_path is None:
+            config_dir = Path(user_config_dir("twistt", ensure_exists=True))
+            config_dir.mkdir(parents=True, exist_ok=True)
+            target_path = config_dir / "config.env"
+        else:
+            target_path = Path(config_path).expanduser()
+            target_path.parent.mkdir(parents=True, exist_ok=True)
         remaining = dict(formatted)
         lines: list[str]
-        if user_config_path.exists():
-            existing_lines = user_config_path.read_text(encoding="utf-8").splitlines()
+        if target_path.exists():
+            existing_lines = target_path.read_text(encoding="utf-8").splitlines()
             lines = []
             for line in existing_lines:
                 stripped = line.strip()
@@ -719,8 +760,29 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
         content = "\n".join(lines).rstrip("\n")
         if content:
             content += "\n"
-        user_config_path.write_text(content, encoding="utf-8")
-        return user_config_path
+        target_path.write_text(content, encoding="utf-8")
+        return target_path
+
+    @classmethod
+    def _extract_config_path_from_argv(cls) -> Path | None:
+        tokens = sys.argv[1:]
+        for idx, token in enumerate(tokens):
+            if token == "--":
+                break
+            if token.startswith("--config="):
+                value = token.split("=", 1)[1]
+                if value:
+                    return Path(value).expanduser()
+                return None
+            if token == "--config":
+                if idx + 1 < len(tokens):
+                    value = tokens[idx + 1]
+                    if value.startswith("-") and value != "-":
+                        return None
+                    if value:
+                        return Path(value).expanduser()
+                return None
+        return None
 
     @staticmethod
     def _env_truthy(val: Optional[str]) -> bool:
