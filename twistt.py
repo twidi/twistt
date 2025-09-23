@@ -134,6 +134,8 @@ class Config:
 
 class CommandLineParser:
     ENV_PREFIX = "TWISTT_"
+    _PROMPT_FOR_MICROPHONE = object()
+    _PROMPT_FOR_KEYBOARD = object()
 
     @classmethod
     def get_env(
@@ -231,8 +233,13 @@ class CommandLineParser:
         )
         parser.add_argument(
             "--microphone",
+            nargs="?",
             default=default_microphone,
-            help=f"Text filter or ID for selecting the microphone input device (env: {prefix}MICROPHONE)",
+            const=cls._PROMPT_FOR_MICROPHONE,
+            help=(
+                "Text filter or ID for selecting the microphone input device; "
+                f"pass without a value to pick interactively (env: {prefix}MICROPHONE)"
+            ),
         )
         parser.add_argument(
             "--openai-api-key",
@@ -309,8 +316,13 @@ class CommandLineParser:
         )
         parser.add_argument(
             "--keyboard",
+            nargs="?",
             default=default_keyboard_filter,
-            help=f"Text filter for selecting the keyboard input device (env: {prefix}KEYBOARD)",
+            const=cls._PROMPT_FOR_KEYBOARD,
+            help=(
+                "Text filter for selecting the keyboard input device; pass without a "
+                f"value to pick interactively (env: {prefix}KEYBOARD)"
+            ),
         )
 
         args = parser.parse_args()
@@ -434,15 +446,31 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
             return None
 
         try:
-            keyboard_filter = args.keyboard.strip() if args.keyboard else None
-            keyboard = cls._find_keyboard(filter_text=keyboard_filter)
+            force_keyboard_prompt = args.keyboard is cls._PROMPT_FOR_KEYBOARD
+            keyboard_value = (
+                args.keyboard
+                if not force_keyboard_prompt and isinstance(args.keyboard, str)
+                else None
+            )
+            keyboard_filter = keyboard_value.strip() if keyboard_value else None
+            keyboard = cls._find_keyboard(
+                filter_text=keyboard_filter, force_prompt=force_keyboard_prompt
+            )
         except Exception as exc:
             print(f"ERROR: Unable to find keyboard: {exc}", file=sys.stderr)
             return None
 
         try:
-            microphone_filter = args.microphone.strip() if args.microphone else None
-            microphone = cls._find_microphone(filter_text=microphone_filter)
+            force_microphone_prompt = args.microphone is cls._PROMPT_FOR_MICROPHONE
+            microphone_value = (
+                args.microphone
+                if not force_microphone_prompt and isinstance(args.microphone, str)
+                else None
+            )
+            microphone_filter = microphone_value.strip() if microphone_value else None
+            microphone = cls._find_microphone(
+                filter_text=microphone_filter, force_prompt=force_microphone_prompt
+            )
         except Exception as exc:
             print(f"ERROR: Unable to find microphone: {exc}", file=sys.stderr)
             return None
@@ -557,7 +585,9 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
         return codes
 
     @staticmethod
-    def _find_keyboard(filter_text: Optional[str] = None) -> InputDevice:
+    def _find_keyboard(
+        filter_text: Optional[str] = None, force_prompt: bool = False
+    ) -> InputDevice:
         devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
         physical_keyboards = []
         filter_value = filter_text.strip().lower() if filter_text else None
@@ -610,10 +640,15 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
         candidate_physical = (
             filtered_physical_keyboards if filter_value else physical_keyboards
         )
-        if len(candidate_physical) == 1:
+        if len(candidate_physical) == 1 and not force_prompt:
             return candidate_physical[0]
         if candidate_physical:
-            print("\nMultiple physical keyboards found:")
+            heading = (
+                "\nMultiple physical keyboards found:"
+                if len(candidate_physical) > 1 and not force_prompt
+                else "\nSelect your keyboard:"
+            )
+            print(heading)
             for idx, device in enumerate(candidate_physical):
                 print(f"  {idx}: {device.path} - {device.name}")
             selection = int(input("Select your keyboard: "))
@@ -627,12 +662,24 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
         return devices_to_list[selection]
 
     @staticmethod
-    def _find_microphone(filter_text: Optional[str] = None) -> sc.Microphone:
+    def _find_microphone(
+        filter_text: Optional[str] = None, force_prompt: bool = False
+    ) -> sc.Microphone:
         microphones = sc.all_microphones(include_loopback=False)
         if not microphones:
             raise RuntimeError("No microphones detected")
 
         filter_value = filter_text.lower() if filter_text else None
+
+        def prompt_from(candidates: list[sc.Microphone], heading: str) -> sc.Microphone:
+            print(f"\n{heading}")
+            for idx, mic in enumerate(candidates):
+                descriptor = mic.name or "Unknown microphone"
+                if mic.id:
+                    descriptor += f" ({mic.id})"
+                print(f"  {idx}: {descriptor}")
+            selection = int(input("Select your microphone: "))
+            return candidates[selection]
 
         def matches(mic: sc.Microphone) -> bool:
             if not filter_value:
@@ -645,16 +692,17 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
             filtered = [mic for mic in microphones if matches(mic)]
             if not filtered:
                 raise RuntimeError(f'No microphones matched filter "{filter_text}"')
-            if len(filtered) == 1:
+            if len(filtered) == 1 and not force_prompt:
                 return filtered[0]
-            print("\nMultiple microphones matched:")
-            for idx, mic in enumerate(filtered):
-                descriptor = mic.name or "Unknown microphone"
-                if mic.id:
-                    descriptor += f" ({mic.id})"
-                print(f"  {idx}: {descriptor}")
-            selection = int(input("Select your microphone: "))
-            return filtered[selection]
+            heading = (
+                "Multiple microphones matched:"
+                if len(filtered) > 1 and not force_prompt
+                else "Select your microphone:"
+            )
+            return prompt_from(filtered, heading)
+
+        if force_prompt:
+            return prompt_from(microphones, "Select your microphone:")
 
         default_microphone = sc.default_microphone()
         if default_microphone is not None:
@@ -672,14 +720,7 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
         if len(microphones) == 1:
             return microphones[0]
 
-        print("\nMultiple microphones detected:")
-        for idx, mic in enumerate(microphones):
-            descriptor = mic.name or "Unknown microphone"
-            if mic.id:
-                descriptor += f" ({mic.id})"
-            print(f"  {idx}: {descriptor}")
-        selection = int(input("Select your microphone: "))
-        return microphones[selection]
+        return prompt_from(microphones, "Multiple microphones detected:")
 
 
 class Comm:

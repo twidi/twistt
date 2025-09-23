@@ -141,29 +141,29 @@ TWISTT_POST_CORRECT=false
 
 ### Available Options
 
-| Option                 | Environment Variable                                | Default           | Description                                                                                 |
-|------------------------|-----------------------------------------------------|-------------------|---------------------------------------------------------------------------------------------|
-| `--hotkey`             | `TWISTT_HOTKEY` or `TWISTT_HOTKEYS`                 | F9                | Push-to-talk key(s) (F1-F12), comma-separated for multiple                                  |
-| `--keyboard`           | `TWISTT_KEYBOARD`                                   | -                 | Filter text for automatically selecting the keyboard input device                           |
-| `--double-tap-window`  | `TWISTT_DOUBLE_TAP_WINDOW`                          | 0.5               | Time window in seconds for double-tap detection                                             |
-| `--model`              | `TWISTT_MODEL`                                      | gpt-4o-transcribe | Transcription model (for OpenAI or Deepgram)                                                |
-| `--language`           | `TWISTT_LANGUAGE`                                   | Auto-detect       | Transcription language (ISO 639-1)                                                          |
-| `--gain`               | `TWISTT_GAIN`                                       | 1.0               | Microphone amplification                                                                    |
-| `--microphone`         | `TWISTT_MICROPHONE`                                 | Default input      | Text filter or ID to select the microphone (prompts when multiple match)                    |
-| `--openai-api-key`     | `TWISTT_OPENAI_API_KEY` or `OPENAI_API_KEY`         | -                 | OpenAI API key                                                                              |
-| `--deepgram-api-key`   | `TWISTT_DEEPGRAM_API_KEY` or `DEEPGRAM_API_KEY`     | -                 | Deepgram API key                                                                            |
-| `--ydotool-socket`     | `TWISTT_YDOTOOL_SOCKET` or `YDOTOOL_SOCKET`         | Auto-detect       | Path to ydotool socket                                                                      |
-| `--post-prompt`        | `TWISTT_POST_TREATMENT_PROMPT`                      | -                 | Post-treatment instructions                                                                 |
-| `--post-prompt-file`   | `TWISTT_POST_TREATMENT_PROMPT_FILE`                 | -                 | File containing post-treatment prompt                                                       |
-| `--post-model`         | `TWISTT_POST_TREATMENT_MODEL`                       | gpt-4o-mini       | Model for post-treatment                                                                    |
-| `--post-provider`      | `TWISTT_POST_TREATMENT_PROVIDER`                    | openai            | Provider for post-treatment (openai, cerebras, openrouter)                                  |
-| `--post-correct`       | `TWISTT_POST_CORRECT`                               | false             | Apply post-treatment by correcting already-output text in-place (only in batch output mode) |
-| `--cerebras-api-key`   | `TWISTT_CEREBRAS_API_KEY` or `CEREBRAS_API_KEY`     | -                 | Cerebras API key                                                                            |
-| `--openrouter-api-key` | `TWISTT_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` | -                 | OpenRouter API key                                                                          |
-| `--output-mode`        | `TWISTT_OUTPUT_MODE`                                | batch             | Output mode: batch (incremental) or full (complete on release)                              |
-| `--use-typing`         | `TWISTT_USE_TYPING`                                 | false             | Type ASCII characters directly (slower); clipboard still handles non-ASCII                  |
+| Option                 | Environment Variable                                | Default           | Description                                                                                                                                       |
+|------------------------|-----------------------------------------------------|-------------------|---------------------------------------------------------------------------------------------------------------------------------------------------|
+| `--hotkey`             | `TWISTT_HOTKEY` or `TWISTT_HOTKEYS`                 | F9                | Push-to-talk key(s) (F1-F12), comma-separated for multiple                                                                                        |
+| `--keyboard`           | `TWISTT_KEYBOARD`                                   | -                 | Filter text for automatically selecting the keyboard input device<br/>Pass without a value to force interactive selection and ignore env defaults |
+| `--double-tap-window`  | `TWISTT_DOUBLE_TAP_WINDOW`                          | 0.5               | Time window in seconds for double-tap detection                                                                                                   |
+| `--model`              | `TWISTT_MODEL`                                      | gpt-4o-transcribe | Transcription model (for OpenAI or Deepgram)                                                                                                      |
+| `--language`           | `TWISTT_LANGUAGE`                                   | Auto-detect       | Transcription language (ISO 639-1)                                                                                                                |
+| `--gain`               | `TWISTT_GAIN`                                       | 1.0               | Microphone amplification                                                                                                                          |
+| `--microphone`         | `TWISTT_MICROPHONE`                                 | Default input     | Text filter or ID to select the microphone<br/>Pass without a value to force interactive selection and ignore env defaults                        |
+| `--openai-api-key`     | `TWISTT_OPENAI_API_KEY` or `OPENAI_API_KEY`         | -                 | OpenAI API key                                                                                                                                    |
+| `--deepgram-api-key`   | `TWISTT_DEEPGRAM_API_KEY` or `DEEPGRAM_API_KEY`     | -                 | Deepgram API key                                                                                                                                  |
+| `--ydotool-socket`     | `TWISTT_YDOTOOL_SOCKET` or `YDOTOOL_SOCKET`         | Auto-detect       | Path to ydotool socket                                                                                                                            |
+| `--post-prompt`        | `TWISTT_POST_TREATMENT_PROMPT`                      | -                 | Post-treatment instructions                                                                                                                       |
+| `--post-prompt-file`   | `TWISTT_POST_TREATMENT_PROMPT_FILE`                 | -                 | File containing post-treatment prompt                                                                                                             |
+| `--post-model`         | `TWISTT_POST_TREATMENT_MODEL`                       | gpt-4o-mini       | Model for post-treatment                                                                                                                          |
+| `--post-provider`      | `TWISTT_POST_TREATMENT_PROVIDER`                    | openai            | Provider for post-treatment (openai, cerebras, openrouter)                                                                                        |
+| `--post-correct`       | `TWISTT_POST_CORRECT`                               | false             | Apply post-treatment by correcting already-output text in-place (only in batch output mode)                                                       |
+| `--cerebras-api-key`   | `TWISTT_CEREBRAS_API_KEY` or `CEREBRAS_API_KEY`     | -                 | Cerebras API key                                                                                                                                  |
+| `--openrouter-api-key` | `TWISTT_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` | -                 | OpenRouter API key                                                                                                                                |
+| `--output-mode`        | `TWISTT_OUTPUT_MODE`                                | batch             | Output mode: batch (incremental) or full (complete on release)                                                                                    |
+| `--use-typing`         | `TWISTT_USE_TYPING`                                 | false             | Type ASCII characters directly (slower); clipboard still handles non-ASCII                                                                        |
 
-Selecting a microphone sets the `PULSE_SOURCE` environment variable for Twistt only, so your system default input stays untouched.
+Selecting a microphone sets the `PULSE_SOURCE` environment variable for Twistt only, so your system default input stays untouched. Run `./twistt.py --microphone` without a value to pick from the list even if an environment variable is set.
 
 ## Usage
 
@@ -263,7 +263,7 @@ Twistt supports two output modes that control when text is processed and output:
 
 ## Keyboard Detection
 
-The script automatically detects your physical keyboard. If multiple keyboards are found, you'll be prompted to select one. Virtual keyboards are automatically filtered out. Set `--keyboard "partial name"` or `TWISTT_KEYBOARD=partial name` to pre-filter devices and auto-select when only one match remains.
+The script automatically detects your physical keyboard. If multiple keyboards are found, you'll be prompted to select one. Virtual keyboards are automatically filtered out. Set `--keyboard "partial name"` or `TWISTT_KEYBOARD=partial name` to pre-filter devices and auto-select when only one match remains. Pass `--keyboard` with no value to always display the selection menu and ignore any configured default.
 
 ## Post-Treatment (Optional)
 
