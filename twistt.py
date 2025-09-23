@@ -1077,6 +1077,10 @@ class BaseTranscriptionTask:
     CHUNK_TIMEOUT = 0.1
     STREAM_DELTAS = True
     STREAM_DELTA_MIN_CHARS = 10
+    WS_MAX_RETRY_ATTEMPTS = 5
+    WS_RETRY_RESET_SECONDS = 10.0
+    WS_RETRY_BASE_DELAY_SECONDS = 1.0
+    WS_RETRY_MAX_DELAY_SECONDS = 5.0
 
     class Provider(Enum):
         OPENAI = "openai"
@@ -1088,6 +1092,8 @@ class BaseTranscriptionTask:
         self.seq_counter = 0
         self._active_seq_num: Optional[int] = None
         self._chars_since_stream = 0
+        self._ws_retry_attempts = 0
+        self._last_ws_failure_at = 0.0
 
     @cached_property
     def ws_url(self) -> str:
@@ -1130,6 +1136,8 @@ class BaseTranscriptionTask:
                     additional_headers=self.ws_headers,
                     max_size=None,
                 ) as ws:
+                    self._ws_retry_attempts = 0
+                    self._last_ws_failure_at = 0.0
                     await self.on_connected(ws)
 
                     sender_task = create_task(self._sender(ws))
@@ -1142,7 +1150,32 @@ class BaseTranscriptionTask:
             except CancelledError:
                 break
             except Exception as exc:
-                print(f"Error in transcription task: {exc}", file=sys.stderr)
+                now = time.perf_counter()
+                if (
+                    self._last_ws_failure_at
+                    and now - self._last_ws_failure_at > self.WS_RETRY_RESET_SECONDS
+                ):
+                    self._ws_retry_attempts = 0
+                self._ws_retry_attempts += 1
+                self._last_ws_failure_at = now
+                attempt = self._ws_retry_attempts
+                max_attempts = self.WS_MAX_RETRY_ATTEMPTS
+                print(
+                    f"Error in transcription task (attempt {attempt}/{max_attempts}): {exc}",
+                    file=sys.stderr,
+                )
+                if attempt >= max_attempts:
+                    print(
+                        "ERROR: Reached maximum consecutive websocket retries; "
+                        "stopping transcription.",
+                        file=sys.stderr,
+                    )
+                    self.comm.toggle_recording(False)
+                    continue
+                delay = self._ws_retry_delay(attempt)
+                if delay:
+                    await asyncio.sleep(delay)
+                continue
             else:
                 # in full mode, the command are created later, and because we mark the end of "speech_active" here
                 # we'll lose the indicator, so we mark the post-treatment as active right now if we have some
@@ -1230,6 +1263,12 @@ class BaseTranscriptionTask:
 
         except CancelledError:
             pass
+
+    def _ws_retry_delay(self, attempt: int) -> float:
+        if attempt <= 0:
+            return 0.0
+        delay = self.WS_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
+        return min(delay, self.WS_RETRY_MAX_DELAY_SECONDS)
 
     def _reset_active_sequence(self):
         self._active_seq_num = None
