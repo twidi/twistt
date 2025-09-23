@@ -117,6 +117,7 @@ TWISTT_HOTKEYS=F8,F9,F10   # Multiple hotkeys (comma-separated)
 TWISTT_MODEL=gpt-4o-transcribe   # For OpenAI; for Deepgram use e.g. nova-2-general
 TWISTT_LANGUAGE=en  # Leave empty or omit for auto-detect
 TWISTT_GAIN=1.0
+TWISTT_MICROPHONE=Elgato Wave 3  # Optional text filter to auto-select a microphone
 TWISTT_DOUBLE_TAP_WINDOW=0.5  # Time window for double-tap detection
 TWISTT_KEYBOARD=keychron  # Optional text filter to auto-select matching keyboard
 TWISTT_YDOTOOL_SOCKET=/run/user/1000/.ydotool_socket  # Optional, auto-detected by default
@@ -148,6 +149,7 @@ TWISTT_POST_CORRECT=false
 | `--model`              | `TWISTT_MODEL`                                      | gpt-4o-transcribe | Transcription model (for OpenAI or Deepgram)                                                |
 | `--language`           | `TWISTT_LANGUAGE`                                   | Auto-detect       | Transcription language (ISO 639-1)                                                          |
 | `--gain`               | `TWISTT_GAIN`                                       | 1.0               | Microphone amplification                                                                    |
+| `--microphone`         | `TWISTT_MICROPHONE`                                 | Default input      | Text filter or ID to select the microphone (prompts when multiple match)                    |
 | `--openai-api-key`     | `TWISTT_OPENAI_API_KEY` or `OPENAI_API_KEY`         | -                 | OpenAI API key                                                                              |
 | `--deepgram-api-key`   | `TWISTT_DEEPGRAM_API_KEY` or `DEEPGRAM_API_KEY`     | -                 | Deepgram API key                                                                            |
 | `--ydotool-socket`     | `TWISTT_YDOTOOL_SOCKET` or `YDOTOOL_SOCKET`         | Auto-detect       | Path to ydotool socket                                                                      |
@@ -160,6 +162,8 @@ TWISTT_POST_CORRECT=false
 | `--openrouter-api-key` | `TWISTT_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` | -                 | OpenRouter API key                                                                          |
 | `--output-mode`        | `TWISTT_OUTPUT_MODE`                                | batch             | Output mode: batch (incremental) or full (complete on release)                              |
 | `--use-typing`         | `TWISTT_USE_TYPING`                                 | false             | Type ASCII characters directly (slower); clipboard still handles non-ASCII                  |
+
+Selecting a microphone sets the `PULSE_SOURCE` environment variable for Twistt only, so your system default input stays untouched.
 
 ## Usage
 

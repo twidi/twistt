@@ -1,4 +1,5 @@
 numpy
+soundcard
 sounddevice
 websockets
 pyperclipfix

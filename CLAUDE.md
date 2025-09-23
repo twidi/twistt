@@ -21,7 +21,8 @@ python twistt.py --help
 ### Dependencies
 
 The project uses inline script dependencies (PEP 723) specified in `twistt.py`. Dependencies are also listed in `requirements.txt` for pip users:
-- numpy, sounddevice (audio processing)
+- numpy, sounddevice (audio capture)
+- soundcard (microphone discovery)
 - websockets (OpenAI real-time API)
 - pyperclipfix (clipboard operations)
 - evdev (keyboard event monitoring)
@@ -35,7 +36,7 @@ The application is a single-file Python script with the following key components
 
 1. **AudioTranscriber class**: Core logic for WebSocket connection to OpenAI, audio streaming, and transcription handling
 2. **Keyboard monitoring**: Uses evdev to detect F-key presses for push-to-talk
-3. **Audio capture**: Uses sounddevice to record from microphone in real-time
+3. **Audio capture**: Uses sounddevice to record from microphone in real-time (Pulse source pinned via soundcard)
 4. **Auto-paste/typing**: Uses python-ydotool to paste text or optionally type ASCII characters directly
 5. **Post-treatment**: Optional AI-powered correction using various providers (OpenAI, Cerebras, OpenRouter) to improve transcription accuracy
 

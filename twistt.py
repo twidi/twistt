@@ -3,6 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #     "numpy",
+#     "soundcard",
 #     "sounddevice",
 #     "websockets",
 #     "pyperclipfix",
@@ -38,6 +39,7 @@ from typing import Mapping, NamedTuple, Optional
 
 import janus
 import numpy as np
+import soundcard as sc
 import sounddevice as sd
 import websockets
 from dotenv import load_dotenv
@@ -101,6 +103,8 @@ class Config:
 
     class Capture(NamedTuple):
         gain: float
+        microphone_name: Optional[str]
+        microphone_id: Optional[str]
 
     class Transcription(NamedTuple):
         provider: BaseTranscriptionTask.Provider
@@ -181,6 +185,7 @@ class CommandLineParser:
         )
         default_language = cls.get_env("LANGUAGE")
         default_gain = float(cls.get_env("GAIN", "1.0"))
+        default_microphone = cls.get_env("MICROPHONE")
         default_openai_api_key = cls.get_env("OPENAI_API_KEY", prefix_optional=True)
         default_deepgram_api_key = cls.get_env("DEEPGRAM_API_KEY", prefix_optional=True)
         default_ydotool_socket = cls.get_env("YDOTOOL_SOCKET", prefix_optional=True)
@@ -223,6 +228,11 @@ class CommandLineParser:
             type=float,
             default=default_gain,
             help=f"Microphone amplification factor, 1.0=normal, 2.0=double (env: {prefix}GAIN)",
+        )
+        parser.add_argument(
+            "--microphone",
+            default=default_microphone,
+            help=f"Text filter or ID for selecting the microphone input device (env: {prefix}MICROPHONE)",
         )
         parser.add_argument(
             "--openai-api-key",
@@ -430,6 +440,16 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
             print(f"ERROR: Unable to find keyboard: {exc}", file=sys.stderr)
             return None
 
+        try:
+            microphone_filter = args.microphone.strip() if args.microphone else None
+            microphone = cls._find_microphone(filter_text=microphone_filter)
+        except Exception as exc:
+            print(f"ERROR: Unable to find microphone: {exc}", file=sys.stderr)
+            return None
+
+        if microphone.id:
+            os.environ["PULSE_SOURCE"] = microphone.id
+
         if args.ydotool_socket:
             os.environ["YDOTOOL_SOCKET"] = args.ydotool_socket
         pydotool_init()
@@ -470,6 +490,8 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
             print(
                 "Text will be pasted by simulating Ctrl+V (or Ctrl+Shift+V if Shift is pressed at any time)."
             )
+        mic_display_name = microphone.name or microphone.id or "microphone"
+        print(f"Recording from {mic_display_name}.")
         print("Press Ctrl+C to stop the program.")
 
         return Config.App(
@@ -478,7 +500,11 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
                 codes=hotkey_codes,
                 double_tap_window=args.double_tap_window,
             ),
-            capture=Config.Capture(gain=args.gain),
+            capture=Config.Capture(
+                gain=args.gain,
+                microphone_name=microphone.name,
+                microphone_id=microphone.id,
+            ),
             transcription=Config.Transcription(
                 provider=provider,
                 api_key=args.openai_api_key
@@ -599,6 +625,61 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
             print(f"  {idx}: {device.path} - {device.name}")
         selection = int(input("Select your keyboard manually: "))
         return devices_to_list[selection]
+
+    @staticmethod
+    def _find_microphone(filter_text: Optional[str] = None) -> sc.Microphone:
+        microphones = sc.all_microphones(include_loopback=False)
+        if not microphones:
+            raise RuntimeError("No microphones detected")
+
+        filter_value = filter_text.lower() if filter_text else None
+
+        def matches(mic: sc.Microphone) -> bool:
+            if not filter_value:
+                return True
+            name = mic.name.lower() if mic.name else ""
+            unique_id = mic.id.lower() if mic.id else ""
+            return filter_value in name or filter_value in unique_id
+
+        if filter_value:
+            filtered = [mic for mic in microphones if matches(mic)]
+            if not filtered:
+                raise RuntimeError(f'No microphones matched filter "{filter_text}"')
+            if len(filtered) == 1:
+                return filtered[0]
+            print("\nMultiple microphones matched:")
+            for idx, mic in enumerate(filtered):
+                descriptor = mic.name or "Unknown microphone"
+                if mic.id:
+                    descriptor += f" ({mic.id})"
+                print(f"  {idx}: {descriptor}")
+            selection = int(input("Select your microphone: "))
+            return filtered[selection]
+
+        default_microphone = sc.default_microphone()
+        if default_microphone is not None:
+            for mic in microphones:
+                if mic.id and default_microphone.id and mic.id == default_microphone.id:
+                    return mic
+                if (
+                    mic.name
+                    and default_microphone.name
+                    and mic.name == default_microphone.name
+                ):
+                    return mic
+            return default_microphone
+
+        if len(microphones) == 1:
+            return microphones[0]
+
+        print("\nMultiple microphones detected:")
+        for idx, mic in enumerate(microphones):
+            descriptor = mic.name or "Unknown microphone"
+            if mic.id:
+                descriptor += f" ({mic.id})"
+            print(f"  {idx}: {descriptor}")
+        selection = int(input("Select your microphone: "))
+        return microphones[selection]
 
 
 class Comm:

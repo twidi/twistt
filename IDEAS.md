@@ -12,7 +12,7 @@ This document collects potential enhancements, with a focus on working reliably 
 
 ## Input & Hotkeys
 
-- Microphone selection: `--input-device` and `--list-devices` (sounddevice exposes devices). Good for complex setups.
+- Microphone selection: `--input-device` and `--list-devices` (soundcard exposes devices). Good for complex setups.
 - More flexible hotkeys: allow `capslock`, `scrolllock`, `rightalt` for `--hotkey` (optional, documented). Still evdev‑based, so remains global.
 - USB pedals: `--input-event /dev/input/eventX` to listen to a specific device (foot pedal = perfect PTT).
 - Temporary “mode” modifier: holding `Alt` while dictating toggles “Ctrl+Shift+V paste” or “no paste”, depending on config.
@@ -55,4 +55,3 @@ This document collects potential enhancements, with a focus on working reliably 
 - `--undo-hotkey`
 - `--mode text|code|shell` (local rules, no LLM)
 - `--paste-strategy type` (clipboard‑free fallback)
-
