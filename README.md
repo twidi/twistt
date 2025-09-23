@@ -98,15 +98,12 @@ Set your OpenAI API key(s) using one of these methods (in order of priority):
 
 Example `.env` or `config.env` file:
 ```env
-# STT provider selection (openai | deepgram)
-TWISTT_PROVIDER=openai
-
-# OpenAI API key (required if provider=openai)
+# OpenAI API key (required if model from OpenAI, by default)
 TWISTT_OPENAI_API_KEY=sk-...
 # or
 OPENAI_API_KEY=sk-...
 
-# Deepgram API key (required if provider=deepgram)
+# Deepgram API key (required if model from Deepgram)
 TWISTT_DEEPGRAM_API_KEY=dg_...
 # or
 DEEPGRAM_API_KEY=dg_...
@@ -122,21 +119,21 @@ TWISTT_DOUBLE_TAP_WINDOW=0.5  # Time window for double-tap detection
 TWISTT_KEYBOARD=keychron  # Optional text filter to auto-select matching keyboard
 TWISTT_YDOTOOL_SOCKET=/run/user/1000/.ydotool_socket  # Optional, auto-detected by default
 
+# Output mode
+TWISTT_OUTPUT_MODE=batch  # batch (default) or full
+TWISTT_USE_TYPING=false  # Type ASCII characters via ydotool instead of copy/paste (slower)
+
 # Post-treatment settings (optional)
 TWISTT_POST_TREATMENT_PROMPT="Fix grammar and punctuation"
 TWISTT_POST_TREATMENT_PROMPT_FILE=/path/to/prompt.txt  # Alternative to direct prompt
 TWISTT_POST_TREATMENT_MODEL=gpt-4o-mini  # Model for post-treatment
 TWISTT_POST_TREATMENT_PROVIDER=openai  # Provider: openai, cerebras, or openrouter
+# Post-treatment correct mode (apply corrections in-place with keyboard; requires batch output mode)
+TWISTT_POST_TREATMENT_CORRECT=false
 
 # Provider-specific API keys (for post-treatment)
 TWISTT_CEREBRAS_API_KEY=csk-...  # Required if using cerebras provider
 TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
-
-# Output mode
-TWISTT_OUTPUT_MODE=batch  # batch (default) or full
-TWISTT_USE_TYPING=false  # Type ASCII characters via ydotool instead of copy/paste (slower)
-# Post-correct mode (apply corrections in-place with keyboard; requires batch output mode)
-TWISTT_POST_CORRECT=false
 ```
 
 ### Available Options
@@ -157,7 +154,7 @@ TWISTT_POST_CORRECT=false
 | `--post-prompt-file`   | `TWISTT_POST_TREATMENT_PROMPT_FILE`                 | -                             | File containing post-treatment prompt                                                                                                             |
 | `--post-model`         | `TWISTT_POST_TREATMENT_MODEL`                       | gpt-4o-mini                   | Model for post-treatment                                                                                                                          |
 | `--post-provider`      | `TWISTT_POST_TREATMENT_PROVIDER`                    | openai                        | Provider for post-treatment (openai, cerebras, openrouter)                                                                                        |
-| `--post-correct`       | `TWISTT_POST_CORRECT`                               | false                         | Apply post-treatment by correcting already-output text in-place (only in batch output mode)                                                       |
+| `--post-correct`       | `TWISTT_POST_TREATMENT_CORRECT`                     | false                         | Apply post-treatment by correcting already-output text in-place (only in batch output mode)                                                       |
 | `--cerebras-api-key`   | `TWISTT_CEREBRAS_API_KEY` or `CEREBRAS_API_KEY`     | -                             | Cerebras API key                                                                                                                                  |
 | `--openrouter-api-key` | `TWISTT_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` | -                             | OpenRouter API key                                                                                                                                |
 | `--output-mode`        | `TWISTT_OUTPUT_MODE`                                | batch                         | Output mode: batch (incremental) or full (complete on release)                                                                                    |

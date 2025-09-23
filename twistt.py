@@ -136,6 +136,7 @@ class CommandLineParser:
     ENV_PREFIX = "TWISTT_"
     _PROMPT_FOR_MICROPHONE = object()
     _PROMPT_FOR_KEYBOARD = object()
+    _UNDEFINED = object()
     _DEST_TO_ENV = {
         "hotkey": f"{ENV_PREFIX}HOTKEY",
         "model": f"{ENV_PREFIX}MODEL",
@@ -149,7 +150,7 @@ class CommandLineParser:
         "post_prompt_file": f"{ENV_PREFIX}POST_TREATMENT_PROMPT_FILE",
         "post_model": f"{ENV_PREFIX}POST_TREATMENT_MODEL",
         "post_provider": f"{ENV_PREFIX}POST_TREATMENT_PROVIDER",
-        "post_correct": f"{ENV_PREFIX}POST_CORRECT",
+        "post_correct": f"{ENV_PREFIX}POST_TREATMENT_CORRECT",
         "cerebras_api_key": f"{ENV_PREFIX}CEREBRAS_API_KEY",
         "openrouter_api_key": f"{ENV_PREFIX}OPENROUTER_API_KEY",
         "output_mode": f"{ENV_PREFIX}OUTPUT_MODE",
@@ -172,6 +173,144 @@ class CommandLineParser:
         cls, name: str, default: bool = False, prefix_optional: bool = False
     ):
         return cls._env_truthy(cls.get_env(name, str(default), prefix_optional))
+
+    @classmethod
+    def _create_arguments(
+        cls, parser: argparse.ArgumentParser, default: dict[str, str | bool | None]
+    ):
+        prefix = cls.ENV_PREFIX
+        parser.add_argument(
+            "--config",
+            default=default.get("CONFIG_PATH", cls._UNDEFINED),
+            help=f"Path to config file to load instead of the default user config ({default.get('CONFIG_PATH')})",
+        )
+        parser.add_argument(
+            "--hotkey",
+            "--hotkeys",
+            default=default.get("HOTKEYS", cls._UNDEFINED),
+            help=f"Push-to-talk key(s), F1-F12, comma-separated for multiple (env: {prefix}HOTKEY or {prefix}HOTKEYS)",
+        )
+        parser.add_argument(
+            "--model",
+            default=default.get("MODEL", cls._UNDEFINED),
+            choices=[m.value for m in OpenAITranscriptionTask.Model]
+            + [m.value for m in DeepgramTranscriptionTask.Model],
+            help=f"OpenAI or Deepgram model to use for transcription (env: {prefix}MODEL)",
+        )
+        parser.add_argument(
+            "--language",
+            default=default.get("LANGUAGE", cls._UNDEFINED),
+            help=f"Transcription language, leave empty for auto-detect (env: {prefix}LANGUAGE)",
+        )
+        parser.add_argument(
+            "--gain",
+            type=float,
+            default=default.get("GAIN", cls._UNDEFINED),
+            help=f"Microphone amplification factor, 1.0=normal, 2.0=double (env: {prefix}GAIN)",
+        )
+        parser.add_argument(
+            "--microphone",
+            nargs="?",
+            default=default.get("MICROPHONE", cls._UNDEFINED),
+            const=cls._PROMPT_FOR_MICROPHONE,
+            help=(
+                "Text filter or ID for selecting the microphone input device; "
+                f"pass without a value to pick interactively (env: {prefix}MICROPHONE)"
+            ),
+        )
+        parser.add_argument(
+            "--openai-api-key",
+            default=default.get("OPENAI_API_KEY", cls._UNDEFINED),
+            help=f"OpenAI API key (env: {prefix}OPENAI_API_KEY or OPENAI_API_KEY)",
+        )
+        parser.add_argument(
+            "--deepgram-api-key",
+            default=default.get("DEEPGRAM_API_KEY", cls._UNDEFINED),
+            help=f"Deepgram API key (env: {prefix}DEEPGRAM_API_KEY or DEEPGRAM_API_KEY)",
+        )
+        parser.add_argument(
+            "--ydotool-socket",
+            default=default.get("YDOTOOL_SOCKET", cls._UNDEFINED),
+            help=f"Path to ydotool socket (env: {prefix}YDOTOOL_SOCKET or YDOTOOL_SOCKET)",
+        )
+        parser.add_argument(
+            "--post-prompt",
+            default=default.get("POST_TREATMENT_PROMPT", cls._UNDEFINED),
+            help=f"Post-treatment prompt instructions (env: {prefix}POST_TREATMENT_PROMPT)",
+        )
+        parser.add_argument(
+            "--post-prompt-file",
+            default=default.get("POST_TREATMENT_PROMPT_FILE", cls._UNDEFINED),
+            help=f"Path to file containing post-treatment prompt (env: {prefix}POST_TREATMENT_PROMPT_FILE)",
+        )
+        parser.add_argument(
+            "--post-model",
+            default=default.get("POST_TREATMENT_MODEL", cls._UNDEFINED),
+            help=f"Model for post-treatment (env: {prefix}POST_TREATMENT_MODEL)",
+        )
+        parser.add_argument(
+            "--post-provider",
+            default=default.get("POST_TREATMENT_PROVIDER", cls._UNDEFINED),
+            choices=[p.value for p in PostTreatmentTask.Provider],
+            help=f"Provider for post-treatment (env: {prefix}POST_TREATMENT_PROVIDER)",
+        )
+        parser.add_argument(
+            "--post-correct",
+            action=argparse.BooleanOptionalAction,
+            default=default.get("POST_TREATMENT_CORRECT", cls._UNDEFINED),
+            help=f"Apply post-treatment by correcting already-pasted text in-place (env: {prefix}POST_TREATMENT_CORRECT)",
+        )
+        parser.add_argument(
+            "--cerebras-api-key",
+            default=default.get("CEREBRAS_API_KEY", cls._UNDEFINED),
+            help=f"Cerebras API key (env: {prefix}CEREBRAS_API_KEY or CEREBRAS_API_KEY)",
+        )
+        parser.add_argument(
+            "--openrouter-api-key",
+            default=default.get("OPENROUTER_API_KEY", cls._UNDEFINED),
+            help=f"OpenRouter API key (env: {prefix}OPENROUTER_API_KEY or OPENROUTER_API_KEY)",
+        )
+        parser.add_argument(
+            "--output-mode",
+            default=default.get("OUTPUT_MODE", cls._UNDEFINED),
+            choices=[mode.value for mode in OutputMode],
+            help=f"Output mode: batch (incremental) or full (complete on release) (env: {prefix}OUTPUT_MODE)",
+        )
+        parser.add_argument(
+            "--double-tap-window",
+            type=float,
+            default=default.get("DOUBLE_TAP_WINDOW", cls._UNDEFINED),
+            help=f"Time window in seconds for double-tap detection (env: {prefix}DOUBLE_TAP_WINDOW)",
+        )
+        parser.add_argument(
+            "--use-typing",
+            action=argparse.BooleanOptionalAction,
+            default=default.get("USE_TYPING", cls._UNDEFINED),
+            help=(
+                "Type ASCII characters one by one via ydotool (slower due to delays); copy/paste still handles non-ASCII"
+                f" (env: {prefix}USE_TYPING)"
+            ),
+        )
+        parser.add_argument(
+            "--keyboard",
+            nargs="?",
+            default=default.get("KEYBOARD", cls._UNDEFINED),
+            const=cls._PROMPT_FOR_KEYBOARD,
+            help=(
+                "Text filter for selecting the keyboard input device; pass without a "
+                f"value to pick interactively (env: {prefix}KEYBOARD)"
+            ),
+        )
+        parser.add_argument(
+            "--save-config",
+            nargs="?",
+            const=True,
+            default=default.get("CONFIG_PATH", cls._UNDEFINED),
+            help=(
+                "Persist provided command-line options into a config file. "
+                f"Without a value defaults to {default.get('CONFIG_PATH')}."
+            ),
+        )
 
     @classmethod
     def parse(cls) -> Optional[Config.App]:
@@ -230,167 +369,37 @@ class CommandLineParser:
 
         prefix = cls.ENV_PREFIX
 
-        default_hotkeys = cls.get_env("HOTKEY", cls.get_env("HOTKEYS"))
-        default_model = cls.get_env(
-            "MODEL", OpenAITranscriptionTask.Model.GPT_4O_TRANSCRIBE.value
-        )
-        default_language = cls.get_env("LANGUAGE")
-        default_gain = float(cls.get_env("GAIN", "1.0"))
-        default_microphone = cls.get_env("MICROPHONE")
-        default_openai_api_key = cls.get_env("OPENAI_API_KEY", prefix_optional=True)
-        default_deepgram_api_key = cls.get_env("DEEPGRAM_API_KEY", prefix_optional=True)
-        default_ydotool_socket = cls.get_env("YDOTOOL_SOCKET", prefix_optional=True)
-        default_post_prompt = cls.get_env("POST_TREATMENT_PROMPT", "")
-        default_post_prompt_file = cls.get_env("POST_TREATMENT_PROMPT_FILE", "")
-        default_post_model = cls.get_env("POST_TREATMENT_MODEL", "gpt-4o-mini")
-        default_post_provider = cls.get_env(
-            "POST_TREATMENT_PROVIDER", PostTreatmentTask.Provider.OPENAI.value
-        )
-        default_post_correct = cls.get_env_bool("POST_CORRECT")
-        default_cerebras_api_key = cls.get_env("CEREBRAS_API_KEY", prefix_optional=True)
-        default_openrouter_api_key = cls.get_env(
-            "OPENROUTER_API_KEY", prefix_optional=True
-        )
-        default_output_mode = cls.get_env("OUTPUT_MODE", OutputMode.BATCH.value)
-        default_double_tap_window = float(cls.get_env("DOUBLE_TAP_WINDOW", "0.5"))
-        default_use_typing = cls.get_env_bool("USE_TYPING")
-        default_keyboard_filter = cls.get_env("KEYBOARD")
+        default: dict[str, str | bool | None] = {
+            "HOTKEYS": cls.get_env("HOTKEY", cls.get_env("HOTKEYS")),
+            "MODEL": cls.get_env(
+                "MODEL", OpenAITranscriptionTask.Model.GPT_4O_TRANSCRIBE.value
+            ),
+            "LANGUAGE": cls.get_env("LANGUAGE"),
+            "GAIN": float(cls.get_env("GAIN", "1.0")),
+            "MICROPHONE": cls.get_env("MICROPHONE"),
+            "OPENAI_API_KEY": cls.get_env("OPENAI_API_KEY", prefix_optional=True),
+            "DEEPGRAM_API_KEY": cls.get_env("DEEPGRAM_API_KEY", prefix_optional=True),
+            "YDOTOOL_SOCKET": cls.get_env("YDOTOOL_SOCKET", prefix_optional=True),
+            "POST_TREATMENT_PROMPT": cls.get_env("POST_TREATMENT_PROMPT", ""),
+            "POST_TREATMENT_PROMPT_FILE": cls.get_env("POST_TREATMENT_PROMPT_FILE", ""),
+            "POST_TREATMENT_MODEL": cls.get_env("POST_TREATMENT_MODEL", "gpt-4o-mini"),
+            "POST_TREATMENT_PROVIDER": cls.get_env(
+                "POST_TREATMENT_PROVIDER", PostTreatmentTask.Provider.OPENAI.value
+            ),
+            "POST_TREATMENT_CORRECT": cls.get_env_bool("POST_TREATMENT_CORRECT"),
+            "CEREBRAS_API_KEY": cls.get_env("CEREBRAS_API_KEY", prefix_optional=True),
+            "OPENROUTER_API_KEY": cls.get_env(
+                "OPENROUTER_API_KEY", prefix_optional=True
+            ),
+            "OUTPUT_MODE": cls.get_env("OUTPUT_MODE", OutputMode.BATCH.value),
+            "DOUBLE_TAP_WINDOW": float(cls.get_env("DOUBLE_TAP_WINDOW", "0.5")),
+            "USE_TYPING": cls.get_env_bool("USE_TYPING"),
+            "KEYBOARD": cls.get_env("KEYBOARD"),
+            "CONFIG_PATH": config_path.as_posix(),
+        }
 
-        parser.add_argument(
-            "--config",
-            default=config_path,
-            help=f"Path to config file to load instead of the default user config ({config_path})",
-        )
-        parser.add_argument(
-            "--hotkey",
-            "--hotkeys",
-            default=default_hotkeys,
-            help=f"Push-to-talk key(s), F1-F12, comma-separated for multiple (env: {prefix}HOTKEY or {prefix}HOTKEYS)",
-        )
-        parser.add_argument(
-            "--model",
-            default=default_model,
-            choices=[m.value for m in OpenAITranscriptionTask.Model]
-            + [m.value for m in DeepgramTranscriptionTask.Model],
-            help=f"OpenAI or Deepgram model to use for transcription (env: {prefix}MODEL)",
-        )
-        parser.add_argument(
-            "--language",
-            default=default_language,
-            help=f"Transcription language, leave empty for auto-detect (env: {prefix}LANGUAGE)",
-        )
-        parser.add_argument(
-            "--gain",
-            type=float,
-            default=default_gain,
-            help=f"Microphone amplification factor, 1.0=normal, 2.0=double (env: {prefix}GAIN)",
-        )
-        parser.add_argument(
-            "--microphone",
-            nargs="?",
-            default=default_microphone,
-            const=cls._PROMPT_FOR_MICROPHONE,
-            help=(
-                "Text filter or ID for selecting the microphone input device; "
-                f"pass without a value to pick interactively (env: {prefix}MICROPHONE)"
-            ),
-        )
-        parser.add_argument(
-            "--openai-api-key",
-            default=default_openai_api_key,
-            help=f"OpenAI API key (env: {prefix}OPENAI_API_KEY or OPENAI_API_KEY)",
-        )
-        parser.add_argument(
-            "--deepgram-api-key",
-            default=default_deepgram_api_key,
-            help=f"Deepgram API key (env: {prefix}DEEPGRAM_API_KEY or DEEPGRAM_API_KEY)",
-        )
-        parser.add_argument(
-            "--ydotool-socket",
-            default=default_ydotool_socket,
-            help=f"Path to ydotool socket (env: {prefix}YDOTOOL_SOCKET or YDOTOOL_SOCKET)",
-        )
-        parser.add_argument(
-            "--post-prompt",
-            default=default_post_prompt,
-            help=f"Post-treatment prompt instructions (env: {prefix}POST_TREATMENT_PROMPT)",
-        )
-        parser.add_argument(
-            "--post-prompt-file",
-            default=default_post_prompt_file,
-            help=f"Path to file containing post-treatment prompt (env: {prefix}POST_TREATMENT_PROMPT_FILE)",
-        )
-        parser.add_argument(
-            "--post-model",
-            default=default_post_model,
-            help=f"Model for post-treatment (env: {prefix}POST_TREATMENT_MODEL)",
-        )
-        parser.add_argument(
-            "--post-provider",
-            default=default_post_provider,
-            choices=[p.value for p in PostTreatmentTask.Provider],
-            help=f"Provider for post-treatment (env: {prefix}POST_TREATMENT_PROVIDER)",
-        )
-        parser.add_argument(
-            "--post-correct",
-            action=argparse.BooleanOptionalAction,
-            default=default_post_correct,
-            help=f"Apply post-treatment by correcting already-pasted text in-place (env: {prefix}POST_CORRECT)",
-        )
-        parser.add_argument(
-            "--cerebras-api-key",
-            default=default_cerebras_api_key,
-            help=f"Cerebras API key (env: {prefix}CEREBRAS_API_KEY or CEREBRAS_API_KEY)",
-        )
-        parser.add_argument(
-            "--openrouter-api-key",
-            default=default_openrouter_api_key,
-            help=f"OpenRouter API key (env: {prefix}OPENROUTER_API_KEY or OPENROUTER_API_KEY)",
-        )
-        parser.add_argument(
-            "--output-mode",
-            default=default_output_mode,
-            choices=[mode.value for mode in OutputMode],
-            help=f"Output mode: batch (incremental) or full (complete on release) (env: {prefix}OUTPUT_MODE)",
-        )
-        parser.add_argument(
-            "--double-tap-window",
-            type=float,
-            default=default_double_tap_window,
-            help=f"Time window in seconds for double-tap detection (env: {prefix}DOUBLE_TAP_WINDOW)",
-        )
-        parser.add_argument(
-            "--use-typing",
-            action=argparse.BooleanOptionalAction,
-            default=default_use_typing,
-            help=(
-                "Type ASCII characters one by one via ydotool (slower due to delays); copy/paste still handles non-ASCII"
-                f" (env: {prefix}USE_TYPING)"
-            ),
-        )
-        parser.add_argument(
-            "--keyboard",
-            nargs="?",
-            default=default_keyboard_filter,
-            const=cls._PROMPT_FOR_KEYBOARD,
-            help=(
-                "Text filter for selecting the keyboard input device; pass without a "
-                f"value to pick interactively (env: {prefix}KEYBOARD)"
-            ),
-        )
-        parser.add_argument(
-            "--save-config",
-            nargs="?",
-            const=True,
-            default=config_path,
-            help=(
-                "Persist provided command-line options into a config file. "
-                f"Without a value defaults to {config_path}."
-            ),
-        )
-
+        cls._create_arguments(parser, default)
         args = parser.parse_args()
-        cli_overrides = cls._collect_cli_destinations(parser)
 
         provider: BaseTranscriptionTask.Provider
         try:
@@ -595,9 +604,10 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
                 save_config_path = Path(stripped).expanduser()
             if save_config_path is None:
                 save_config_path = config_path
+            args_defined_on_cli = cls._get_args_defined_on_cli()
             cls.save_config(
                 args=args,
-                provided_dests=cli_overrides,
+                provided_args=args_defined_on_cli,
                 keyboard=keyboard,
                 microphone=microphone,
                 config_path=save_config_path,
@@ -695,14 +705,14 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
     def save_config(
         cls,
         args: argparse.Namespace,
-        provided_dests: set[str],
+        provided_args: set[str],
         keyboard: InputDevice,
         microphone: sc.Microphone,
         config_path: Path | None = None,
     ) -> None:
         overrides = cls._prepare_config_overrides(
             args=args,
-            provided_dests=provided_dests,
+            provided_args=provided_args,
             keyboard=keyboard,
             microphone=microphone,
         )
@@ -713,35 +723,27 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
         print(f"Saved configuration overrides to {path} .")
 
     @classmethod
-    def _collect_cli_destinations(cls, parser: argparse.ArgumentParser) -> set[str]:
-        option_actions = parser._option_string_actions
-        provided_dests: set[str] = set()
-        for token in sys.argv[1:]:
-            if token == "--":
-                break
-            option_key = token
-            if token.startswith("--") and "=" in token:
-                option_key = token.split("=", 1)[0]
-            action = option_actions.get(option_key)
-            if action is None and token.startswith("-") and len(token) > 2:
-                action = option_actions.get(token[:2])
-            if action is None or action.dest is argparse.SUPPRESS:
-                continue
-            provided_dests.add(action.dest)
-        provided_dests.discard("save_config")
-        return provided_dests
+    def _get_args_defined_on_cli(cls) -> set[str]:
+        parser = argparse.ArgumentParser()
+        cls._create_arguments(parser, {})
+        ignore_keys = {"config", "save_config"}
+        return {
+            key
+            for key, value in vars(parser.parse_known_args()[0]).items()
+            if value is not cls._UNDEFINED and key not in ignore_keys
+        }
 
     @classmethod
     def _prepare_config_overrides(
         cls,
         args: argparse.Namespace,
-        provided_dests: set[str],
+        provided_args: set[str],
         keyboard: InputDevice,
         microphone: sc.Microphone,
     ) -> dict[str, str]:
         overrides: dict[str, str] = {}
         for dest, env_key in cls._DEST_TO_ENV.items():
-            if dest not in provided_dests:
+            if dest not in provided_args:
                 continue
             if dest == "microphone":
                 mic_name = getattr(microphone, "name", None)
