@@ -131,9 +131,26 @@ class Config:
 class CommandLineParser:
     ENV_PREFIX = "TWISTT_"
 
-    @staticmethod
-    def parse() -> Optional[Config.App]:
-        CommandLineParser._load_env_files()
+    @classmethod
+    def get_env(
+        cls, name: str, default: str | None = None, prefix_optional: bool = False
+    ):
+        result = os.getenv(f"{cls.ENV_PREFIX}{name}", default)
+        if not prefix_optional and result is None:
+            result = os.getenv(name, default)
+        return result
+
+    @classmethod
+    def get_env_bool(
+        cls, name: str, default: bool = False, prefix_optional: bool = False
+    ):
+        return cls._env_truthy(
+            CommandLineParser.get_env(name, str(default), prefix_optional)
+        )
+
+    @classmethod
+    def parse(cls) -> Optional[Config.App]:
+        cls._load_env_files()
 
         epilog = """Configuration files:
   The script loads configuration from two .env files (if they exist):
@@ -147,8 +164,7 @@ class CommandLineParser:
   - System environment variables (lowest priority)
 
   Each option can be set via environment variable using the TWISTT_ prefix.
-  API key can also use OPENAI_API_KEY (without prefix).
-  YDOTOOL_SOCKET can be set to specify the ydotool socket path.
+  *_API_KEY and YDOTOOL_SOCKET environment variables can also be set without the prefix.
   """
 
         parser = argparse.ArgumentParser(
@@ -157,26 +173,32 @@ class CommandLineParser:
             formatter_class=argparse.RawDescriptionHelpFormatter,
         )
 
-        prefix = CommandLineParser.ENV_PREFIX
+        prefix = cls.ENV_PREFIX
 
-        default_hotkeys = os.getenv(f"{prefix}HOTKEY", os.getenv(f"{prefix}HOTKEYS", "F9"))
-        default_model = os.getenv(f"{prefix}MODEL", OpenAITranscriptionTask.Model.GPT_4O_TRANSCRIBE.value)
-        default_language = os.getenv(f"{prefix}LANGUAGE")
-        default_gain = float(os.getenv(f"{prefix}GAIN", "1.0"))
-        default_openai_api_key = os.getenv(f"{prefix}OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-        default_deepgram_api_key = os.getenv(f"{prefix}DEEPGRAM_API_KEY") or os.getenv("DEEPGRAM_API_KEY")
-        ydotool_socket = os.getenv(f"{prefix}YDOTOOL_SOCKET") or os.getenv("YDOTOOL_SOCKET")
-        default_post_prompt = os.getenv(f"{prefix}POST_TREATMENT_PROMPT", "")
-        default_post_prompt_file = os.getenv(f"{prefix}POST_TREATMENT_PROMPT_FILE", "")
-        default_post_model = os.getenv(f"{prefix}POST_TREATMENT_MODEL", "gpt-4o-mini")
-        default_post_provider = os.getenv(f"{prefix}POST_TREATMENT_PROVIDER", PostTreatmentTask.Provider.OPENAI.value)
-        default_post_correct = CommandLineParser._env_truthy(os.getenv(f"{prefix}POST_CORRECT"))
-        default_cerebras_api_key = os.getenv(f"{prefix}CEREBRAS_API_KEY") or os.getenv("CEREBRAS_API_KEY")
-        default_openrouter_api_key = os.getenv(f"{prefix}OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY")
-        default_output_mode = os.getenv(f"{prefix}OUTPUT_MODE", OutputMode.BATCH.value)
-        default_double_tap_window = float(os.getenv(f"{prefix}DOUBLE_TAP_WINDOW", "0.5"))
-        default_use_typing = CommandLineParser._env_truthy(os.getenv(f"{prefix}USE_TYPING"))
-        default_keyboard_filter = os.getenv(f"{prefix}KEYBOARD")
+        default_hotkeys = cls.get_env("HOTKEY", cls.get_env("HOTKEYS"))
+        default_model = cls.get_env(
+            "MODEL", OpenAITranscriptionTask.Model.GPT_4O_TRANSCRIBE.value
+        )
+        default_language = cls.get_env("LANGUAGE")
+        default_gain = float(cls.get_env("GAIN", "1.0"))
+        default_openai_api_key = cls.get_env("OPENAI_API_KEY", prefix_optional=True)
+        default_deepgram_api_key = cls.get_env("DEEPGRAM_API_KEY", prefix_optional=True)
+        default_ydotool_socket = cls.get_env("YDOTOOL_SOCKET", prefix_optional=True)
+        default_post_prompt = cls.get_env("POST_TREATMENT_PROMPT", "")
+        default_post_prompt_file = cls.get_env("POST_TREATMENT_PROMPT_FILE", "")
+        default_post_model = cls.get_env("POST_TREATMENT_MODEL", "gpt-4o-mini")
+        default_post_provider = cls.get_env(
+            "POST_TREATMENT_PROVIDER", PostTreatmentTask.Provider.OPENAI.value
+        )
+        default_post_correct = cls.get_env_bool("POST_CORRECT")
+        default_cerebras_api_key = cls.get_env("CEREBRAS_API_KEY", prefix_optional=True)
+        default_openrouter_api_key = cls.get_env(
+            "OPENROUTER_API_KEY", prefix_optional=True
+        )
+        default_output_mode = cls.get_env("OUTPUT_MODE", OutputMode.BATCH.value)
+        default_double_tap_window = float(cls.get_env("DOUBLE_TAP_WINDOW", "0.5"))
+        default_use_typing = cls.get_env_bool("USE_TYPING")
+        default_keyboard_filter = cls.get_env("KEYBOARD")
 
         parser.add_argument(
             "--hotkey",
@@ -187,7 +209,8 @@ class CommandLineParser:
         parser.add_argument(
             "--model",
             default=default_model,
-            choices=[m.value for m in OpenAITranscriptionTask.Model] + [m.value for m in DeepgramTranscriptionTask.Model],
+            choices=[m.value for m in OpenAITranscriptionTask.Model]
+            + [m.value for m in DeepgramTranscriptionTask.Model],
             help=f"OpenAI or Deepgram model to use for transcription (env: {prefix}MODEL)",
         )
         parser.add_argument(
@@ -213,7 +236,7 @@ class CommandLineParser:
         )
         parser.add_argument(
             "--ydotool-socket",
-            default=ydotool_socket,
+            default=default_ydotool_socket,
             help=f"Path to ydotool socket (env: {prefix}YDOTOOL_SOCKET or YDOTOOL_SOCKET)",
         )
         parser.add_argument(
@@ -290,18 +313,30 @@ class CommandLineParser:
             transcription_model = DeepgramTranscriptionTask.Model(args.model)
             provider = BaseTranscriptionTask.Provider.DEEPGRAM
 
-        if provider is BaseTranscriptionTask.Provider.OPENAI and not args.openai_api_key:
-            print(f"""\
+        if (
+            provider is BaseTranscriptionTask.Provider.OPENAI
+            and not args.openai_api_key
+        ):
+            print(
+                f"""\
 ERROR: OpenAI API key is not defined (for "{transcription_model.value}" transcription model)
 Please set OPENAI_API_KEY or {prefix}OPENAI_API_KEY environment variable or pass it via --openai-api-key argument\
-""", file=sys.stderr)
+""",
+                file=sys.stderr,
+            )
             return None
 
-        if provider is BaseTranscriptionTask.Provider.DEEPGRAM and not args.deepgram_api_key:
-            print(f"""\
+        if (
+            provider is BaseTranscriptionTask.Provider.DEEPGRAM
+            and not args.deepgram_api_key
+        ):
+            print(
+                f"""\
 ERROR: Deepgram API key is not defined (for" {transcription_model.value}" transcription model)
 Please set DEEPGRAM_API_KEY or {prefix}DEEPGRAM_API_KEY environment variable or pass it via --deepgram-api-key argument\
-""", file=sys.stderr)
+""",
+                file=sys.stderr,
+            )
             return None
 
         post_prompt = None
@@ -309,16 +344,25 @@ Please set DEEPGRAM_API_KEY or {prefix}DEEPGRAM_API_KEY environment variable or 
         if args.post_prompt_file and args.post_prompt_file.strip():
             prompt_file_path = Path(args.post_prompt_file)
             if not prompt_file_path.exists():
-                print(f"ERROR: Post-treatment prompt file not found: {args.post_prompt_file}", file=sys.stderr)
+                print(
+                    f"ERROR: Post-treatment prompt file not found: {args.post_prompt_file}",
+                    file=sys.stderr,
+                )
                 return None
             try:
                 post_prompt = prompt_file_path.read_text(encoding="utf-8").strip()
                 if not post_prompt:
-                    print(f"ERROR: Post-treatment prompt file is empty: {args.post_prompt_file}", file=sys.stderr)
+                    print(
+                        f"ERROR: Post-treatment prompt file is empty: {args.post_prompt_file}",
+                        file=sys.stderr,
+                    )
                     return None
                 post_treatment_enabled = True
             except Exception as exc:
-                print(f"ERROR: Unable to read post-treatment prompt file: {exc}", file=sys.stderr)
+                print(
+                    f"ERROR: Unable to read post-treatment prompt file: {exc}",
+                    file=sys.stderr,
+                )
                 return None
         elif args.post_prompt:
             post_prompt = args.post_prompt
@@ -336,34 +380,52 @@ Please set DEEPGRAM_API_KEY or {prefix}DEEPGRAM_API_KEY environment variable or 
             return None
 
         if post_treatment_enabled:
-            if post_provider is PostTreatmentTask.Provider.OPENAI and not args.openai_api_key:
-                print(f"""\
+            if (
+                post_provider is PostTreatmentTask.Provider.OPENAI
+                and not args.openai_api_key
+            ):
+                print(
+                    f"""\
 ERROR: OpenAI API key is not defined (for "{args.post_model}" post-treatment model)
 Please set OPENAI_API_KEY or {prefix}OPENAI_API_KEY environment variable or pass it via --openai-api-key argument\
-""", file=sys.stderr)
+""",
+                    file=sys.stderr,
+                )
                 return None
-            if post_provider is PostTreatmentTask.Provider.CEREBRAS and not args.cerebras_api_key:
-                print(f"""\
+            if (
+                post_provider is PostTreatmentTask.Provider.CEREBRAS
+                and not args.cerebras_api_key
+            ):
+                print(
+                    f"""\
 ERROR: Cerebras API key is not defined (for" {args.post_model}" post-treatment model)
 Please set CEREBRAS_API_KEY or {prefix}CEREBRAS_API_KEY environment variable or pass it via --cerebras-api-key argument\
-""", file=sys.stderr)
+""",
+                    file=sys.stderr,
+                )
                 return None
-            if post_provider is PostTreatmentTask.Provider.OPENROUTER and not args.openrouter_api_key:
-                print(f"""\
+            if (
+                post_provider is PostTreatmentTask.Provider.OPENROUTER
+                and not args.openrouter_api_key
+            ):
+                print(
+                    f"""\
 ERROR: OpenRouter API key is not defined (for "{args.post_model}" post-treatment model)
 Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable or pass it via --openrouter-api-key argument\
-""", file=sys.stderr)
+""",
+                    file=sys.stderr,
+                )
                 return None
 
         try:
-            hotkey_codes = CommandLineParser._parse_hotkeys(args.hotkey)
+            hotkey_codes = cls._parse_hotkeys(args.hotkey)
         except ValueError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return None
 
         try:
             keyboard_filter = args.keyboard.strip() if args.keyboard else None
-            keyboard = CommandLineParser._find_keyboard(filter_text=keyboard_filter)
+            keyboard = cls._find_keyboard(filter_text=keyboard_filter)
         except Exception as exc:
             print(f"ERROR: Unable to find keyboard: {exc}", file=sys.stderr)
             return None
@@ -372,7 +434,9 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
             os.environ["YDOTOOL_SOCKET"] = args.ydotool_socket
         pydotool_init()
 
-        print(f'Transcription model: "{transcription_model.value}" from "{provider.value}"')
+        print(
+            f'Transcription model: "{transcription_model.value}" from "{provider.value}"'
+        )
         if args.language:
             print(f"Language: {args.language}")
         else:
@@ -380,12 +444,18 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
         if args.gain != 1.0:
             print(f"Audio gain: {args.gain}x")
         if post_treatment_enabled:
-            print(f'Post-treatment: Enabled via "{args.post_model}" from "{post_provider.value}"')
+            print(
+                f'Post-treatment: Enabled via "{args.post_model}" from "{post_provider.value}"'
+            )
             if post_prompt:
-                preview = post_prompt[:50] + "..." if len(post_prompt) > 50 else post_prompt
+                preview = (
+                    post_prompt[:50] + "..." if len(post_prompt) > 50 else post_prompt
+                )
                 print(f"Post-treatment prompt: {preview}")
             if args.post_correct:
-                print("Post-treatment correct mode: Enabled (waits for correction, then edits in-place)")
+                print(
+                    "Post-treatment correct mode: Enabled (waits for correction, then edits in-place)"
+                )
         hotkeys_display = ", ".join([k.strip().upper() for k in args.hotkey.split(",")])
         print(
             f"Using key(s) '{hotkeys_display}': hold for push-to-talk, double-tap to toggle (press same key again to stop)."
@@ -411,7 +481,9 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
             capture=Config.Capture(gain=args.gain),
             transcription=Config.Transcription(
                 provider=provider,
-                api_key=args.openai_api_key if provider is BaseTranscriptionTask.Provider.OPENAI else args.deepgram_api_key,
+                api_key=args.openai_api_key
+                if provider is BaseTranscriptionTask.Provider.OPENAI
+                else args.deepgram_api_key,
                 model=transcription_model,
                 language=args.language,
             ),
@@ -420,7 +492,11 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
                 prompt=post_prompt,
                 provider=post_provider,
                 model=args.post_model,
-                api_key=args.openai_api_key if post_provider is PostTreatmentTask.Provider.OPENAI else args.openrouter_api_key if post_provider is PostTreatmentTask.Provider.OPENROUTER else args.cerebras_api_key,
+                api_key=args.openai_api_key
+                if post_provider is PostTreatmentTask.Provider.OPENAI
+                else args.openrouter_api_key
+                if post_provider is PostTreatmentTask.Provider.OPENROUTER
+                else args.cerebras_api_key,
                 correct=args.post_correct and post_treatment_enabled,
             ),
             output=Config.Output(mode=output_mode, use_typing=args.use_typing),
@@ -463,7 +539,10 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
         def matches_filter(device: InputDevice) -> bool:
             if not filter_value:
                 return True
-            return filter_value in device.name.lower() or filter_value in device.path.lower()
+            return (
+                filter_value in device.name.lower()
+                or filter_value in device.path.lower()
+            )
 
         for device in devices:
             capabilities = device.capabilities(verbose=False)
@@ -471,9 +550,14 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
                 continue
             keys = capabilities[ecodes.EV_KEY]
             name_lower = device.name.lower()
-            if any(virt in name_lower for virt in ["virtual", "dummy", "uinput", "ydotool"]):
+            if any(
+                virt in name_lower for virt in ["virtual", "dummy", "uinput", "ydotool"]
+            ):
                 continue
-            if any(k in [ecodes.BTN_LEFT, ecodes.BTN_RIGHT, ecodes.BTN_MIDDLE] for k in keys):
+            if any(
+                k in [ecodes.BTN_LEFT, ecodes.BTN_RIGHT, ecodes.BTN_MIDDLE]
+                for k in keys
+            ):
                 continue
             if ecodes.EV_REL in capabilities:
                 continue
@@ -485,13 +569,21 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
                 continue
             physical_keyboards.append(device)
 
-        filtered_physical_keyboards = [device for device in physical_keyboards if matches_filter(device)]
-        filtered_devices = [device for device in devices if matches_filter(device)] if filter_value else devices
+        filtered_physical_keyboards = [
+            device for device in physical_keyboards if matches_filter(device)
+        ]
+        filtered_devices = (
+            [device for device in devices if matches_filter(device)]
+            if filter_value
+            else devices
+        )
 
         if filter_value and not filtered_devices:
             raise RuntimeError(f'No input devices matched filter "{filter_text}"')
 
-        candidate_physical = filtered_physical_keyboards if filter_value else physical_keyboards
+        candidate_physical = (
+            filtered_physical_keyboards if filter_value else physical_keyboards
+        )
         if len(candidate_physical) == 1:
             return candidate_physical[0]
         if candidate_physical:
@@ -764,7 +856,11 @@ class OutputTask:
 
     def _copy_paste(self, text: str, use_shift_to_paste: bool = False):
         self._copy_to_clipboard(text)
-        combo = self.Combo.CTRL_SHIFT_V.value if use_shift_to_paste else self.Combo.CTRL_V.value
+        combo = (
+            self.Combo.CTRL_SHIFT_V.value
+            if use_shift_to_paste
+            else self.Combo.CTRL_V.value
+        )
         key_combination(list(combo))
 
     def _write_text(self, text: str, use_shift_to_paste: bool = False):
@@ -798,7 +894,9 @@ class OutputTask:
 
     def _execute(self, cmd):
         match cmd:
-            case self.Commands.WriteText(text=text, use_shift_to_paste=use_shift_to_paste) if text:
+            case self.Commands.WriteText(
+                text=text, use_shift_to_paste=use_shift_to_paste
+            ) if text:
                 self._write_text(text, use_shift_to_paste)
 
             case self.Commands.DeleteCharsBackward(count=count) if count > 0:
@@ -851,19 +949,30 @@ class HotKeyTask:
                             last_release_time[scancode] = current_time
                         continue
 
-                    shift_pressed = any(code in self.config.hotkey.device.active_keys() for code in self.SHIFT_CODES)
+                    shift_pressed = any(
+                        code in self.config.hotkey.device.active_keys()
+                        for code in self.SHIFT_CODES
+                    )
                     self.comm.toggle_shift_pressed(shift_pressed)
 
                     match key_event.keystate:
                         case self.KEY_DOWN if not hotkey_pressed:
                             if current_time - toggle_stop_time < toggle_cooldown:
                                 continue
-                            if current_time - last_release_time[scancode] < self.config.hotkey.double_tap_window:
+                            if (
+                                current_time - last_release_time[scancode]
+                                < self.config.hotkey.double_tap_window
+                            ):
                                 is_toggle_mode = True
                                 active_hotkey = scancode
                                 hotkey_pressed = True
-                                name = next(k for k, v in F_KEY_CODES.items() if v == scancode)
-                                print(f"[Toggle mode activated with {name.upper()}]", file=sys.stderr)
+                                name = next(
+                                    k for k, v in F_KEY_CODES.items() if v == scancode
+                                )
+                                print(
+                                    f"[Toggle mode activated with {name.upper()}]",
+                                    file=sys.stderr,
+                                )
                             else:
                                 is_toggle_mode = False
                                 hotkey_pressed = True
@@ -886,8 +995,13 @@ class HotKeyTask:
                             active_hotkey = None
                             hotkey_pressed = False
                             toggle_stop_time = current_time
-                            name = next(k for k, v in F_KEY_CODES.items() if v == scancode)
-                            print(f"[Toggle mode deactivated with {name.upper()}]", file=sys.stderr)
+                            name = next(
+                                k for k, v in F_KEY_CODES.items() if v == scancode
+                            )
+                            print(
+                                f"[Toggle mode deactivated with {name.upper()}]",
+                                file=sys.stderr,
+                            )
                             self.comm.toggle_recording(False)
 
                 elif self.comm.is_recording and scancode in self.SHIFT_CODES:
@@ -911,7 +1025,12 @@ class CaptureTask:
         self._loop = asyncio.get_running_loop()
 
     async def run(self):
-        sample_rate = OpenAITranscriptionTask.SAMPLE_RATE if self.config.transcription.provider is BaseTranscriptionTask.Provider.OPENAI else DeepgramTranscriptionTask.SAMPLE_RATE
+        sample_rate = (
+            OpenAITranscriptionTask.SAMPLE_RATE
+            if self.config.transcription.provider
+            is BaseTranscriptionTask.Provider.OPENAI
+            else DeepgramTranscriptionTask.SAMPLE_RATE
+        )
         stream = sd.RawInputStream(
             samplerate=sample_rate,
             blocksize=int(sample_rate * 40 / 1000),
@@ -928,7 +1047,9 @@ class CaptureTask:
             stream.close()
             await self.comm.close_audio_chunks()
 
-    def _callback(self, indata, frames, timeinfo, status):  # pragma: no cover - sounddevice callback
+    def _callback(
+        self, indata, frames, timeinfo, status
+    ):  # pragma: no cover - sounddevice callback
         if self.comm.is_shutting_down:
             return
         if not self.comm.is_transcribing:
@@ -973,7 +1094,7 @@ class BaseTranscriptionTask:
         raise NotImplementedError
 
     @cached_property
-    def ws_headers(self) -> dict[str, str] :
+    def ws_headers(self) -> dict[str, str]:
         return {}
 
     async def on_connected(self, ws):
@@ -1005,15 +1126,18 @@ class BaseTranscriptionTask:
             current_transcription: list[str] = []
             try:
                 async with websockets.connect(
-                        self.ws_url,
-                        additional_headers=self.ws_headers,
-                        max_size=None,
+                    self.ws_url,
+                    additional_headers=self.ws_headers,
+                    max_size=None,
                 ) as ws:
                     await self.on_connected(ws)
 
                     sender_task = create_task(self._sender(ws))
                     receiver_task = create_task(
-                        self._receiver(ws, previous_transcriptions, current_transcription))
+                        self._receiver(
+                            ws, previous_transcriptions, current_transcription
+                        )
+                    )
                     await asyncio.gather(sender_task, receiver_task)
             except CancelledError:
                 break
@@ -1022,7 +1146,11 @@ class BaseTranscriptionTask:
             else:
                 # in full mode, the command are created later, and because we mark the end of "speech_active" here
                 # we'll lose the indicator, so we mark the post-treatment as active right now if we have some
-                if self.config.output.mode.is_full and self.config.post.enabled and previous_transcriptions:
+                if (
+                    self.config.output.mode.is_full
+                    and self.config.post.enabled
+                    and previous_transcriptions
+                ):
                     self.comm.toggle_post_treatment_active(True)
             finally:
                 self.comm.toggle_speech_active(False)
@@ -1078,7 +1206,9 @@ class BaseTranscriptionTask:
         except CancelledError:
             pass
 
-    async def on_data(self, raw, previous_transcriptions, current_transcription) -> bool:
+    async def on_data(
+        self, raw, previous_transcriptions, current_transcription
+    ) -> bool:
         raise NotImplementedError
 
     async def _receiver(self, ws, previous_transcriptions, current_transcription):
@@ -1092,7 +1222,9 @@ class BaseTranscriptionTask:
                     if not self.comm.is_transcribing:
                         break
                     continue
-                should_continue = await self.on_data(raw, previous_transcriptions, current_transcription)
+                should_continue = await self.on_data(
+                    raw, previous_transcriptions, current_transcription
+                )
                 if not should_continue:
                     break
 
@@ -1134,7 +1266,9 @@ class BaseTranscriptionTask:
     async def _handle_start_of_speech(self):
         self.comm.toggle_speech_active(True)
 
-    async def _handle_new_delta(self, text: str | None, current_transcription: list[str]):
+    async def _handle_new_delta(
+        self, text: str | None, current_transcription: list[str]
+    ):
         if not text:
             return
         self.comm.toggle_speech_active(True)
@@ -1149,7 +1283,9 @@ class BaseTranscriptionTask:
         await self._upsert_buffer_segment(segment_text)
         self._chars_since_stream = 0
 
-    async def _handle_update_last_delta(self, text: str | None, current_transcription: list[str]):
+    async def _handle_update_last_delta(
+        self, text: str | None, current_transcription: list[str]
+    ):
         if text is None:
             return
         self.comm.toggle_speech_active(True)
@@ -1163,7 +1299,12 @@ class BaseTranscriptionTask:
         segment_text = "".join(current_transcription)
         await self._upsert_buffer_segment(segment_text)
 
-    async def _handle_done_segment(self, text: str | None, previous_transcriptions: list[str], current_transcription: list[str]):
+    async def _handle_done_segment(
+        self,
+        text: str | None,
+        previous_transcriptions: list[str],
+        current_transcription: list[str],
+    ):
         if text is None:
             text = "".join(current_transcription)
         if not text:
@@ -1232,7 +1373,7 @@ class OpenAITranscriptionTask(BaseTranscriptionTask):
         return self.WS_URL
 
     @cached_property
-    def ws_headers(self) -> dict[str, str] :
+    def ws_headers(self) -> dict[str, str]:
         return {
             "Authorization": f"Bearer {self.config.transcription.api_key}",
             "OpenAI-Beta": "realtime=v1",
@@ -1260,7 +1401,9 @@ class OpenAITranscriptionTask(BaseTranscriptionTask):
             },
         }
         if self.config.transcription.language:
-            data["session"]["input_audio_transcription"]["language"] = self.config.transcription.language
+            data["session"]["input_audio_transcription"]["language"] = (
+                self.config.transcription.language
+            )
         return json.dumps(data)
 
     async def on_connected(self, ws):
@@ -1277,7 +1420,9 @@ class OpenAITranscriptionTask(BaseTranscriptionTask):
             )
         )
 
-    async def on_data(self, raw, previous_transcriptions, current_transcription) -> bool:
+    async def on_data(
+        self, raw, previous_transcriptions, current_transcription
+    ) -> bool:
         event = json.loads(raw)
 
         try:
@@ -1293,7 +1438,11 @@ class OpenAITranscriptionTask(BaseTranscriptionTask):
                 await self._handle_new_delta(event.get("delta"), current_transcription)
 
             case self.Event.DONE:
-                await self._handle_done_segment(event.get("transcript"), previous_transcriptions, current_transcription)
+                await self._handle_done_segment(
+                    event.get("transcript"),
+                    previous_transcriptions,
+                    current_transcription,
+                )
                 if not self.comm.is_recording:
                     return False
 
@@ -1338,13 +1487,15 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
         return self.WS_URL + "?" + urllib.parse.urlencode(params)
 
     @cached_property
-    def ws_headers(self) -> dict[str, str] :
+    def ws_headers(self) -> dict[str, str]:
         return {"Authorization": f"Token {self.config.transcription.api_key}"}
 
     async def send_audio_chunk(self, ws, chunk: bytes):
         await ws.send(chunk)
 
-    async def on_data(self, raw, previous_transcriptions, current_transcription) -> bool:
+    async def on_data(
+        self, raw, previous_transcriptions, current_transcription
+    ) -> bool:
         event = json.loads(raw)
 
         try:
@@ -1363,7 +1514,9 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
                 alternatives = chanel.get("alternatives", []) or [{}]
                 transcript = alternatives[0].get("transcript", "")
                 speech_final = bool(event.get("speech_final", False))
-                is_final = speech_final or bool(event.get("is_final", False))  # doc says it implies is_final being True so we enforce it
+                is_final = speech_final or bool(
+                    event.get("is_final", False)
+                )  # doc says it implies is_final being True so we enforce it
 
                 if transcript:
                     if is_final and not speech_final:
@@ -1373,17 +1526,18 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
                         await self._handle_new_delta(transcript, current_transcription)
                     else:
                         self.speech_in_progress = True
-                        await self._handle_update_last_delta(transcript, current_transcription)
+                        await self._handle_update_last_delta(
+                            transcript, current_transcription
+                        )
                     if speech_final:
-                        # print(event)
                         self.speech_in_progress = False
-                        await self._handle_done_segment(None, previous_transcriptions, current_transcription)
+                        await self._handle_done_segment(
+                            None, previous_transcriptions, current_transcription
+                        )
 
                     self.last_message_was_final = is_final
 
         return True
-
-
 
 
 class PostTreatmentTask:
@@ -1425,7 +1579,9 @@ ${current_text}"""
 
     @staticmethod
     def _render_template(template: str, values: Mapping[str, Optional[str]]) -> str:
-        safe_values = {key: ("" if value is None else str(value)) for key, value in values.items()}
+        safe_values = {
+            key: ("" if value is None else str(value)) for key, value in values.items()
+        }
         return string.Template(template).safe_substitute(safe_values)
 
     class Commands:
@@ -1447,7 +1603,9 @@ ${current_text}"""
         self.config = config
         self.client = self._build_client()
         self._buffer_seq_counter = 1_000_000
-        self._use_post_correction = self.config.post.correct and self.config.output.mode.is_batch
+        self._use_post_correction = (
+            self.config.post.correct and self.config.output.mode.is_batch
+        )
 
     def _next_buffer_seq(self) -> int:
         seq = self._buffer_seq_counter
@@ -1475,7 +1633,9 @@ ${current_text}"""
 
     async def _handle_segment(self, cmd: "PostTreatmentTask.Commands.ProcessSegment"):
         chunks = []
-        async for piece in self._post_process(cmd.text, cmd.previous_text, cmd.stream_output):
+        async for piece in self._post_process(
+            cmd.text, cmd.previous_text, cmd.stream_output
+        ):
             if piece is None:
                 break
             if self._use_post_correction:
@@ -1490,7 +1650,9 @@ ${current_text}"""
         if self._use_post_correction:
             corrected = "".join(chunks) + " "
             await self.comm.queue_buffer_command(
-                BufferTask.Commands.ApplyCorrection(seq_num=cmd.seq_num, corrected_text=corrected)
+                BufferTask.Commands.ApplyCorrection(
+                    seq_num=cmd.seq_num, corrected_text=corrected
+                )
             )
         else:
             # Add trailing space
@@ -1501,7 +1663,9 @@ ${current_text}"""
                 )
             )
 
-    async def _handle_full_text(self, cmd: "PostTreatmentTask.Commands.ProcessFullText"):
+    async def _handle_full_text(
+        self, cmd: "PostTreatmentTask.Commands.ProcessFullText"
+    ):
         chunks = []
         async for piece in self._post_process(cmd.text, "", cmd.stream_output):
             if piece is None:
@@ -1517,10 +1681,10 @@ ${current_text}"""
                 )
 
     async def _post_process(
-            self,
-            text: str,
-            previous_text: str,
-            stream_output: bool,
+        self,
+        text: str,
+        previous_text: str,
+        stream_output: bool,
     ) -> AsyncIterator[Optional[str]]:
         system_message = self._render_template(
             self.SYSTEM_TEMPLATE,
@@ -1529,7 +1693,9 @@ ${current_text}"""
         if self.config.output.mode.is_full:
             previous_context = "No previous transcription"
         else:
-            previous_context = previous_text if previous_text else "No previous transcription"
+            previous_context = (
+                previous_text if previous_text else "No previous transcription"
+            )
         user_message = self._render_template(
             self.USER_TEMPLATE,
             {
@@ -1586,8 +1752,8 @@ ${current_text}"""
                         token_buffer.append(delta)
                         token_count += 1
                         if stream_output and (
-                                token_count >= self.STREAMING_TOKEN_BUFFER_SIZE
-                                or delta.endswith((" ", ".", ",", "!", "?", "\n", ":", ";"))
+                            token_count >= self.STREAMING_TOKEN_BUFFER_SIZE
+                            or delta.endswith((" ", ".", ",", "!", "?", "\n", ":", ";"))
                         ):
                             buffered = "".join(token_buffer)
                             yield buffered
@@ -1616,7 +1782,10 @@ ${current_text}"""
                     yield None
                     return
                 finally:
-                    if stream is not None and (close_coro := getattr(stream, "aclose", None)) is not None:
+                    if (
+                        stream is not None
+                        and (close_coro := getattr(stream, "aclose", None)) is not None
+                    ):
                         with suppress(Exception):
                             await close_coro()
 
@@ -1632,7 +1801,9 @@ ${current_text}"""
                 await asyncio.sleep(self.STREAM_RETRY_DELAY_SECONDS)
 
         fallback_reason = (
-            "timeout" if isinstance(last_exception, asyncio.TimeoutError) else str(last_exception)
+            "timeout"
+            if isinstance(last_exception, asyncio.TimeoutError)
+            else str(last_exception)
         )
         if fallback_reason:
             print(
@@ -1652,14 +1823,20 @@ ${current_text}"""
         if self.config.post.provider is PostTreatmentTask.Provider.OPENAI:
             return AsyncOpenAI(api_key=self.config.post.api_key)
         if self.config.post.provider is PostTreatmentTask.Provider.CEREBRAS:
-            return AsyncOpenAI(api_key=self.config.post.api_key, base_url="https://api.cerebras.ai/v1")
+            return AsyncOpenAI(
+                api_key=self.config.post.api_key, base_url="https://api.cerebras.ai/v1"
+            )
         if self.config.post.provider is PostTreatmentTask.Provider.OPENROUTER:
-            return AsyncOpenAI(api_key=self.config.post.api_key, base_url="https://openrouter.ai/api/v1")
-        raise ValueError(f"Unknown post-treatment provider: {self.config.post.provider.value}")
+            return AsyncOpenAI(
+                api_key=self.config.post.api_key,
+                base_url="https://openrouter.ai/api/v1",
+            )
+        raise ValueError(
+            f"Unknown post-treatment provider: {self.config.post.provider.value}"
+        )
 
 
 class BufferTask:
-
     class PositionCursorAt(Enum):
         START = "start"
         END = "end"
@@ -1731,7 +1908,11 @@ class BufferTask:
         @staticmethod
         def _common_suffix_len(a: str, b: str, max_allowed: int | None = None) -> int:
             i = 0
-            max_i = min(len(a), len(b)) if max_allowed is None else min(max_allowed, len(a), len(b))
+            max_i = (
+                min(len(a), len(b))
+                if max_allowed is None
+                else min(max_allowed, len(a), len(b))
+            )
             while i < max_i and a[len(a) - 1 - i] == b[len(b) - 1 - i]:
                 i += 1
             return i
@@ -1745,29 +1926,39 @@ class BufferTask:
                 await self._move_cursor_to(abs_start)
                 if replacement:
                     await self.output_transcription(replacement)
-                    self.text = self.text[:abs_start] + replacement + self.text[abs_start:]
+                    self.text = (
+                        self.text[:abs_start] + replacement + self.text[abs_start:]
+                    )
                     self.cursor = abs_start + len(replacement)
                 return
 
             if move_cost_to_end <= move_cost_to_start:
                 await self._move_cursor_to(abs_end)
                 if delete_len:
-                    await self._enqueue(OutputTask.Commands.DeleteCharsBackward(delete_len))
+                    await self._enqueue(
+                        OutputTask.Commands.DeleteCharsBackward(delete_len)
+                    )
                 self.text = self.text[:abs_start] + self.text[abs_end:]
                 self.cursor = abs_start
             else:
                 await self._move_cursor_to(abs_start)
                 if delete_len:
-                    await self._enqueue(OutputTask.Commands.DeleteCharsForward(delete_len))
+                    await self._enqueue(
+                        OutputTask.Commands.DeleteCharsForward(delete_len)
+                    )
                 self.text = self.text[:abs_start] + self.text[abs_end:]
                 self.cursor = abs_start
 
             if replacement:
                 await self.output_transcription(replacement)
-                self.text = self.text[:self.cursor] + replacement + self.text[self.cursor:]
+                self.text = (
+                    self.text[: self.cursor] + replacement + self.text[self.cursor :]
+                )
                 self.cursor += len(replacement)
 
-        async def _move_cursor_at_edge(self, at: Optional["BufferTask.PositionCursorAt"], start: int, length: int):
+        async def _move_cursor_at_edge(
+            self, at: Optional["BufferTask.PositionCursorAt"], start: int, length: int
+        ):
             if at is None:
                 return
             target = start if at.start else start + length
@@ -1776,7 +1967,10 @@ class BufferTask:
 
         async def move_cursor_at_end_if_done(self):
             async with self.lock:
-                if not self.comm.is_indicator_active and (target := len(self.text)) != self.cursor:
+                if (
+                    not self.comm.is_indicator_active
+                    and (target := len(self.text)) != self.cursor
+                ):
                     await self._move_cursor_to(target)
 
         async def insert_segment(
@@ -1815,10 +2009,12 @@ class BufferTask:
                 self.segment_order.insert(insert_index, seq_num)
 
                 if insert_len:
-                    for sid in self.segment_order[insert_index + 1:]:
+                    for sid in self.segment_order[insert_index + 1 :]:
                         self.segments[sid]["start"] += insert_len
 
-                await self._move_cursor_at_edge(position_cursor_at, insert_pos, insert_len)
+                await self._move_cursor_at_edge(
+                    position_cursor_at, insert_pos, insert_len
+                )
 
         async def apply_correction(
             self,
@@ -1835,7 +2031,9 @@ class BufferTask:
                 start_base = seg["start"]
                 old = seg["text_current"]
                 if old == corrected_text:
-                    await self._move_cursor_at_edge(position_cursor_at, start_base, len(old))
+                    await self._move_cursor_at_edge(
+                        position_cursor_at, start_base, len(old)
+                    )
                     return
 
                 try:
@@ -1861,25 +2059,33 @@ class BufferTask:
                 lcs_for_check = self._common_suffix_len(
                     old,
                     corrected_text,
-                    max_allowed=min(len(old) - lcp_for_check, len(corrected_text) - lcp_for_check),
+                    max_allowed=min(
+                        len(old) - lcp_for_check, len(corrected_text) - lcp_for_check
+                    ),
                 )
                 unchanged = lcp_for_check + lcs_for_check
-                tiny_unchanged = unchanged < max(2, int(0.2 * min(len(old), len(corrected_text))))
+                tiny_unchanged = unchanged < max(
+                    2, int(0.2 * min(len(old), len(corrected_text)))
+                )
                 if sm is None or ratio < (1.0 - replace_threshold) or tiny_unchanged:
                     abs_start = start_base
                     abs_end = start_base + len(old)
                     await self._replace_range(abs_start, abs_end, corrected_text)
                     seg["text_current"] = corrected_text
                     shift_following(len(corrected_text) - len(old))
-                    await self._move_cursor_at_edge(position_cursor_at, start_base, len(corrected_text))
+                    await self._move_cursor_at_edge(
+                        position_cursor_at, start_base, len(corrected_text)
+                    )
                     return
 
                 lcp = self._common_prefix_len(old, corrected_text)
                 max_suffix = min(len(old) - lcp, len(corrected_text) - lcp)
-                lcs = self._common_suffix_len(old, corrected_text, max_allowed=max_suffix)
+                lcs = self._common_suffix_len(
+                    old, corrected_text, max_allowed=max_suffix
+                )
                 old_mid_len = len(old) - lcp - lcs
                 new_mid = (
-                    corrected_text[lcp: len(corrected_text) - lcs]
+                    corrected_text[lcp : len(corrected_text) - lcs]
                     if len(corrected_text) - lcp - lcs > 0
                     else ""
                 )
@@ -1889,7 +2095,9 @@ class BufferTask:
                 seg["text_current"] = corrected_text
                 shift_following(len(corrected_text) - len(old))
 
-                await self._move_cursor_at_edge(position_cursor_at, start_base, len(corrected_text))
+                await self._move_cursor_at_edge(
+                    position_cursor_at, start_base, len(corrected_text)
+                )
 
     def __init__(self, comm: Comm, config: Config.App):
         self.comm = comm
@@ -1912,9 +2120,7 @@ class BufferTask:
                         position_cursor_at=position_cursor_at,
                     ):
                         await self.manager.insert_segment(
-                            seq_num,
-                            text,
-                            position_cursor_at=position_cursor_at
+                            seq_num, text, position_cursor_at=position_cursor_at
                         )
 
                     case self.Commands.ApplyCorrection(
@@ -1955,7 +2161,11 @@ class IndicatorTask:
         self.initialized = False
 
     def _build_indicator_text(self) -> str:
-        if self.comm.is_post_treatment_active or self.comm.is_speech_active or self.comm.is_recording:
+        if (
+            self.comm.is_post_treatment_active
+            or self.comm.is_speech_active
+            or self.comm.is_recording
+        ):
             return "(Twistting...)"
         return ""
 
@@ -2020,7 +2230,12 @@ async def main_async():
         capture_task = CaptureTask(comm, app_config)
         output_task = OutputTask(comm, app_config)
         buffer_task = BufferTask(comm, app_config)
-        transcription_task = (OpenAITranscriptionTask if app_config.transcription.provider is BaseTranscriptionTask.Provider.OPENAI else DeepgramTranscriptionTask)(comm, app_config)
+        transcription_task = (
+            OpenAITranscriptionTask
+            if app_config.transcription.provider
+            is BaseTranscriptionTask.Provider.OPENAI
+            else DeepgramTranscriptionTask
+        )(comm, app_config)
         indicator_task = IndicatorTask(comm)
 
         tasks.append(create_task(hotkey_task.run()))
