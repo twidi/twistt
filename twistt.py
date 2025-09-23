@@ -321,6 +321,14 @@ Please set DEEPGRAM_API_KEY or {prefix}DEEPGRAM_API_KEY environment variable or 
         output_mode = OutputMode(args.output_mode)
         post_provider = PostTreatmentTask.Provider(args.post_provider)
 
+        if args.post_correct and output_mode.is_full:
+            print(
+                "ERROR: Post-treatment correction is not supported with full output mode. "
+                "Use --output-mode batch or disable --post-correct.",
+                file=sys.stderr,
+            )
+            return None
+
         if post_treatment_enabled:
             if post_provider is PostTreatmentTask.Provider.OPENAI and not args.openai_api_key:
                 print(f"""\
