@@ -1394,6 +1394,8 @@ class PostTreatmentTask:
 
     STREAMING_TOKEN_BUFFER_SIZE = 5
     REQUEST_TIMEOUT_SECONDS = 10.0
+    STREAM_MAX_RETRIES = 3
+    STREAM_RETRY_DELAY_SECONDS = 0.5
     OPENROUTER_EXTRA_HEADERS = {
         "HTTP-Referer": "https://github.com/twidi/twistt/",
         "X-Title": "Twistt",
@@ -1546,46 +1548,104 @@ ${current_text}"""
         }
         if self.config.post.provider is PostTreatmentTask.Provider.OPENROUTER:
             create_kwargs["extra_headers"] = self.OPENROUTER_EXTRA_HEADERS
-        try:
-            stream = await asyncio.wait_for(
-                self.client.chat.completions.create(**create_kwargs),
-                timeout=self.REQUEST_TIMEOUT_SECONDS,
-            )
-        except asyncio.TimeoutError:
-            print("WARNING: Post-treatment timeout, using raw text", file=sys.stderr)
-            yield text
-            yield None
-            return
-        except Exception as exc:
-            print(f"WARNING: Post-treatment failed: {exc}", file=sys.stderr)
-            yield text
-            yield None
-            return
+        last_exception: Optional[BaseException] = None
+        for attempt in range(self.STREAM_MAX_RETRIES):
+            stream: Optional[AsyncIterator] = None
+            has_emitted_piece = False
+            token_buffer: list[str] = []
+            token_count = 0
+            try:
+                stream = await asyncio.wait_for(
+                    self.client.chat.completions.create(**create_kwargs),
+                    timeout=self.REQUEST_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError as exc:
+                last_exception = exc
+                print(
+                    "WARNING: Post-treatment timed out (attempt "
+                    f"{attempt + 1}/{self.STREAM_MAX_RETRIES})",
+                    file=sys.stderr,
+                )
+            except Exception as exc:
+                last_exception = exc
+                print(
+                    "WARNING: Post-treatment failed to start "
+                    f"(attempt {attempt + 1}/{self.STREAM_MAX_RETRIES}): {exc}",
+                    file=sys.stderr,
+                )
+            else:
+                if stream_output:
+                    print("\n[Post-treatment] ", end="", flush=True)
+                try:
+                    async for chunk in stream:
+                        delta = chunk.choices[0].delta.content
+                        if not delta:
+                            continue
+                        if stream_output:
+                            print(delta, end="", flush=True)
+                        token_buffer.append(delta)
+                        token_count += 1
+                        if stream_output and (
+                                token_count >= self.STREAMING_TOKEN_BUFFER_SIZE
+                                or delta.endswith((" ", ".", ",", "!", "?", "\n", ":", ";"))
+                        ):
+                            buffered = "".join(token_buffer)
+                            yield buffered
+                            has_emitted_piece = True
+                            token_buffer = []
+                            token_count = 0
+                except Exception as exc:  # defensive runtime guard
+                    last_exception = exc
+                    if token_buffer:
+                        buffered = "".join(token_buffer)
+                        yield buffered
+                        has_emitted_piece = True
+                        token_buffer = []
+                        token_count = 0
+                    print(
+                        "WARNING: Post-treatment stream interrupted "
+                        f"(attempt {attempt + 1}/{self.STREAM_MAX_RETRIES}): {exc}",
+                        file=sys.stderr,
+                    )
+                else:
+                    if token_buffer:
+                        yield "".join(token_buffer)
+                        has_emitted_piece = True
+                    if stream_output:
+                        print("")
+                    yield None
+                    return
+                finally:
+                    if stream is not None and (close_coro := getattr(stream, "aclose", None)) is not None:
+                        with suppress(Exception):
+                            await close_coro()
 
-        token_buffer = []
-        token_count = 0
-        if stream_output:
-            print("\n[Post-treatment] ", end="", flush=True)
-        async for chunk in stream:
-            delta = chunk.choices[0].delta.content
-            if not delta:
-                continue
-            if stream_output:
-                print(delta, end="", flush=True)
-            token_buffer.append(delta)
-            token_count += 1
-            if stream_output and (
-                    token_count >= self.STREAMING_TOKEN_BUFFER_SIZE
-                    or delta.endswith((" ", ".", ",", "!", "?", "\n", ":", ";"))
-            ):
-                buffered = "".join(token_buffer)
-                yield buffered
-                token_buffer = []
-                token_count = 0
-        if token_buffer:
-            yield "".join(token_buffer)
-        if stream_output:
-            print("")
+            if has_emitted_piece:
+                print(
+                    "WARNING: Post-treatment stopped early; returning partial output",
+                    file=sys.stderr,
+                )
+                yield None
+                return
+
+            if attempt + 1 < self.STREAM_MAX_RETRIES:
+                await asyncio.sleep(self.STREAM_RETRY_DELAY_SECONDS)
+
+        fallback_reason = (
+            "timeout" if isinstance(last_exception, asyncio.TimeoutError) else str(last_exception)
+        )
+        if fallback_reason:
+            print(
+                "WARNING: Post-treatment giving up after "
+                f"{self.STREAM_MAX_RETRIES} attempts ({fallback_reason}). Using raw text.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "WARNING: Post-treatment unavailable; using raw text",
+                file=sys.stderr,
+            )
+        yield text
         yield None
 
     def _build_client(self) -> AsyncOpenAI:
