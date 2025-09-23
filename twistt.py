@@ -320,12 +320,22 @@ class CommandLineParser:
         else:
             config_path_str = (os.getenv(f"{cls.ENV_PREFIX}CONFIG") or "").strip()
 
+        config_dir = Path(user_config_dir("twistt", ensure_exists=False))
+
+        config_path = None
         if config_path_str:
             config_path = Path(config_path_str)
-        else:
-            config_path = (
-                Path(user_config_dir("twistt", ensure_exists=False)) / "config.env"
-            )
+            # If it's not an absolute path and the path does not exist relative to the current directory
+            # we try to find it in the config dir with .env extension (`foo` => `~/.config/twistt/foo.env`)
+            if (
+                not config_path.is_absolute()
+                and not (Path.cwd() / config_path).exists()
+                and not (config_path := (config_dir / f"{config_path}.env")).exists()
+            ):
+                config_path = None
+
+        if config_path is None:
+            config_path = config_dir / "config.env"
 
         config_path = config_path.expanduser()
         if not config_path.is_absolute():

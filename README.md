@@ -164,27 +164,29 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 
 Selecting a microphone sets the `PULSE_SOURCE` environment variable for Twistt only, so your system default input stays untouched. Run `./twistt.py --microphone` without a value to pick from the list even if an environment variable is set.
 
-Use `--config` (or `TWISTT_CONFIG`) to load settings from a specific file while leaving the default user config untouched. Use `--save-config` to capture only the options you explicitly pass on the command line; existing keys in the config file are preserved. Provide a path (or set `TWISTT_CONFIG`) to control which file gets written. `TWISTT_CONFIG` is read only from the process environment—do not place it in `.env` files or `config.env`.
+Use `--config` (or `TWISTT_CONFIG`) to load settings from a specific file while leaving the default user config untouched. If you provide a relative path that doesn't exist in the current directory, and a file with that name (plus `.env`) exists in `~/.config/twistt/`, it will be used automatically. For example, `--config work` will use `~/.config/twistt/work.env` if `work` doesn't exist locally. Use `--save-config` to capture only the options you explicitly pass on the command line; existing keys in the config file are preserved. Provide a path (or set `TWISTT_CONFIG`) to control which file gets written. `TWISTT_CONFIG` is read only from the process environment—do not place it in `.env` files or `config.env`.
 
 ### Config Inheritance
 
 Config files can define `TWISTT_PARENT_CONFIG` to inherit from another config file. Values in the child file take precedence. This allows creating presets that only specify what differs from a base configuration:
 
 ```bash
-# base.env - shared settings
+# ~/.config/twistt/config.env - shared settings
 TWISTT_OPENAI_API_KEY=sk-...
-TWISTT_OUTPUT_MODE=batch
-TWISTT_POST_TREATMENT_PROMPT=Please correct any errors
+...
 
-# work.env - inherits base, changes hotkey
-TWISTT_PARENT_CONFIG=base.env
-TWISTT_HOTKEY=F8
+# ~/.config/twistt/gpt.env - inherits base and use open ai model without typing mode (because not recommended) 
+TWISTT_PARENT_CONFIG=config.env
+TWISTT_MODEL=gpt-4o-transcribe
+TWISTT_USE_TYPING=false
 
-# gaming.env - inherits base, different settings
-TWISTT_PARENT_CONFIG=base.env
-TWISTT_HOTKEY=F9
-TWISTT_OUTPUT_MODE=full
+# ~/.config/twistt/nova.env - inherits base and use nova-2 model with typing mode (because it fits well)
+TWISTT_PARENT_CONFIG=config.env
+TWISTT_MODEL=nova-2
+TWISTT_USE_TYPING=true
 ```
+
+In those examples, `nova.env` and `gpt.env` being in `~/.config/twistt/`, they can be used like that: `twistt.py --config nova` or `./twistt.py --config gpt` (without passing the full path and the `.env` extension to the config argument)
 
 Parent paths can be relative (resolved from the child config's directory) or absolute. Circular references are detected and will cause an error.
 
@@ -241,8 +243,10 @@ TWISTT_PROVIDER=deepgram TWISTT_DEEPGRAM_API_KEY=dg_xxx ./twistt.py --model nova
 # Save to a custom config file
 ./twistt.py --language fr --gain 2.0 --save-config ~/.config/twistt/presets/french.env
 
-# Load a custom preset before launching
-./twistt.py --config ~/.config/twistt/presets/french.env
+# Load a custom preset
+./twistt.py --config ~/.config/twistt/french.env
+./twistt.py --config french  # equivalent to the one above
+./twistt.py --config /path/to/gaming.env
 ```
 
 ### How It Works
