@@ -22,6 +22,7 @@ import asyncio
 import base64
 import difflib
 import json
+import string
 import os
 import sys
 import time
@@ -33,7 +34,7 @@ from enum import Enum
 from datetime import datetime
 from functools import cached_property
 from pathlib import Path
-from typing import NamedTuple, Optional
+from typing import Mapping, NamedTuple, Optional
 
 import janus
 import numpy as np
@@ -1382,12 +1383,17 @@ CRITICAL RULES:
   You may have to not output anything. Respect this if asked.
 
 User instructions:
-{user_prompt}"""
+${user_prompt}"""
     USER_TEMPLATE = """CONTEXT (do not include in response):
-{previous_context}
+${previous_context}
 
 NEW TEXT TO CORRECT:
-{current_text}"""
+${current_text}"""
+
+    @staticmethod
+    def _render_template(template: str, values: Mapping[str, Optional[str]]) -> str:
+        safe_values = {key: ("" if value is None else str(value)) for key, value in values.items()}
+        return string.Template(template).safe_substitute(safe_values)
 
     class Commands:
         class ProcessSegment(NamedTuple):
@@ -1483,14 +1489,20 @@ NEW TEXT TO CORRECT:
             previous_text: str,
             stream_output: bool,
     ) -> AsyncIterator[Optional[str]]:
-        system_message = self.SYSTEM_TEMPLATE.format(user_prompt=self.config.post.prompt)
+        system_message = self._render_template(
+            self.SYSTEM_TEMPLATE,
+            {"user_prompt": self.config.post.prompt},
+        )
         if self.config.output.mode.is_full:
             previous_context = "No previous transcription"
         else:
             previous_context = previous_text if previous_text else "No previous transcription"
-        user_message = self.USER_TEMPLATE.format(
-            previous_context=previous_context,
-            current_text=text,
+        user_message = self._render_template(
+            self.USER_TEMPLATE,
+            {
+                "previous_context": previous_context,
+                "current_text": text,
+            },
         )
         create_kwargs = {
             "model": self.config.post.model,
