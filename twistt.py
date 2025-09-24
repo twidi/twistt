@@ -2484,7 +2484,6 @@ class BufferTask:
             corrected_text: str,
             *,
             position_cursor_at: Optional["BufferTask.PositionCursorAt"] = None,
-            replace_threshold: float = 0.7,
         ):
             async with self.lock:
                 seg = self.segments.get(seq_num)
@@ -2498,13 +2497,6 @@ class BufferTask:
                     )
                     return
 
-                try:
-                    sm = difflib.SequenceMatcher(None, old, corrected_text)
-                    ratio = sm.ratio()
-                except Exception:
-                    sm = None
-                    ratio = 0.0
-
                 def shift_following(delta: int):
                     if delta == 0:
                         return
@@ -2517,19 +2509,12 @@ class BufferTask:
                             other = self.segments[s]
                             other["start"] += delta
 
-                lcp_for_check = self._common_prefix_len(old, corrected_text)
-                lcs_for_check = self._common_suffix_len(
-                    old,
-                    corrected_text,
-                    max_allowed=min(
-                        len(old) - lcp_for_check, len(corrected_text) - lcp_for_check
-                    ),
-                )
-                unchanged = lcp_for_check + lcs_for_check
-                tiny_unchanged = unchanged < max(
-                    2, int(0.2 * min(len(old), len(corrected_text)))
-                )
-                if sm is None or ratio < (1.0 - replace_threshold) or tiny_unchanged:
+                try:
+                    sm = difflib.SequenceMatcher(
+                        None, old, corrected_text, autojunk=False
+                    )
+                except Exception:
+                    # Fallback to simple replacement if SequenceMatcher failed
                     abs_start = start_base
                     abs_end = start_base + len(old)
                     await self._replace_range(abs_start, abs_end, corrected_text)
@@ -2540,23 +2525,44 @@ class BufferTask:
                     )
                     return
 
-                lcp = self._common_prefix_len(old, corrected_text)
-                max_suffix = min(len(old) - lcp, len(corrected_text) - lcp)
-                lcs = self._common_suffix_len(
-                    old, corrected_text, max_allowed=max_suffix
-                )
-                old_mid_len = len(old) - lcp - lcs
-                new_mid = (
-                    corrected_text[lcp : len(corrected_text) - lcs]
-                    if len(corrected_text) - lcp - lcs > 0
-                    else ""
-                )
-                abs_start = start_base + lcp
-                abs_end = abs_start + old_mid_len
-                await self._replace_range(abs_start, abs_end, new_mid)
+                # Use SequenceMatcher opcodes for efficient editing
+                opcodes = sm.get_opcodes()
+
+                # Track cumulative offset from edits
+                offset = 0
+
+                for tag, a_start, a_end, b_start, b_end in opcodes:
+                    if tag == "equal":
+                        # No change needed
+                        continue
+
+                    # Calculate absolute positions in the buffer, adjusted by offset
+                    abs_start = start_base + a_start + offset
+                    abs_end = start_base + a_end + offset
+
+                    if tag == "delete":
+                        # Delete characters from old text
+                        delete_len = a_end - a_start
+                        await self._replace_range(abs_start, abs_end, "")
+                        offset -= delete_len
+
+                    elif tag == "insert":
+                        # Insert new characters
+                        new_text = corrected_text[b_start:b_end]
+                        insert_len = b_end - b_start
+                        await self._replace_range(abs_start, abs_start, new_text)
+                        offset += insert_len
+
+                    elif tag == "replace":
+                        # Replace old characters with new ones
+                        new_text = corrected_text[b_start:b_end]
+                        old_len = a_end - a_start
+                        new_len = b_end - b_start
+                        await self._replace_range(abs_start, abs_end, new_text)
+                        offset += new_len - old_len
+
                 seg["text_current"] = corrected_text
                 shift_following(len(corrected_text) - len(old))
-
                 await self._move_cursor_at_edge(
                     position_cursor_at, start_base, len(corrected_text)
                 )
