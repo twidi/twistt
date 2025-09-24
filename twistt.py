@@ -1946,6 +1946,7 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
         super().__init__(comm, config)
         self._last_message_was_final = True
         self._last_transcript_time = time.perf_counter()
+        self._last_event_start = -1
 
     @cached_property
     def ws_url(self) -> str:
@@ -1954,10 +1955,10 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
             "encoding": "linear16",
             "sample_rate": str(self.SAMPLE_RATE),
             "channels": "1",
-            "punctuate": "true",
+            # "punctuate": "true",
             "smart_format": "true",
             "interim_results": "true",
-            "vad_events": "true",
+            # "vad_events": "true",
             "endpointing": "500",
         }
         if self.config.transcription.language:
@@ -2003,7 +2004,7 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
                     self._last_transcript_time = now
                     if is_final and not speech_final:
                         transcript += " "
-                    if self._last_message_was_final:
+                    if self._last_message_was_final and event["start"] != self._last_event_start:
                         if DEBUG_TO_STDOUT:
                             debug(
                                 f"[TRANS] [DELTA NEW #{self.seq_counter + 1}] {transcript=}"
@@ -2017,6 +2018,7 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
                         await self._handle_update_last_delta(
                             transcript, current_transcription
                         )
+                    self._last_event_start = event["start"]
 
                 if speech_final:
                     if (
