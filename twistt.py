@@ -28,7 +28,7 @@ import os
 import sys
 import time
 import urllib.parse
-from asyncio import create_task, Queue, Event, CancelledError
+from asyncio import PriorityQueue, create_task, Queue, Event, CancelledError
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from enum import Enum
@@ -1002,7 +1002,7 @@ class Comm:
     def __init__(self):
         self._audio_chunks = janus.Queue()
         self._post_commands = Queue()
-        self._buffer_commands = Queue()
+        self._buffer_commands = PriorityQueue()
         self._keyboard_commands = Queue()
         self._is_shift_pressed = False
         self._recording = Event()
@@ -2301,6 +2301,8 @@ class BufferTask:
             return self is self.END
 
     class Commands:
+        # IMPORTANT: All those tasks must have a seq_num as first field as we use a PriorityQueue to sort the
+        # commands by seq_num to run all commands from a seq_num before any command from seq_num+1
         class InsertSegment(NamedTuple):
             seq_num: int
             text: str
@@ -2312,7 +2314,7 @@ class BufferTask:
             position_cursor_at: Optional["BufferTask.PositionCursorAt"] = None
 
         class Shutdown(NamedTuple):
-            pass
+            seq_num: int = 3_000_000_000
 
     class Manager:
         """Maintain a mirror of pasted text and apply minimal corrections via keyboard."""
