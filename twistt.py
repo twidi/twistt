@@ -31,7 +31,7 @@ import urllib.parse
 from asyncio import PriorityQueue, create_task, Queue, Event, CancelledError
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
-from enum import Enum
+from enum import Enum, StrEnum
 from datetime import datetime
 from functools import cached_property
 from pathlib import Path
@@ -80,6 +80,15 @@ F_KEY_CODES = {
     "f11": ecodes.KEY_F11,
     "f12": ecodes.KEY_F12,
 }
+
+DEBUG_TO_STDOUT = os.getenv("TWISTT_DEBUG", "false").lower() == "true"
+OUTPUT_TO_STDOUT = not DEBUG_TO_STDOUT
+
+
+def debug(*args) -> None:
+    if not DEBUG_TO_STDOUT:
+        return
+    print(f"[{datetime.now()}]", *args, file=sys.stdout)
 
 
 class OutputMode(Enum):
@@ -1032,6 +1041,8 @@ class Comm:
         await self._audio_chunks.wait_closed()
 
     async def queue_post_command(self, cmd):
+        if DEBUG_TO_STDOUT:
+            debug("[POST] PUT", cmd)
         is_shutdown = isinstance(cmd, PostTreatmentTask.Commands.Shutdown)
         if self.is_shutting_down and not is_shutdown:
             self.toggle_post_treatment_active(False)
@@ -1042,6 +1053,8 @@ class Comm:
     @asynccontextmanager
     async def dequeue_post_command(self):
         cmd = await self._post_commands.get()
+        if DEBUG_TO_STDOUT:
+            debug("[POST] GET", cmd)
         is_shutdown = isinstance(cmd, PostTreatmentTask.Commands.Shutdown)
         self.toggle_post_treatment_active(not is_shutdown)
         try:
@@ -1051,10 +1064,15 @@ class Comm:
                 self.toggle_post_treatment_active(not self._post_commands.empty())
 
     async def queue_buffer_command(self, cmd):
+        if DEBUG_TO_STDOUT:
+            debug("[BUFF] PUT", cmd)
         await self._buffer_commands.put(cmd)
 
     async def dequeue_buffer_command(self):
-        return await self._buffer_commands.get()
+        cmd = await self._buffer_commands.get()
+        if DEBUG_TO_STDOUT:
+            debug("[BUFF] GET", cmd)
+        return cmd
 
     async def queue_keyboard_command(self, cmd):
         is_shutdown = isinstance(cmd, OutputTask.Commands.Shutdown)
@@ -1330,89 +1348,101 @@ class HotKeyTask:
         toggle_stop_time = 0.0
         toggle_cooldown = 0.5
 
-        try:
-            async for event in self.config.hotkey.device.async_read_loop():
-                if self.comm.is_shutting_down:
-                    break
-                if event.type != ecodes.EV_KEY:
-                    continue
-                key_event = categorize(event)
-                current_time = time.perf_counter()
-                scancode = key_event.scancode
-
-                if scancode in self.config.hotkey.codes:
-                    if active_hotkey is not None and scancode != active_hotkey:
-                        if key_event.keystate == self.KEY_UP:
-                            last_release_time[scancode] = current_time
+        received_event = False
+        while True:
+            try:
+                async for event in self.config.hotkey.device.async_read_loop():
+                    received_event = True
+                    if self.comm.is_shutting_down:
+                        break
+                    if event.type != ecodes.EV_KEY:
                         continue
+                    key_event = categorize(event)
+                    current_time = time.perf_counter()
+                    scancode = key_event.scancode
 
-                    shift_pressed = any(
-                        code in self.config.hotkey.device.active_keys()
-                        for code in self.SHIFT_CODES
-                    )
-                    self.comm.toggle_shift_pressed(shift_pressed)
+                    if scancode in self.config.hotkey.codes:
+                        if active_hotkey is not None and scancode != active_hotkey:
+                            if key_event.keystate == self.KEY_UP:
+                                last_release_time[scancode] = current_time
+                            continue
 
-                    match key_event.keystate:
-                        case self.KEY_DOWN if not hotkey_pressed:
-                            if current_time - toggle_stop_time < toggle_cooldown:
-                                continue
-                            if (
-                                current_time - last_release_time[scancode]
-                                < self.config.hotkey.double_tap_window
-                            ):
-                                is_toggle_mode = True
-                                active_hotkey = scancode
-                                hotkey_pressed = True
+                        shift_pressed = any(
+                            code in self.config.hotkey.device.active_keys()
+                            for code in self.SHIFT_CODES
+                        )
+                        self.comm.toggle_shift_pressed(shift_pressed)
+
+                        match key_event.keystate:
+                            case self.KEY_DOWN if not hotkey_pressed:
+                                if current_time - toggle_stop_time < toggle_cooldown:
+                                    continue
+                                if (
+                                    current_time - last_release_time[scancode]
+                                    < self.config.hotkey.double_tap_window
+                                ):
+                                    is_toggle_mode = True
+                                    active_hotkey = scancode
+                                    hotkey_pressed = True
+                                    name = next(
+                                        k
+                                        for k, v in F_KEY_CODES.items()
+                                        if v == scancode
+                                    )
+                                    print(
+                                        f"[Toggle mode activated with {name.upper()}]",
+                                        file=sys.stderr,
+                                    )
+                                else:
+                                    is_toggle_mode = False
+                                    hotkey_pressed = True
+                                    active_hotkey = scancode
+                                self.comm.toggle_recording(True)
+                                print(f"\n--- {datetime.now()} ---")
+
+                            case self.KEY_UP if hotkey_pressed and not is_toggle_mode:
+                                last_release_time[scancode] = current_time
+                                hotkey_pressed = False
+                                active_hotkey = None
+                                self.comm.toggle_recording(False)
+
+                            case self.KEY_UP if is_toggle_mode:
+                                last_release_time[scancode] = current_time
+                                hotkey_pressed = False
+
+                            case self.KEY_DOWN if is_toggle_mode:
+                                is_toggle_mode = False
+                                active_hotkey = None
+                                hotkey_pressed = False
+                                toggle_stop_time = current_time
                                 name = next(
                                     k for k, v in F_KEY_CODES.items() if v == scancode
                                 )
                                 print(
-                                    f"[Toggle mode activated with {name.upper()}]",
+                                    f"[Toggle mode deactivated with {name.upper()}]",
                                     file=sys.stderr,
                                 )
-                            else:
-                                is_toggle_mode = False
-                                hotkey_pressed = True
-                                active_hotkey = scancode
-                            self.comm.toggle_recording(True)
-                            print(f"\n--- {datetime.now()} ---")
+                                self.comm.toggle_recording(False)
 
-                        case self.KEY_UP if hotkey_pressed and not is_toggle_mode:
-                            last_release_time[scancode] = current_time
-                            hotkey_pressed = False
-                            active_hotkey = None
-                            self.comm.toggle_recording(False)
+                    elif self.comm.is_recording and scancode in self.SHIFT_CODES:
+                        match key_event.keystate:
+                            case self.KEY_DOWN:
+                                self.comm.toggle_shift_pressed(True)
+                            case self.KEY_UP:
+                                self.comm.toggle_shift_pressed(False)
 
-                        case self.KEY_UP if is_toggle_mode:
-                            last_release_time[scancode] = current_time
-                            hotkey_pressed = False
+            except Exception as exc:
+                if not received_event:
+                    print(
+                        f"Error while listening for hotkey events: {exc}",
+                        file=sys.stderr,
+                    )
+                raise
+            except CancelledError:
+                break
 
-                        case self.KEY_DOWN if is_toggle_mode:
-                            is_toggle_mode = False
-                            active_hotkey = None
-                            hotkey_pressed = False
-                            toggle_stop_time = current_time
-                            name = next(
-                                k for k, v in F_KEY_CODES.items() if v == scancode
-                            )
-                            print(
-                                f"[Toggle mode deactivated with {name.upper()}]",
-                                file=sys.stderr,
-                            )
-                            self.comm.toggle_recording(False)
-
-                elif self.comm.is_recording and scancode in self.SHIFT_CODES:
-                    match key_event.keystate:
-                        case self.KEY_DOWN:
-                            self.comm.toggle_shift_pressed(True)
-                        case self.KEY_UP:
-                            self.comm.toggle_shift_pressed(False)
-
-        except CancelledError:
-            pass
-        finally:
-            with suppress(Exception):
-                self.config.hotkey.device.close()
+        with suppress(Exception):
+            self.config.hotkey.device.close()
 
 
 class CaptureTask:
@@ -1438,6 +1468,9 @@ class CaptureTask:
         try:
             with stream:
                 await self.comm.wait_for_shutdown()
+        except Exception as exc:
+            print(f"Error while capturing audio: {exc}", file=sys.stderr)
+            raise
         except CancelledError:
             pass
         finally:
@@ -1711,7 +1744,8 @@ class BaseTranscriptionTask:
         self.comm.toggle_speech_active(True)
         self._has_transcript_since_done_segment = True
         current_transcription.append(text)
-        print(text, end="", flush=True)
+        if OUTPUT_TO_STDOUT:
+            print(text, end="", flush=True)
         if not self._should_output_deltas():
             return
         self._chars_since_stream += len(text)
@@ -1732,7 +1766,8 @@ class BaseTranscriptionTask:
             current_transcription[-1] = text
         else:
             current_transcription.append(text)
-        print("\n", text, end="", flush=True)
+        if OUTPUT_TO_STDOUT:
+            print("\n", text, end="", flush=True)
         if not self._should_output_deltas():
             return
         segment_text = "".join(current_transcription)
@@ -1753,7 +1788,8 @@ class BaseTranscriptionTask:
             self._reset_active_sequence()
             return
 
-        print(" ", end="", flush=True)
+        if OUTPUT_TO_STDOUT:
+            print(" ", end="", flush=True)
         final_text = text + " "
 
         previous_text = "".join(previous_transcriptions)
@@ -1939,6 +1975,7 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
         self, raw, previous_transcriptions, current_transcription
     ) -> bool:
         event = json.loads(raw)
+        debug(f"[TRANS] [EVENT] {event=}")
 
         try:
             event_type = self.Event(event.get("type", ""))
@@ -1967,8 +2004,16 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
                     if is_final and not speech_final:
                         transcript += " "
                     if self._last_message_was_final:
+                        if DEBUG_TO_STDOUT:
+                            debug(
+                                f"[TRANS] [DELTA NEW #{self.seq_counter + 1}] {transcript=}"
+                            )
                         await self._handle_new_delta(transcript, current_transcription)
                     else:
+                        if DEBUG_TO_STDOUT:
+                            debug(
+                                f"[TRANS] [DELTA UPDATE #{self.seq_counter}] {transcript=}"
+                            )
                         await self._handle_update_last_delta(
                             transcript, current_transcription
                         )
@@ -1978,6 +2023,8 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
                         self._has_transcript_since_done_segment
                         or not timeout_with_no_transcript
                     ):
+                        if DEBUG_TO_STDOUT:
+                            debug(f"[TRANS] [SEGMENT DONE #{self.seq_counter}]")
                         await self._handle_done_segment(
                             None, previous_transcriptions, current_transcription
                         )
@@ -2191,14 +2238,14 @@ ${current_text}"""
                     file=sys.stderr,
                 )
             else:
-                if stream_output:
+                if stream_output and OUTPUT_TO_STDOUT:
                     print("\n[Post-treatment] ", end="", flush=True)
                 try:
                     async for chunk in stream:
                         delta = chunk.choices[0].delta.content
                         if not delta:
                             continue
-                        if stream_output:
+                        if stream_output and OUTPUT_TO_STDOUT:
                             print(delta, end="", flush=True)
                         token_buffer.append(delta)
                         token_count += 1
@@ -2228,7 +2275,7 @@ ${current_text}"""
                     if token_buffer:
                         yield "".join(token_buffer)
                         has_emitted_piece = True
-                    if stream_output:
+                    if stream_output and OUTPUT_TO_STDOUT:
                         print("")
                     yield None
                     return
@@ -2614,23 +2661,28 @@ class IndicatorTask:
     SEQ_NUM = 2_000_000_000
     UPDATE_INTERVAL = 0.2
 
+    class State(StrEnum):
+        RECORDING = "recording"
+        SPEAKING = "speaking"
+        POST_TREATMENT = "post_treatment"
+
     def __init__(self, comm: Comm):
         self.comm = comm
         self.current_text: str = ""
         self.initialized = False
-        # self.last_state: str = ""
+        self.last_state: list[IndicatorTask.State] = []
 
     def _build_indicator_text(self) -> str:
-        state = ""
+        state: list[IndicatorTask.State] = []
         if self.comm.is_recording:
-            state += "R"
+            state.append(IndicatorTask.State.RECORDING)
         if self.comm.is_speech_active:
-            state += "S"
+            state.append(IndicatorTask.State.SPEAKING)
         if self.comm.is_post_treatment_active:
-            state += "P"
-        # if state != self.last_state:
-        #     print(f"[{state}]")
-        #     self.last_state = state
+            state.append(IndicatorTask.State.POST_TREATMENT)
+        if DEBUG_TO_STDOUT and state != self.last_state:
+            debug(f"[STATE UPDATE] {state=}")
+            self.last_state = state
         return " (Twistting...)" if state else ""
 
     async def _clear_indicator_active_flag_soon(self):
@@ -2688,46 +2740,38 @@ async def main_async():
         return
 
     comm = Comm()
-    tasks = []
     try:
-        hotkey_task = HotKeyTask(comm, app_config)
-        capture_task = CaptureTask(comm, app_config)
-        output_task = OutputTask(comm, app_config)
-        buffer_task = BufferTask(comm, app_config)
-        transcription_task = (
-            OpenAITranscriptionTask
-            if app_config.transcription.provider
-            is BaseTranscriptionTask.Provider.OPENAI
-            else DeepgramTranscriptionTask
-        )(comm, app_config)
-        indicator_task = IndicatorTask(comm)
+        async with asyncio.TaskGroup() as tg:
+            hotkey_task = HotKeyTask(comm, app_config)
+            capture_task = CaptureTask(comm, app_config)
+            output_task = OutputTask(comm, app_config)
+            buffer_task = BufferTask(comm, app_config)
+            transcription_task = (
+                OpenAITranscriptionTask
+                if app_config.transcription.provider
+                is BaseTranscriptionTask.Provider.OPENAI
+                else DeepgramTranscriptionTask
+            )(comm, app_config)
+            indicator_task = IndicatorTask(comm)
 
-        tasks.append(create_task(hotkey_task.run()))
-        tasks.append(create_task(capture_task.run()))
-        tasks.append(create_task(output_task.run()))
-        tasks.append(create_task(buffer_task.run()))
-        tasks.append(create_task(transcription_task.run()))
-        tasks.append(create_task(indicator_task.run()))
+            tg.create_task(hotkey_task.run())
+            tg.create_task(capture_task.run())
+            tg.create_task(output_task.run())
+            tg.create_task(buffer_task.run())
+            tg.create_task(transcription_task.run())
+            tg.create_task(indicator_task.run())
 
-        if app_config.post.enabled:
-            post_task = PostTreatmentTask(comm, app_config)
-            tasks.append(create_task(post_task.run()))
+            if app_config.post.enabled:
+                post_task = PostTreatmentTask(comm, app_config)
+                tg.create_task(post_task.run())
 
-        await comm.wait_for_shutdown()
-
-    except (KeyboardInterrupt, CancelledError):
+    except* (KeyboardInterrupt, CancelledError):
         print("\nExit.")
+    except* Exception as eg:
+        print(f"\nError in tasks: {eg.exceptions}")
 
     finally:
         await comm.shutdown(app_config.post.enabled)
-
-        for task in tasks:
-            task.cancel()
-        for task in tasks:
-            try:
-                await task
-            except CancelledError:
-                pass
         with suppress(Exception):
             app_config.hotkey.device.close()
 
