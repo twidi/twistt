@@ -1,4 +1,4 @@
-#!/usr/bin/env -S uv run
+#!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
@@ -305,7 +305,6 @@ class CommandLineParser:
             "--save-config",
             nargs="?",
             const=True,
-            default=default.get("CONFIG_PATH", cls._UNDEFINED),
             help=(
                 "Persist provided command-line options into a config file. "
                 f"Without a value defaults to {default.get('CONFIG_PATH')}."
