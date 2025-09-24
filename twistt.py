@@ -1491,6 +1491,7 @@ class BaseTranscriptionTask:
         self._chars_since_stream = 0
         self._ws_retry_attempts = 0
         self._last_ws_failure_at = 0.0
+        self._has_transcript_since_done_segment = False
 
     @cached_property
     def ws_url(self) -> str:
@@ -1708,6 +1709,7 @@ class BaseTranscriptionTask:
         if not text:
             return
         self.comm.toggle_speech_active(True)
+        self._has_transcript_since_done_segment = True
         current_transcription.append(text)
         print(text, end="", flush=True)
         if not self._should_output_deltas():
@@ -1725,6 +1727,7 @@ class BaseTranscriptionTask:
         if text is None:
             return
         self.comm.toggle_speech_active(True)
+        self._has_transcript_since_done_segment = True
         if current_transcription:
             current_transcription[-1] = text
         else:
@@ -1741,6 +1744,7 @@ class BaseTranscriptionTask:
         previous_transcriptions: list[str],
         current_transcription: list[str],
     ):
+        self._has_transcript_since_done_segment = False
         if text is None:
             text = "".join(current_transcription)
         if not text:
@@ -1905,8 +1909,6 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
     def __init__(self, comm: Comm, config: Config.App):
         super().__init__(comm, config)
         self._last_message_was_final = True
-        self._speech_in_progress = False
-        self._has_transcript_since_done_segment = False
         self._last_transcript_time = time.perf_counter()
 
     @cached_property
@@ -1916,10 +1918,11 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
             "encoding": "linear16",
             "sample_rate": str(self.SAMPLE_RATE),
             "channels": "1",
+            "punctuate": "true",
             "smart_format": "true",
             "interim_results": "true",
             "vad_events": "true",
-            "utterance_end_ms": "1500",
+            "endpointing": "500",
         }
         if self.config.transcription.language:
             params["language"] = self.config.transcription.language
@@ -1943,11 +1946,6 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
             return True
 
         match event_type:
-            case self.Event.SPEECH_STARTED:
-                if not self._speech_in_progress:
-                    await self._handle_start_of_speech()
-                    self._speech_in_progress = True
-
             case self.Event.DELTA:
                 chanel = event.get("channel", {})
                 alternatives = chanel.get("alternatives", []) or [{}]
@@ -1965,37 +1963,29 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
                     speech_final = True
 
                 if transcript:
-                    self._has_transcript_since_done_segment = True
                     self._last_transcript_time = now
                     if is_final and not speech_final:
                         transcript += " "
                     if self._last_message_was_final:
-                        self._speech_in_progress = True
                         await self._handle_new_delta(transcript, current_transcription)
                     else:
-                        self._speech_in_progress = True
                         await self._handle_update_last_delta(
                             transcript, current_transcription
                         )
 
                 if speech_final:
-                    self._speech_in_progress = False
                     if (
                         self._has_transcript_since_done_segment
                         or not timeout_with_no_transcript
                     ):
-                        self._has_transcript_since_done_segment = False
                         await self._handle_done_segment(
                             None, previous_transcriptions, current_transcription
                         )
 
-                self._last_message_was_final = is_final
+                if transcript or is_final:
+                    self._last_message_was_final = is_final
 
                 if speech_final and not self.comm.is_recording:
-                    return False
-
-            case self.Event.DONE:
-                if not self.comm.is_recording:
                     return False
 
         return True
@@ -2626,15 +2616,20 @@ class IndicatorTask:
         self.comm = comm
         self.current_text: str = ""
         self.initialized = False
+        # self.last_state: str = ""
 
     def _build_indicator_text(self) -> str:
-        if (
-            self.comm.is_post_treatment_active
-            or self.comm.is_speech_active
-            or self.comm.is_recording
-        ):
-            return "(Twistting...)"
-        return ""
+        state = ""
+        if self.comm.is_recording:
+            state += "R"
+        if self.comm.is_speech_active:
+            state += "S"
+        if self.comm.is_post_treatment_active:
+            state += "P"
+        # if state != self.last_state:
+        #     print(f"[{state}]")
+        #     self.last_state = state
+        return " (Twistting...)" if state else ""
 
     async def _clear_indicator_active_flag_soon(self):
         await asyncio.sleep(1)
