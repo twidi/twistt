@@ -832,7 +832,7 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
 
     @classmethod
     def _get_args_defined_on_cli(cls) -> set[str]:
-        parser = argparse.ArgumentParser()
+        parser = argparse.ArgumentParser(add_help=False)
         cls._create_arguments(parser, {})
         ignore_keys = {"config", "save_config"}
         return {
@@ -934,7 +934,7 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
 
     @classmethod
     def _extract_config_path_from_argv(cls) -> str | None:
-        parser = argparse.ArgumentParser()
+        parser = argparse.ArgumentParser(add_help=False)
         parser.add_argument("-c", "--config")
         args = parser.parse_known_args()[0]
         if args.config is None:
