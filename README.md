@@ -130,6 +130,8 @@ TWISTT_POST_TREATMENT_MODEL=gpt-4o-mini  # Model for post-treatment
 TWISTT_POST_TREATMENT_PROVIDER=openai  # Provider: openai, cerebras, or openrouter
 # Post-treatment correct mode (apply corrections in-place with keyboard; requires batch output mode)
 TWISTT_POST_TREATMENT_CORRECT=false
+# Disable post-treatment entirely (ignores prompts/files)
+TWISTT_POST_TREATMENT_DISABLED=false
 
 # Provider-specific API keys (for post-treatment)
 TWISTT_CEREBRAS_API_KEY=csk-...  # Required if using cerebras provider
@@ -155,6 +157,7 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 | `-pm, --post-model`          | `TWISTT_POST_TREATMENT_MODEL`                       | gpt-4o-mini                   | Model for post-treatment                                                                                                                          |
 | `-pp, --post-provider`       | `TWISTT_POST_TREATMENT_PROVIDER`                    | openai                        | Provider for post-treatment (openai, cerebras, openrouter)                                                                                        |
 | `-pc, --post-correct`        | `TWISTT_POST_TREATMENT_CORRECT`                     | false                         | Apply post-treatment by correcting already-output text in-place (only in batch output mode)                                                       |
+| `-np, --no-post`             | `TWISTT_POST_TREATMENT_DISABLED`                    | false                         | Disable post-treatment regardless of prompts or files                                                                                             |
 | `-kcb, --cerebras-api-key`   | `TWISTT_CEREBRAS_API_KEY` or `CEREBRAS_API_KEY`     | -                             | Cerebras API key                                                                                                                                  |
 | `-kor, --openrouter-api-key` | `TWISTT_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` | -                             | OpenRouter API key                                                                                                                                |
 | `-o, --output-mode`          | `TWISTT_OUTPUT_MODE`                                | batch                         | Output mode: batch (incremental) or full (complete on release)                                                                                    |
@@ -208,7 +211,7 @@ Those options allow you to easily create and reuse prompts for different situati
 ```bash
 ./twistt.py --prompt-file translate
 ./twistt.py --prompt-file prose
-./twistt.py --prompt-file ""  # for no post-treatment, will ignore any prompt file in environment or config files
+./twistt.py --no-post  # disable post-treatment, ignoring prompts configured via CLI, env, or config files
 ```
 
 ## Usage

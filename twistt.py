@@ -162,6 +162,7 @@ class CommandLineParser:
         "post_model": f"{ENV_PREFIX}POST_TREATMENT_MODEL",
         "post_provider": f"{ENV_PREFIX}POST_TREATMENT_PROVIDER",
         "post_correct": f"{ENV_PREFIX}POST_TREATMENT_CORRECT",
+        "no_post": f"{ENV_PREFIX}POST_TREATMENT_DISABLED",
         "cerebras_api_key": f"{ENV_PREFIX}CEREBRAS_API_KEY",
         "openrouter_api_key": f"{ENV_PREFIX}OPENROUTER_API_KEY",
         "output_mode": f"{ENV_PREFIX}OUTPUT_MODE",
@@ -286,6 +287,13 @@ class CommandLineParser:
             action=argparse.BooleanOptionalAction,
             default=default.get("POST_TREATMENT_CORRECT", cls._UNDEFINED),
             help=f"Apply post-treatment by correcting already-pasted text in-place (env: {prefix}POST_TREATMENT_CORRECT)",
+        )
+        parser.add_argument(
+            "-np",
+            "--no-post",
+            action="store_true",
+            default=default.get("POST_TREATMENT_DISABLED", cls._UNDEFINED),
+            help=f"Disable post-treatment regardless of configured prompts (env: {prefix}POST_TREATMENT_DISABLED)",
         )
         parser.add_argument(
             "-kcb",
@@ -433,6 +441,7 @@ class CommandLineParser:
                 "POST_TREATMENT_PROVIDER", PostTreatmentTask.Provider.OPENAI.value
             ),
             "POST_TREATMENT_CORRECT": cls.get_env_bool("POST_TREATMENT_CORRECT"),
+            "POST_TREATMENT_DISABLED": cls.get_env_bool("POST_TREATMENT_DISABLED"),
             "CEREBRAS_API_KEY": cls.get_env("CEREBRAS_API_KEY", prefix_optional=True),
             "OPENROUTER_API_KEY": cls.get_env(
                 "OPENROUTER_API_KEY", prefix_optional=True
@@ -485,94 +494,100 @@ Please set DEEPGRAM_API_KEY or {prefix}DEEPGRAM_API_KEY environment variable or 
         post_prompt = None
         post_treatment_enabled = False
 
-        if "post_prompt_file" in provided_args:
-            cls.check_post_prompt_file_defining(Path.cwd(), args.post_prompt_file)
+        if not bool(args.no_post):
+            if "post_prompt_file" in provided_args:
+                cls.check_post_prompt_file_defining(Path.cwd(), args.post_prompt_file)
 
-        if cls._post_prompt_file:
-            prompt_file_path = Path(cls._post_prompt_file).expanduser()
-            prompt_exts = [None, ".txt", ".prompt"]
+            if cls._post_prompt_file:
+                prompt_file_path = Path(cls._post_prompt_file).expanduser()
+                prompt_exts = [None, ".txt", ".prompt"]
 
-            if not prompt_file_path.is_absolute() and (
-                cls._post_prompt_file.startswith("./")
-                or cls._post_prompt_file.startswith("../")
-            ):
-                prompt_file_path = cls._post_prompt_file_relative_dir / prompt_file_path
+                if not prompt_file_path.is_absolute() and (
+                    cls._post_prompt_file.startswith("./")
+                    or cls._post_prompt_file.startswith("../")
+                ):
+                    prompt_file_path = (
+                        cls._post_prompt_file_relative_dir / prompt_file_path
+                    )
 
-            if prompt_file_path.is_absolute():
-                prompt_file_path = prompt_file_path
-                if prompt_file_path.suffix:
-                    prompt_file_paths = [prompt_file_path]
+                if prompt_file_path.is_absolute():
+                    prompt_file_path = prompt_file_path
+                    if prompt_file_path.suffix:
+                        prompt_file_paths = [prompt_file_path]
+                    else:
+                        prompt_file_paths = [
+                            prompt_file_path.with_suffix(ext)
+                            if ext is not None
+                            else prompt_file_path
+                            for ext in prompt_exts
+                        ]
+
                 else:
-                    prompt_file_paths = [
-                        prompt_file_path.with_suffix(ext)
-                        if ext is not None
-                        else prompt_file_path
-                        for ext in prompt_exts
+                    prompt_file_dirs = [
+                        cls._post_prompt_file_relative_dir,
+                        config_dir,
                     ]
+                    if prompt_file_path.suffix:
+                        prompt_file_paths = [
+                            dir / prompt_file_path for dir in prompt_file_dirs
+                        ]
+                    else:
+                        prompt_file_paths = [
+                            dir / prompt_file_path.with_suffix(ext)
+                            if ext is not None
+                            else prompt_file_path
+                            for dir, ext in product(prompt_file_dirs, prompt_exts)
+                        ]
 
-            else:
-                prompt_file_dirs = [cls._post_prompt_file_relative_dir, config_dir]
-                if prompt_file_path.suffix:
-                    prompt_file_paths = [
-                        dir / prompt_file_path for dir in prompt_file_dirs
-                    ]
-                else:
-                    prompt_file_paths = [
-                        dir / prompt_file_path.with_suffix(ext)
-                        if ext is not None
-                        else prompt_file_path
-                        for dir, ext in product(prompt_file_dirs, prompt_exts)
-                    ]
-
-            prompt_file_paths = [
-                path.resolve(strict=False) for path in prompt_file_paths
-            ]
-            try:
-                prompt_file_path = next(
-                    path
-                    for path in prompt_file_paths
-                    if path.exists() and path.is_file()
-                )
-            except StopIteration:
-                print(
-                    f"ERROR: Post-treatment prompt file{'s' if len(prompt_file_paths) > 1 else ''} "
-                    f"not found: {', '.join(path.as_posix() for path in prompt_file_paths)}",
-                    file=sys.stderr,
-                )
-                return None
-
-            try:
-                post_prompt = prompt_file_path.read_text(encoding="utf-8").strip()
-                if not post_prompt:
+                prompt_file_paths = [
+                    path.resolve(strict=False) for path in prompt_file_paths
+                ]
+                try:
+                    prompt_file_path = next(
+                        path
+                        for path in prompt_file_paths
+                        if path.exists() and path.is_file()
+                    )
+                except StopIteration:
                     print(
-                        f"ERROR: Post-treatment prompt file is empty: {prompt_file_path}",
+                        f"ERROR: Post-treatment prompt file{'s' if len(prompt_file_paths) > 1 else ''} "
+                        f"not found: {', '.join(path.as_posix() for path in prompt_file_paths)}",
                         file=sys.stderr,
                     )
                     return None
-                post_treatment_enabled = True
-            except Exception as exc:
-                print(
-                    f"ERROR: Unable to read post-treatment prompt file: {exc}",
-                    file=sys.stderr,
-                )
-                return None
 
-        elif args.post_prompt:
-            post_prompt = args.post_prompt
-            post_treatment_enabled = True
+                try:
+                    post_prompt = prompt_file_path.read_text(encoding="utf-8").strip()
+                    if not post_prompt:
+                        print(
+                            f"ERROR: Post-treatment prompt file is empty: {prompt_file_path}",
+                            file=sys.stderr,
+                        )
+                        return None
+                    post_treatment_enabled = True
+                except Exception as exc:
+                    print(
+                        f"ERROR: Unable to read post-treatment prompt file: {exc}",
+                        file=sys.stderr,
+                    )
+                    return None
+
+            elif args.post_prompt:
+                post_prompt = args.post_prompt
+                post_treatment_enabled = True
 
         output_mode = OutputMode(args.output_mode)
         post_provider = PostTreatmentTask.Provider(args.post_provider)
 
-        if args.post_correct and output_mode.is_full:
-            print(
-                "ERROR: Post-treatment correction is not supported with full output mode. "
-                "Use --output-mode batch or disable --post-correct.",
-                file=sys.stderr,
-            )
-            return None
-
         if post_treatment_enabled:
+            if args.post_correct and output_mode.is_full:
+                print(
+                    "ERROR: Post-treatment correction is not supported with full output mode. "
+                    "Use --output-mode batch or disable --post-correct.",
+                    file=sys.stderr,
+                )
+                return None
+
             if (
                 post_provider is PostTreatmentTask.Provider.OPENAI
                 and not args.openai_api_key
@@ -865,7 +880,7 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
                     continue
                 overrides[env_key] = keyboard_name
                 continue
-            if dest in {"post_correct", "use_typing"}:
+            if dest in {"post_correct", "use_typing", "no_post"}:
                 overrides[env_key] = "true" if getattr(args, dest) else "false"
                 continue
             value = getattr(args, dest, None)
