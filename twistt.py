@@ -1947,6 +1947,21 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
         self._last_message_was_final = True
         self._last_transcript_time = time.perf_counter()
         self._last_event_start = -1
+        self._last_event_end = -1
+        # Sometimes we received a "is_final: True" message with LESS transcript than the delta before, followed by
+        # a new event with the previously removed text
+        # Example:
+        #    1/ transcript="ABCD"  is_final=False  start=20 duration = 3
+        #    2/ transcript="ABCDE" is_final=False  start=20 duration = 5
+        #    3/ transcript="ABC"   is_final=True   start=20 duration = 4  <== less text, less duration
+        #    4/  transcript="DE"    is_final=False  start=24 duration = 2  <== missing text added, new start
+        # To avoid having the removed part to be removed from the buffer then re-added, we track the start/end of
+        # the messages, and if the end is less than the previous end, we assume the text was removed and do nothing
+        # with the transcript and keep it in _delta_transcript, to use it after to prefix the given transcript
+        # On the example before, on step 3 we'll set "ABC" in _delta_transcript and on step 3 we'll prefix
+        # "DE" with _delta_transcript to have the correct transcript of "ABCDE"
+        self._delta_transcript = ""
+        self._just_skipped_delta = False
 
     @cached_property
     def ws_url(self) -> str:
@@ -1976,7 +1991,8 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
         self, raw, previous_transcriptions, current_transcription
     ) -> bool:
         event = json.loads(raw)
-        debug(f"[TRANS] [EVENT] {event=}")
+        if DEBUG_TO_STDOUT:
+            debug(f"[TRANS] [EVENT] {event=}")
 
         try:
             event_type = self.Event(event.get("type", ""))
@@ -1991,6 +2007,8 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
                 speech_final = bool(event.get("speech_final", False))
                 # doc says that speech_final being True implies is_final being True so we enforce it
                 is_final = speech_final or bool(event.get("is_final", False))
+                start = event.get("start")
+                end = start + event.get("duration")
                 now = time.perf_counter()
 
                 timeout_with_no_transcript = (
@@ -2001,24 +2019,39 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
                     speech_final = True
 
                 if transcript:
-                    self._last_transcript_time = now
+                    origina_transcript = transcript
                     if is_final and not speech_final:
-                        transcript += " "
-                    if self._last_message_was_final and event["start"] != self._last_event_start:
+                        origina_transcript += " "
+                    transcript = self._delta_transcript + origina_transcript
+                    self._last_transcript_time = now
+                    if self._last_message_was_final and start != self._last_event_start and not self._just_skipped_delta:
+                        if self._delta_transcript:
+                            self._delta_transcript = ""
+                            transcript = origina_transcript
                         if DEBUG_TO_STDOUT:
                             debug(
                                 f"[TRANS] [DELTA NEW #{self.seq_counter + 1}] {transcript=}"
                             )
                         await self._handle_new_delta(transcript, current_transcription)
                     else:
-                        if DEBUG_TO_STDOUT:
-                            debug(
-                                f"[TRANS] [DELTA UPDATE #{self.seq_counter}] {transcript=}"
+                        if is_final and start == self._last_event_start and end < self._last_event_end:
+                            if DEBUG_TO_STDOUT:
+                                debug(
+                                    f"[TRANS] [DELTA SKIP #{self._active_seq_num}] {origina_transcript=}"
+                                )
+                            self._delta_transcript += origina_transcript
+                            self._just_skipped_delta = True
+                        else:
+                            if DEBUG_TO_STDOUT:
+                                debug(
+                                    f"[TRANS] [DELTA UPDATE #{self._active_seq_num}] {transcript=}"
+                                )
+                            await self._handle_update_last_delta(
+                                transcript, current_transcription
                             )
-                        await self._handle_update_last_delta(
-                            transcript, current_transcription
-                        )
-                    self._last_event_start = event["start"]
+                            self._just_skipped_delta = False
+                    self._last_event_start = start
+                    self._last_event_end = end
 
                 if speech_final:
                     if (
@@ -2026,10 +2059,11 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
                         or not timeout_with_no_transcript
                     ):
                         if DEBUG_TO_STDOUT:
-                            debug(f"[TRANS] [SEGMENT DONE #{self.seq_counter}]")
+                            debug(f"[TRANS] [SEGMENT DONE #{self._active_seq_num}]")
                         await self._handle_done_segment(
                             None, previous_transcriptions, current_transcription
                         )
+                        self._delta_transcript = ""
 
                 if transcript or is_final:
                     self._last_message_was_final = is_final
@@ -2641,6 +2675,8 @@ class BufferTask:
                             corrected_text,
                             position_cursor_at=position_cursor_at,
                         )
+                # if DEBUG_TO_STDOUT:
+                #     debug(f"[BUFF] text={self.manager.text!r}")
 
         except CancelledError:
             pass
@@ -2683,7 +2719,7 @@ class IndicatorTask:
         if self.comm.is_post_treatment_active:
             state.append(IndicatorTask.State.POST_TREATMENT)
         if DEBUG_TO_STDOUT and state != self.last_state:
-            debug(f"[STATE UPDATE] {state=}")
+            debug(f"[STATE UPDATE] {[s.name for s in state] or None}")
             self.last_state = state
         return " (Twistting...)" if state else ""
 
