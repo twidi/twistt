@@ -12,15 +12,12 @@ This document collects potential enhancements, with a focus on working reliably 
 
 ## Input & Hotkeys
 
-- Microphone selection: `--input-device` and `--list-devices` (soundcard exposes devices). Good for complex setups.
 - More flexible hotkeys: allow `capslock`, `scrolllock`, `rightalt` for `--hotkey` (optional, documented). Still evdev‑based, so remains global.
 - USB pedals: `--input-event /dev/input/eventX` to listen to a specific device (foot pedal = perfect PTT).
 - Temporary “mode” modifier: holding `Alt` while dictating toggles “Ctrl+Shift+V paste” or “no paste”, depending on config.
 
 ## Output & Pasting
 
-- Preserve clipboard: `--preserve-clipboard` reads the current clipboard, replaces it to paste, then restores the previous content (avoid polluting clipboard).
-- Output strategy: `--paste-strategy paste|type`. In “type”, simulate keystrokes (slower but avoids clipboard; useful for fields that block paste).
 - Output templates: `--prefix` and `--suffix` to automatically wrap dictated text (quotes, backticks, Markdown brackets, etc.).
 - Mode presets for text/code/shell/email: `--mode text|code|shell|email` apply small local rules (no LLM), e.g. `shell` removes trailing punctuation and avoids capitals, `email` capitalizes sentences, `code` wraps in backticks or triple backticks.
 - Always terminal‑safe paste: `--always-shift-paste` forces Ctrl+Shift+V even without Shift pressed (more reliable on Wayland/terminals).
@@ -51,7 +48,6 @@ This document collects potential enhancements, with a focus on working reliably 
 ## Suggested Priority (Quick Wins)
 
 - `--preserve-clipboard`, `--newline-on-release`, `--always-shift-paste`
-- `--input-device` / `--list-devices`
 - `--undo-hotkey`
 - `--mode text|code|shell` (local rules, no LLM)
 - `--paste-strategy type` (clipboard‑free fallback)

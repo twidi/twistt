@@ -190,6 +190,27 @@ In those examples, `nova.env` and `gpt.env` being in `~/.config/twistt/`, they c
 
 Parent paths can be relative (resolved from the child config's directory) or absolute. Circular references are detected and will cause an error.
 
+### Post-Treatment Prompt File
+
+You can point Twistt to a reusable prompt file for post-treatment through any of the usual configuration layers:
+
+- Pass `--post-prompt-file /path/to/prompt` at launch. Relative paths are interpreted from the current working directory or, if not beginning with `./` or `../`, will also be searched for in the config directory `~/.config/twistt/`.
+- Export `TWISTT_POST_TREATMENT_PROMPT_FILE=/path/to/prompt` (or put it in a `.env`). Directories will be as above: current working directory, then config directory if not beginning with `./` or `../`.
+- Add `TWISTT_POST_TREATMENT_PROMPT_FILE=` entries in `~/.config/twistt/config.env` (or another file loaded via `--config`). Relative paths in these files resolve from the config’s directory, then fall back to the config directory.
+
+Shell expansion such as `~` is supported in all cases.
+When using non-absolute paths, you can include directories, like `prompts/file`, and it will resolve it as expected.
+
+When the filename has no extension, Twistt automatically tries with no extension, then `.txt` and `.prompt` variants. The first existing file is used; otherwise the error message lists every path that was checked. Empty files are rejected.
+
+Those options allow you to easily create and reuse prompts for different situations.
+
+```bash
+./twistt.py --prompt-file translate
+./twistt.py --prompt-file prose
+./twistt.py --prompt-file ""  # for no post-treatment, will ignore any prompt file in environment or config files
+```
+
 ## Usage
 
 ### Basic Usage

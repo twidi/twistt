@@ -34,6 +34,7 @@ from contextlib import asynccontextmanager, suppress
 from enum import Enum, StrEnum
 from datetime import datetime
 from functools import cached_property
+from itertools import product
 from pathlib import Path
 from typing import Mapping, NamedTuple, Optional
 
@@ -146,6 +147,7 @@ class CommandLineParser:
     _PROMPT_FOR_MICROPHONE = object()
     _PROMPT_FOR_KEYBOARD = object()
     _UNDEFINED = object()
+    _POST_PROMPT_FILE_ENV_KEY = f"{ENV_PREFIX}POST_TREATMENT_PROMPT_FILE"
     _DEST_TO_ENV = {
         "hotkey": f"{ENV_PREFIX}HOTKEY",
         "model": f"{ENV_PREFIX}MODEL",
@@ -156,7 +158,7 @@ class CommandLineParser:
         "deepgram_api_key": f"{ENV_PREFIX}DEEPGRAM_API_KEY",
         "ydotool_socket": f"{ENV_PREFIX}YDOTOOL_SOCKET",
         "post_prompt": f"{ENV_PREFIX}POST_TREATMENT_PROMPT",
-        "post_prompt_file": f"{ENV_PREFIX}POST_TREATMENT_PROMPT_FILE",
+        "post_prompt_file": _POST_PROMPT_FILE_ENV_KEY,
         "post_model": f"{ENV_PREFIX}POST_TREATMENT_MODEL",
         "post_provider": f"{ENV_PREFIX}POST_TREATMENT_PROVIDER",
         "post_correct": f"{ENV_PREFIX}POST_TREATMENT_CORRECT",
@@ -167,6 +169,8 @@ class CommandLineParser:
         "use_typing": f"{ENV_PREFIX}USE_TYPING",
         "keyboard": f"{ENV_PREFIX}KEYBOARD",
     }
+    _post_prompt_file: str = ""
+    _post_prompt_file_relative_dir: Path | None = None
 
     @classmethod
     def get_env(
@@ -322,6 +326,8 @@ class CommandLineParser:
 
     @classmethod
     def parse(cls) -> Optional[Config.App]:
+        cls.check_post_prompt_file_defining(Path.cwd())
+
         config_path_mandatory = False
         if config_path_str := cls._extract_config_path_from_argv():
             config_path_mandatory = True
@@ -371,9 +377,10 @@ class CommandLineParser:
 
   Environment variables (in order of priority):
   - Command-line arguments (highest priority)
-  - User config file (~/.config/twistt/config.env)
-  - Local .env file (script directory)
   - System environment variables (lowest priority)
+  - Local .env file (current working directory and script directory)
+  - Config file defined by the user (~/.config/twistt/config.env by default)
+  - Other config files loaded by the value of `TWISTT_PARENT_CONFIG` defined in config files
 
   Each option can be set via environment variable using the TWISTT_ prefix.
   *_API_KEY and YDOTOOL_SOCKET environment variables can also be set without the prefix.
@@ -418,6 +425,7 @@ class CommandLineParser:
 
         cls._create_arguments(parser, default)
         args = parser.parse_args()
+        provided_args = cls._get_args_defined_on_cli()
 
         provider: BaseTranscriptionTask.Provider
         try:
@@ -455,19 +463,68 @@ Please set DEEPGRAM_API_KEY or {prefix}DEEPGRAM_API_KEY environment variable or 
 
         post_prompt = None
         post_treatment_enabled = False
-        if args.post_prompt_file and args.post_prompt_file.strip():
-            prompt_file_path = Path(args.post_prompt_file)
-            if not prompt_file_path.exists():
+
+        if "post_prompt_file" in provided_args:
+            cls.check_post_prompt_file_defining(Path.cwd(), args.post_prompt_file)
+
+        if cls._post_prompt_file:
+            prompt_file_path = Path(cls._post_prompt_file).expanduser()
+            prompt_exts = [None, ".txt", ".prompt"]
+
+            if not prompt_file_path.is_absolute() and (
+                cls._post_prompt_file.startswith("./")
+                or cls._post_prompt_file.startswith("../")
+            ):
+                prompt_file_path = cls._post_prompt_file_relative_dir / prompt_file_path
+
+            if prompt_file_path.is_absolute():
+                prompt_file_path = prompt_file_path
+                if prompt_file_path.suffix:
+                    prompt_file_paths = [prompt_file_path]
+                else:
+                    prompt_file_paths = [
+                        prompt_file_path.with_suffix(ext)
+                        if ext is not None
+                        else prompt_file_path
+                        for ext in prompt_exts
+                    ]
+
+            else:
+                prompt_file_dirs = [cls._post_prompt_file_relative_dir, config_dir]
+                if prompt_file_path.suffix:
+                    prompt_file_paths = [
+                        dir / prompt_file_path for dir in prompt_file_dirs
+                    ]
+                else:
+                    prompt_file_paths = [
+                        dir / prompt_file_path.with_suffix(ext)
+                        if ext is not None
+                        else prompt_file_path
+                        for dir, ext in product(prompt_file_dirs, prompt_exts)
+                    ]
+
+            prompt_file_paths = [
+                path.resolve(strict=False) for path in prompt_file_paths
+            ]
+            try:
+                prompt_file_path = next(
+                    path
+                    for path in prompt_file_paths
+                    if path.exists() and path.is_file()
+                )
+            except StopIteration:
                 print(
-                    f"ERROR: Post-treatment prompt file not found: {args.post_prompt_file}",
+                    f"ERROR: Post-treatment prompt file{'s' if len(prompt_file_paths) > 1 else ''} "
+                    f"not found: {', '.join(path.as_posix() for path in prompt_file_paths)}",
                     file=sys.stderr,
                 )
                 return None
+
             try:
                 post_prompt = prompt_file_path.read_text(encoding="utf-8").strip()
                 if not post_prompt:
                     print(
-                        f"ERROR: Post-treatment prompt file is empty: {args.post_prompt_file}",
+                        f"ERROR: Post-treatment prompt file is empty: {prompt_file_path}",
                         file=sys.stderr,
                     )
                     return None
@@ -478,6 +535,7 @@ Please set DEEPGRAM_API_KEY or {prefix}DEEPGRAM_API_KEY environment variable or 
                     file=sys.stderr,
                 )
                 return None
+
         elif args.post_prompt:
             post_prompt = args.post_prompt
             post_treatment_enabled = True
@@ -622,10 +680,9 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
                 save_config_path = Path(stripped).expanduser()
             if save_config_path is None:
                 save_config_path = config_path
-            args_defined_on_cli = cls._get_args_defined_on_cli()
             cls.save_config(
                 args=args,
-                provided_args=args_defined_on_cli,
+                provided_args=provided_args,
                 keyboard=keyboard,
                 microphone=microphone,
                 config_path=save_config_path,
@@ -666,11 +723,22 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
         )
 
     @classmethod
+    def check_post_prompt_file_defining(
+        cls, directory: Path, path: str | None = None
+    ) -> str | None:
+        if path is None:
+            path = os.getenv(cls._POST_PROMPT_FILE_ENV_KEY, "")
+        cls._post_prompt_file = path.strip()
+        if cls._post_prompt_file:
+            cls._post_prompt_file_relative_dir = directory
+
+    @classmethod
     def _load_env_files(cls, config_path: Path | None = None) -> bool:
         # Check for env file in current directory first, then in script directory.
         for directory in {Path.cwd(), Path(__file__).parent}:
             if (env_path := (directory / ".env")).exists() and env_path.is_file():
                 load_dotenv(env_path, override=False)
+                cls.check_post_prompt_file_defining(env_path.parent)
 
         # Then check for config file, with inheritance
         if config_path.exists() and config_path.is_file():
@@ -705,11 +773,12 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
             return False
 
         load_dotenv(dotenv_path=config_path, override=False)
-        if not (
-            parent_value := (
-                (os.environ.pop(f"{cls.ENV_PREFIX}PARENT_CONFIG", None) or "").strip()
-            )
-        ):
+        cls.check_post_prompt_file_defining(config_path.parent)
+
+        parent_value = (
+            os.environ.pop(f"{cls.ENV_PREFIX}PARENT_CONFIG", None) or ""
+        ).strip()
+        if not parent_value:
             return True
 
         parent_path = Path(parent_value).expanduser()
@@ -2024,7 +2093,11 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
                         origina_transcript += " "
                     transcript = self._delta_transcript + origina_transcript
                     self._last_transcript_time = now
-                    if self._last_message_was_final and start != self._last_event_start and not self._just_skipped_delta:
+                    if (
+                        self._last_message_was_final
+                        and start != self._last_event_start
+                        and not self._just_skipped_delta
+                    ):
                         if self._delta_transcript:
                             self._delta_transcript = ""
                             transcript = origina_transcript
@@ -2034,7 +2107,11 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
                             )
                         await self._handle_new_delta(transcript, current_transcription)
                     else:
-                        if is_final and start == self._last_event_start and end < self._last_event_end:
+                        if (
+                            is_final
+                            and start == self._last_event_start
+                            and end < self._last_event_end
+                        ):
                             if DEBUG_TO_STDOUT:
                                 debug(
                                     f"[TRANS] [DELTA SKIP #{self._active_seq_num}] {origina_transcript=}"
