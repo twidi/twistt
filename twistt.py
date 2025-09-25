@@ -286,7 +286,14 @@ class CommandLineParser:
             "--post-correct",
             action=argparse.BooleanOptionalAction,
             default=default.get("POST_TREATMENT_CORRECT", cls._UNDEFINED),
-            help=f"Apply post-treatment by correcting already-pasted text in-place (env: {prefix}POST_TREATMENT_CORRECT)",
+            help=f"Apply post-treatment by correcting already-pasted text in-place "
+            f"(use -npc as an alias to --no-post-correct) (env: {prefix}POST_TREATMENT_CORRECT)",
+        )
+        parser.add_argument(
+            "-npc",
+            dest="post_correct",
+            action="store_false",
+            help=argparse.SUPPRESS,
         )
         parser.add_argument(
             "-np",
@@ -328,8 +335,15 @@ class CommandLineParser:
             default=default.get("USE_TYPING", cls._UNDEFINED),
             help=(
                 "Type ASCII characters one by one via ydotool (slower due to delays); copy/paste still handles non-ASCII"
+                f" (use -nt as an alias to --no-use-typing)"
                 f" (env: {prefix}USE_TYPING)"
             ),
+        )
+        parser.add_argument(
+            "-nt",
+            dest="use_typing",
+            action="store_false",
+            help=argparse.SUPPRESS,
         )
         parser.add_argument(
             "-kb",
