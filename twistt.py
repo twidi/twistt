@@ -130,7 +130,8 @@ class Config:
         silence_duration_ms: int
 
     class PostTreatment(NamedTuple):
-        enabled: bool
+        configured: bool
+        start_enabled: bool
         prompt: Optional[str]
         provider: PostTreatmentTask.Provider
         model: str
@@ -538,89 +539,86 @@ Please set DEEPGRAM_API_KEY or {prefix}DEEPGRAM_API_KEY environment variable or 
             return None
 
         post_prompt = None
-        post_treatment_enabled = False
+        post_treatment_configured = False
 
-        if not bool(args.no_post):
-            if "post_prompt_file" in provided_args:
-                cls.check_post_prompt_file_defining(Path.cwd(), args.post_prompt_file)
+        if "post_prompt_file" in provided_args:
+            cls.check_post_prompt_file_defining(Path.cwd(), args.post_prompt_file)
 
-            if cls._post_prompt_file:
-                prompt_file_path = Path(cls._post_prompt_file).expanduser()
-                prompt_exts = [None, ".txt", ".prompt"]
+        if cls._post_prompt_file:
+            prompt_file_path = Path(cls._post_prompt_file).expanduser()
+            prompt_exts = [None, ".txt", ".prompt"]
 
-                if not prompt_file_path.is_absolute() and (
-                    cls._post_prompt_file.startswith("./")
-                    or cls._post_prompt_file.startswith("../")
-                ):
-                    prompt_file_path = (
-                        cls._post_prompt_file_relative_dir / prompt_file_path
-                    )
+            if not prompt_file_path.is_absolute() and (
+                cls._post_prompt_file.startswith("./")
+                or cls._post_prompt_file.startswith("../")
+            ):
+                prompt_file_path = cls._post_prompt_file_relative_dir / prompt_file_path
 
-                if prompt_file_path.is_absolute():
-                    prompt_file_path = prompt_file_path
-                    if prompt_file_path.suffix:
-                        prompt_file_paths = [prompt_file_path]
-                    else:
-                        prompt_file_paths = [
-                            prompt_file_path.with_suffix(ext)
-                            if ext is not None
-                            else prompt_file_path
-                            for ext in prompt_exts
-                        ]
-
+            if prompt_file_path.is_absolute():
+                prompt_file_path = prompt_file_path
+                if prompt_file_path.suffix:
+                    prompt_file_paths = [prompt_file_path]
                 else:
-                    prompt_file_dirs = [
-                        cls._post_prompt_file_relative_dir,
-                        config_dir,
+                    prompt_file_paths = [
+                        prompt_file_path.with_suffix(ext)
+                        if ext is not None
+                        else prompt_file_path
+                        for ext in prompt_exts
                     ]
-                    if prompt_file_path.suffix:
-                        prompt_file_paths = [
-                            dir / prompt_file_path for dir in prompt_file_dirs
-                        ]
-                    else:
-                        prompt_file_paths = [
-                            dir / prompt_file_path.with_suffix(ext)
-                            if ext is not None
-                            else prompt_file_path
-                            for dir, ext in product(prompt_file_dirs, prompt_exts)
-                        ]
 
-                prompt_file_paths = [
-                    path.resolve(strict=False) for path in prompt_file_paths
+            else:
+                prompt_file_dirs = [
+                    cls._post_prompt_file_relative_dir,
+                    config_dir,
                 ]
-                try:
-                    prompt_file_path = next(
-                        path
-                        for path in prompt_file_paths
-                        if path.exists() and path.is_file()
-                    )
-                except StopIteration:
+                if prompt_file_path.suffix:
+                    prompt_file_paths = [
+                        dir / prompt_file_path for dir in prompt_file_dirs
+                    ]
+                else:
+                    prompt_file_paths = [
+                        dir / prompt_file_path.with_suffix(ext)
+                        if ext is not None
+                        else prompt_file_path
+                        for dir, ext in product(prompt_file_dirs, prompt_exts)
+                    ]
+
+            prompt_file_paths = [
+                path.resolve(strict=False) for path in prompt_file_paths
+            ]
+            try:
+                prompt_file_path = next(
+                    path
+                    for path in prompt_file_paths
+                    if path.exists() and path.is_file()
+                )
+            except StopIteration:
+                print(
+                    f"ERROR: Post-treatment prompt file{'s' if len(prompt_file_paths) > 1 else ''} "
+                    f"not found: {', '.join(path.as_posix() for path in prompt_file_paths)}",
+                    file=sys.stderr,
+                )
+                return None
+
+            try:
+                post_prompt = prompt_file_path.read_text(encoding="utf-8").strip()
+                if not post_prompt:
                     print(
-                        f"ERROR: Post-treatment prompt file{'s' if len(prompt_file_paths) > 1 else ''} "
-                        f"not found: {', '.join(path.as_posix() for path in prompt_file_paths)}",
+                        f"ERROR: Post-treatment prompt file is empty: {prompt_file_path}",
                         file=sys.stderr,
                     )
                     return None
+                post_treatment_configured = True
+            except Exception as exc:
+                print(
+                    f"ERROR: Unable to read post-treatment prompt file: {exc}",
+                    file=sys.stderr,
+                )
+                return None
 
-                try:
-                    post_prompt = prompt_file_path.read_text(encoding="utf-8").strip()
-                    if not post_prompt:
-                        print(
-                            f"ERROR: Post-treatment prompt file is empty: {prompt_file_path}",
-                            file=sys.stderr,
-                        )
-                        return None
-                    post_treatment_enabled = True
-                except Exception as exc:
-                    print(
-                        f"ERROR: Unable to read post-treatment prompt file: {exc}",
-                        file=sys.stderr,
-                    )
-                    return None
-
-            elif args.post_prompt:
-                post_prompt = args.post_prompt
-                post_treatment_enabled = True
+        elif args.post_prompt:
+            post_prompt = args.post_prompt
+            post_treatment_configured = True
 
         output_enabled = True
         if args.output_mode == "none":
@@ -630,14 +628,13 @@ Please set DEEPGRAM_API_KEY or {prefix}DEEPGRAM_API_KEY environment variable or 
             output_mode = OutputMode(args.output_mode)
         post_provider = PostTreatmentTask.Provider(args.post_provider)
 
-        if post_treatment_enabled:
+        if post_treatment_configured:
             if args.post_correct and output_mode.is_full:
                 print(
-                    "ERROR: Post-treatment correction is not supported with full output mode. "
-                    "Use --output-mode batch or disable --post-correct",
-                    file=sys.stderr,
+                    "WARNING: Post-treatment correction is not supported with full output mode. "
+                    "--post-correct (-pc) option and TWISTT_POST_TREATMENT_CORRECT environment variable are ignored in this mode."
                 )
-                return None
+                args.post_correct = False
 
             if (
                 post_provider is PostTreatmentTask.Provider.OPENAI
@@ -728,9 +725,11 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
             print("Language: Auto-detect")
         if args.gain != 1.0:
             print(f"Audio gain: {args.gain}x")
-        if post_treatment_enabled:
+        post_treatment_enabled = False
+        if post_treatment_configured:
+            post_treatment_enabled = not args.no_post
             print(
-                f'Post-treatment: Enabled via "{args.post_model}" from "{post_provider.value}"'
+                f'Post-treatment: Configured ({"" if post_treatment_enabled else "not "}activated) via "{args.post_model}" from "{post_provider.value}"'
             )
             if post_prompt:
                 preview = (
@@ -796,7 +795,8 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
                 silence_duration_ms=int(args.silence_duration),
             ),
             post=Config.PostTreatment(
-                enabled=post_treatment_enabled,
+                configured=post_treatment_configured,
+                start_enabled=post_treatment_enabled,
                 prompt=post_prompt,
                 provider=post_provider,
                 model=args.post_model,
@@ -805,7 +805,7 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
                 else args.openrouter_api_key
                 if post_provider is PostTreatmentTask.Provider.OPENROUTER
                 else args.cerebras_api_key,
-                correct=args.post_correct and post_treatment_enabled,
+                correct=args.post_correct and post_treatment_configured,
             ),
             output=Config.Output(
                 mode=output_mode, use_typing=args.use_typing, active=output_enabled
@@ -1167,8 +1167,9 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
 
 
 class Comm:
-    def __init__(self, buffer_active: bool = True):
+    def __init__(self, post_enabled: bool = True, buffer_active: bool = True):
         self._audio_chunks = janus.Queue()
+        self._is_post_enabled = post_enabled
         self._post_commands = Queue()
         self._buffer_commands = PriorityQueue()
         self._keyboard_commands = Queue()
@@ -1189,6 +1190,10 @@ class Comm:
     @property
     def is_buffer_active(self) -> bool:
         return self._is_buffer_active
+
+    @property
+    def is_post_enabled(self) -> bool:
+        return self._is_post_enabled
 
     @property
     def has_audio_chunks(self):
@@ -1355,11 +1360,10 @@ class Comm:
     def is_transcribing(self):
         return self.is_recording or self.is_speech_active
 
-    async def shutdown(self, post_enabled: bool):
+    async def shutdown(self):
         self._shutting_down.set()
         self.send_display_command(TerminalDisplayTask.Commands.Shutdown())
-        if post_enabled:
-            await self.queue_post_command(PostTreatmentTask.Commands.Shutdown())
+        await self.queue_post_command(PostTreatmentTask.Commands.Shutdown())
         await self.queue_buffer_command(BufferTask.Commands.Shutdown())
         await self.queue_keyboard_command(OutputTask.Commands.Shutdown())
 
@@ -1816,7 +1820,7 @@ class BaseTranscriptionTask:
                 # we'll lose the indicator, so we mark the post-treatment as active right now if we have some
                 if (
                     self.config.output.mode.is_full
-                    and self.config.post.enabled
+                    and self.comm.is_post_enabled
                     and previous_transcriptions
                 ):
                     self.comm.toggle_post_treatment_active(True)
@@ -1831,7 +1835,7 @@ class BaseTranscriptionTask:
 
             if self.config.output.mode.is_full:
                 full_text = "".join(previous_transcriptions)
-                if self.config.post.enabled:
+                if self.comm.is_post_enabled:
                     await self.comm.queue_post_command(
                         PostTreatmentTask.Commands.ProcessFullText(
                             text=full_text,
@@ -1914,7 +1918,7 @@ class BaseTranscriptionTask:
         if not self.STREAM_DELTAS:
             return False
         if self.config.output.mode.is_batch:
-            return not self.config.post.enabled or self.config.post.correct
+            return not self.comm.is_post_enabled or self.config.post.correct
         return False
 
     def _current_display_text(self, current_transcription: list[str]) -> str:
@@ -2012,7 +2016,7 @@ class BaseTranscriptionTask:
         previous_text = "".join(previous_transcriptions)
 
         if self.config.output.mode.is_batch:
-            if self.config.post.enabled:
+            if self.comm.is_post_enabled:
                 if self.config.post.correct:
                     seq = await self._upsert_buffer_segment(final_text)
                     await self.comm.queue_post_command(
@@ -2039,7 +2043,7 @@ class BaseTranscriptionTask:
         else:
             # in full mode, the command are created later, and because we mark the end of "speech_active" here
             # we'll lose the indicator, so we mark the post-treatment as active right now if we have some
-            if self.config.post.enabled and final_text:
+            if self.comm.is_post_enabled and final_text:
                 self.comm.toggle_post_treatment_active(True)
 
         previous_transcriptions.append(final_text)
@@ -2374,7 +2378,9 @@ ${current_text}
         self.client = self._build_client()
         self._buffer_seq_counter = 1_000_000
         self._use_post_correction = (
-            self.config.post.correct and self.config.output.mode.is_batch
+            self.comm.is_post_enabled
+            and self.config.post.correct
+            and self.config.output.mode.is_batch
         )
         self._post_display_text = ""
 
@@ -2384,8 +2390,6 @@ ${current_text}
         return seq
 
     async def run(self):
-        if not self.config.post.enabled:
-            return
         try:
             while not self.comm.is_shutting_down:
                 async with self.comm.dequeue_post_command() as cmd:
@@ -2393,10 +2397,14 @@ ${current_text}
                         case self.Commands.Shutdown():
                             break
 
-                        case self.Commands.ProcessSegment():
+                        case self.Commands.ProcessSegment() if (
+                            self.comm.is_post_enabled
+                        ):
                             await self._handle_segment(cmd)
 
-                        case self.Commands.ProcessFullText():
+                        case self.Commands.ProcessFullText() if (
+                            self.comm.is_post_enabled
+                        ):
                             await self._handle_full_text(cmd)
 
         except CancelledError:
@@ -2987,7 +2995,7 @@ class TerminalDisplayTask:
 
     def __init__(self, comm: Comm, config: Config.App):
         self.comm = comm
-        self.post_enabled = config.post.enabled
+        self.post_enabled = config.post.start_enabled
         self.console = Console()
         self.live: Live | None = None
         self.completed_sections: list[Group] = []
@@ -3268,7 +3276,10 @@ async def main_async():
     if app_config is None:
         return
 
-    comm = Comm(buffer_active=app_config.output.active)
+    comm = Comm(
+        post_enabled=app_config.post.start_enabled,
+        buffer_active=app_config.output.active,
+    )
     try:
         async with asyncio.TaskGroup() as tg:
             hotkey_task = HotKeyTask(comm, app_config)
@@ -3293,7 +3304,7 @@ async def main_async():
             tg.create_task(transcription_task.run())
             tg.create_task(indicator_task.run())
 
-            if app_config.post.enabled:
+            if app_config.post.configured:
                 post_task = PostTreatmentTask(comm, app_config)
                 tg.create_task(post_task.run())
 
@@ -3303,7 +3314,7 @@ async def main_async():
         print(f"\nError in tasks: {eg.exceptions}")
 
     finally:
-        await comm.shutdown(app_config.post.enabled)
+        await comm.shutdown()
         with suppress(Exception):
             app_config.hotkey.device.close()
 
