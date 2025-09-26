@@ -13,6 +13,7 @@
 #     "python-ydotool",
 #     "openai",
 #     "janus",
+#     "rich",
 # ]
 # ///
 
@@ -50,6 +51,10 @@ from platformdirs import user_config_dir
 import pyperclipfix as pyperclip
 import evdev
 from evdev import InputDevice, categorize, ecodes
+from rich.console import Console, Group
+from rich.live import Live
+from rich.rule import Rule
+from rich.text import Text
 from pydotool import (
     KEY_BACKSPACE,
     KEY_DEFAULT_DELAY,
@@ -1146,6 +1151,7 @@ class Comm:
         self._post_commands = Queue()
         self._buffer_commands = PriorityQueue()
         self._keyboard_commands = Queue()
+        self._display_commands: Queue["TerminalDisplayTask.Commands.Command"] = Queue()
         self._is_shift_pressed = False
         self._recording = Event()
         self._is_speech_active = False
@@ -1233,15 +1239,43 @@ class Comm:
     def toggle_shift_pressed(self, flag: bool):
         self._is_shift_pressed = flag
 
+    def send_display_command(
+        self, cmd: "TerminalDisplayTask.Commands.Command"
+    ) -> None:
+        if not OUTPUT_TO_STDOUT:
+            return
+        try:
+            self._display_commands.put_nowait(cmd)
+        except RuntimeError:
+            pass
+
+    async def dequeue_display_command(self) -> "TerminalDisplayTask.Commands.Command":
+        return await self._display_commands.get()
+
+    def _send_speech_state_command(self):
+        self.send_display_command(
+            TerminalDisplayTask.Commands.UpdateSpeechState(
+                recording=self.is_recording,
+                speaking=self._is_speech_active,
+            )
+        )
+
     @property
     def is_recording(self):
         return self._recording.is_set()
 
     def toggle_recording(self, flag: bool):
+        was_recording = self._recording.is_set()
+        if flag == was_recording:
+            return
         if flag:
             self._recording.set()
+            self.send_display_command(
+                TerminalDisplayTask.Commands.SessionStart(timestamp=datetime.now())
+            )
         else:
             self._recording.clear()
+        self._send_speech_state_command()
 
     def wait_for_recording_task(self):
         return create_task(self._recording.wait())
@@ -1251,7 +1285,10 @@ class Comm:
         return self._is_speech_active
 
     def toggle_speech_active(self, flag: bool):
+        if self._is_speech_active == flag:
+            return
         self._is_speech_active = flag
+        self._send_speech_state_command()
 
     @property
     def is_keyboard_busy(self):
@@ -1265,7 +1302,12 @@ class Comm:
         return self._is_post_treatment_active
 
     def toggle_post_treatment_active(self, flag: bool):
+        if self._is_post_treatment_active == flag:
+            return
         self._is_post_treatment_active = flag
+        self.send_display_command(
+            TerminalDisplayTask.Commands.UpdatePostState(active=flag)
+        )
 
     @property
     def is_indicator_active(self):
@@ -1290,6 +1332,7 @@ class Comm:
 
     async def shutdown(self, post_enabled: bool):
         self._shutting_down.set()
+        self.send_display_command(TerminalDisplayTask.Commands.Shutdown())
         if post_enabled:
             await self.queue_post_command(PostTreatmentTask.Commands.Shutdown())
         await self.queue_buffer_command(BufferTask.Commands.Shutdown())
@@ -1531,7 +1574,8 @@ class HotKeyTask:
                                     hotkey_pressed = True
                                     active_hotkey = scancode
                                 self.comm.toggle_recording(True)
-                                print(f"\n--- {datetime.now()} ---")
+                                if not OUTPUT_TO_STDOUT:
+                                    print(f"\n--- {datetime.now()} ---")
 
                             case self.KEY_UP if hotkey_pressed and not is_toggle_mode:
                                 last_release_time[scancode] = current_time
@@ -1658,6 +1702,7 @@ class BaseTranscriptionTask:
         self._ws_retry_attempts = 0
         self._last_ws_failure_at = 0.0
         self._has_transcript_since_done_segment = False
+        self._display_previous_text = ""
 
     @cached_property
     def ws_url(self) -> str:
@@ -1692,6 +1737,7 @@ class BaseTranscriptionTask:
                 break
             if not self.comm.is_recording:
                 continue
+            self._display_previous_text = ""
             previous_transcriptions: list[str] = []
             current_transcription: list[str] = []
             try:
@@ -1752,7 +1798,8 @@ class BaseTranscriptionTask:
             finally:
                 self.comm.toggle_speech_active(False)
                 self.comm.empty_audio_chunks()
-                print("")
+                if not OUTPUT_TO_STDOUT:
+                    print("---")
 
             if not previous_transcriptions:
                 continue
@@ -1845,6 +1892,18 @@ class BaseTranscriptionTask:
             return not self.config.post.enabled or self.config.post.correct
         return False
 
+    def _current_display_text(self, current_transcription: list[str]) -> str:
+        return (
+            self._display_previous_text + "".join(current_transcription)
+        ).strip()
+
+    def _send_speech_display(self, text: str, final: bool):
+        if not OUTPUT_TO_STDOUT:
+            return
+        self.comm.send_display_command(
+            TerminalDisplayTask.Commands.UpdateSpeechText(text=text, final=final)
+        )
+
     async def _upsert_buffer_segment(self, text: str) -> int:
         seq = self._active_seq_num
         if seq is None:
@@ -1877,8 +1936,9 @@ class BaseTranscriptionTask:
         self.comm.toggle_speech_active(True)
         self._has_transcript_since_done_segment = True
         current_transcription.append(text)
-        if OUTPUT_TO_STDOUT:
-            print(text, end="", flush=True)
+        self._send_speech_display(
+            self._current_display_text(current_transcription), False
+        )
         if not self._should_output_deltas():
             return
         self._chars_since_stream += len(text)
@@ -1899,8 +1959,9 @@ class BaseTranscriptionTask:
             current_transcription[-1] = text
         else:
             current_transcription.append(text)
-        if OUTPUT_TO_STDOUT:
-            print("\n", text, end="", flush=True)
+        self._send_speech_display(
+            self._current_display_text(current_transcription), False
+        )
         if not self._should_output_deltas():
             return
         segment_text = "".join(current_transcription)
@@ -1915,14 +1976,14 @@ class BaseTranscriptionTask:
         self._has_transcript_since_done_segment = False
         if text is None:
             text = "".join(current_transcription)
+        display_text = (self._display_previous_text + text).strip()
         if not text:
             current_transcription.clear()
             self.comm.toggle_speech_active(False)
             self._reset_active_sequence()
+            if display_text:
+                self._send_speech_display(display_text, True)
             return
-
-        if OUTPUT_TO_STDOUT:
-            print(" ", end="", flush=True)
         final_text = text + " "
 
         previous_text = "".join(previous_transcriptions)
@@ -1959,6 +2020,8 @@ class BaseTranscriptionTask:
                 self.comm.toggle_post_treatment_active(True)
 
         previous_transcriptions.append(final_text)
+        self._display_previous_text = "".join(previous_transcriptions)
+        self._send_speech_display(display_text, True)
 
         current_transcription.clear()
         self.comm.toggle_speech_active(False)
@@ -2290,6 +2353,7 @@ ${current_text}
         self._use_post_correction = (
             self.config.post.correct and self.config.output.mode.is_batch
         )
+        self._post_display_text = ""
 
     def _next_buffer_seq(self) -> int:
         seq = self._buffer_seq_counter
@@ -2316,12 +2380,18 @@ ${current_text}
             pass
 
     async def _handle_segment(self, cmd: "PostTreatmentTask.Commands.ProcessSegment"):
+        if not cmd.previous_text.strip():
+            self._post_display_text = ""
+        base = self._post_display_text
         chunks = []
+        display_chunks: list[str] = []
         async for piece in self._post_process(
             cmd.text, cmd.previous_text, cmd.stream_output
         ):
             if piece is None:
                 break
+            display_chunks.append(piece)
+            self._send_post_display((base + "".join(display_chunks)).strip(), False)
             if self._use_post_correction:
                 chunks.append(piece)
             else:
@@ -2338,6 +2408,7 @@ ${current_text}
                     seq_num=cmd.seq_num, corrected_text=corrected
                 )
             )
+            final_piece = "".join(chunks)
         else:
             # Add trailing space
             await self.comm.queue_buffer_command(
@@ -2346,14 +2417,23 @@ ${current_text}
                     text=" ",
                 )
             )
+            final_piece = "".join(display_chunks) or cmd.text.strip()
+
+        final_display = (base + (final_piece or "")).strip()
+        self._send_post_display(final_display, True)
+        self._post_display_text = (final_display + " ") if final_display else base
 
     async def _handle_full_text(
         self, cmd: "PostTreatmentTask.Commands.ProcessFullText"
     ):
+        self._post_display_text = ""
         chunks = []
+        display_chunks: list[str] = []
         async for piece in self._post_process(cmd.text, "", cmd.stream_output):
             if piece is None:
                 break
+            display_chunks.append(piece)
+            self._send_post_display("".join(display_chunks).strip(), False)
             if self._use_post_correction:
                 chunks.append(piece)
             else:
@@ -2363,6 +2443,16 @@ ${current_text}
                         text=piece,
                     )
                 )
+        final_piece = "".join(display_chunks) or cmd.text.strip()
+        self._send_post_display(final_piece, True)
+        self._post_display_text = (final_piece + " ") if final_piece else ""
+
+    def _send_post_display(self, text: str, final: bool):
+        if not OUTPUT_TO_STDOUT:
+            return
+        self.comm.send_display_command(
+            TerminalDisplayTask.Commands.UpdatePostText(text=text, final=final)
+        )
 
     async def _post_process(
         self,
@@ -2424,15 +2514,11 @@ ${current_text}
                     file=sys.stderr,
                 )
             else:
-                if stream_output and OUTPUT_TO_STDOUT:
-                    print("\n[Post-treatment] ", end="", flush=True)
                 try:
                     async for chunk in stream:
                         delta = chunk.choices[0].delta.content
                         if not delta:
                             continue
-                        if stream_output and OUTPUT_TO_STDOUT:
-                            print(delta, end="", flush=True)
                         token_buffer.append(delta)
                         token_count += 1
                         if stream_output and (
@@ -2461,8 +2547,6 @@ ${current_text}
                     if token_buffer:
                         yield "".join(token_buffer)
                         has_emitted_piece = True
-                    if stream_output and OUTPUT_TO_STDOUT:
-                        print("")
                     yield None
                     return
                 finally:
@@ -2845,6 +2929,238 @@ class BufferTask:
             pass
 
 
+class TerminalDisplayTask:
+    class Commands:
+        class SessionStart(NamedTuple):
+            timestamp: datetime
+
+        class UpdateSpeechState(NamedTuple):
+            recording: bool
+            speaking: bool
+
+        class UpdateSpeechText(NamedTuple):
+            text: str
+            final: bool
+
+        class UpdatePostState(NamedTuple):
+            active: bool
+
+        class UpdatePostText(NamedTuple):
+            text: str
+            final: bool
+
+        class Shutdown(NamedTuple):
+            pass
+
+        Command = (
+            SessionStart
+            | UpdateSpeechState
+            | UpdateSpeechText
+            | UpdatePostState
+            | UpdatePostText
+            | Shutdown
+        )
+
+    def __init__(self, comm: Comm, config: Config.App):
+        self.comm = comm
+        self.post_enabled = config.post.enabled
+        self.console = Console()
+        self.live: Live | None = None
+        self.completed_sections: list[Group] = []
+        self.session_active = False
+        self.session_count = 0
+        self.current_timestamp: datetime | None = None
+        self.speech_text = ""
+        self.speech_done = False
+        self.is_recording = False
+        self.is_speaking = False
+        self.post_text = ""
+        self.post_done = not self.post_enabled
+        self.is_post_active = False
+
+    async def run(self):
+        try:
+            with Live(
+                self._renderable(),
+                console=self.console,
+                refresh_per_second=8,
+                auto_refresh=False,
+                transient=False,
+            ) as live:
+                self.live = live
+                while True:
+                    cmd = await self.comm.dequeue_display_command()
+                    should_continue = await self._handle_cmd(cmd)
+                    self._refresh()
+                    if not should_continue:
+                        break
+        except CancelledError:
+            pass
+        finally:
+            self.live = None
+
+    async def _handle_cmd(self, cmd: "TerminalDisplayTask.Commands.Command") -> bool:
+        match cmd:
+            case TerminalDisplayTask.Commands.SessionStart(timestamp=timestamp):
+                self._start_new_session(timestamp)
+            case TerminalDisplayTask.Commands.UpdateSpeechState(
+                recording=recording, speaking=speaking
+            ):
+                self.is_recording = recording
+                self.is_speaking = speaking
+                if self.session_active and not (self.is_recording or self.is_speaking):
+                    self.speech_done = bool(self.speech_text)
+                self._maybe_finalize()
+            case TerminalDisplayTask.Commands.UpdateSpeechText(
+                text=text, final=final
+            ):
+                if not self.session_active:
+                    self._start_new_session(None)
+                self.speech_text = text
+                if final:
+                    self.speech_done = True
+                elif self.speech_text:
+                    self.speech_done = False
+                self._maybe_finalize()
+            case TerminalDisplayTask.Commands.UpdatePostState(active=active):
+                self.is_post_active = active
+                if self.is_post_active:
+                    self.post_done = False
+                else:
+                    if not self.post_enabled:
+                        self.post_done = True
+                    elif self.post_text or not self.session_active:
+                        self.post_done = True
+                self._maybe_finalize()
+            case TerminalDisplayTask.Commands.UpdatePostText(
+                text=text, final=final
+            ):
+                self.post_text = text
+                if final:
+                    self.post_done = True
+                elif self.post_text:
+                    self.post_done = False
+                self._maybe_finalize()
+            case TerminalDisplayTask.Commands.Shutdown():
+                self._finalize_session(force=True)
+                return False
+        return True
+
+    def _start_new_session(self, timestamp: datetime | None):
+        if self.session_active:
+            self._finalize_session(force=True)
+        self.session_active = True
+        self.session_count += 1
+        self.current_timestamp = timestamp or datetime.now()
+        self.speech_text = ""
+        self.speech_done = False
+        self.is_recording = True
+        self.is_speaking = False
+        self.post_text = ""
+        self.post_done = not self.post_enabled
+        self.is_post_active = False
+
+    def _refresh(self):
+        if self.live is None:
+            return
+        self.live.update(self._renderable(), refresh=True)
+
+    def _renderable(self):
+        sections = list(self.completed_sections)
+        if self.session_active:
+            sections.append(self._build_section(final=False))
+        if not sections:
+            return Text("Waiting for speech...", style="dim")
+        return Group(*sections)
+
+    def _maybe_finalize(self):
+        if self._session_finished():
+            self._finalize_session()
+
+    def _session_finished(self) -> bool:
+        if not self.session_active:
+            return False
+        if not self.speech_text:
+            return False
+        speech_ready = self.speech_done and not self.is_recording and not self.is_speaking
+        if not speech_ready:
+            return False
+        if not self.post_enabled:
+            return True
+        return self.post_done or (not self.is_post_active and self.post_text == "")
+
+    def _finalize_session(self, force: bool = False):
+        if not self.session_active and not force:
+            return
+        if force and not (self.speech_text or self.post_text):
+            self.session_active = False
+            self.current_timestamp = None
+            self.speech_text = ""
+            self.speech_done = False
+            self.is_recording = False
+            self.is_speaking = False
+            self.post_text = ""
+            self.post_done = not self.post_enabled
+            self.is_post_active = False
+            return
+        section = self._build_section(final=True)
+        self.completed_sections.append(section)
+        self.session_active = False
+        self.current_timestamp = None
+        self.speech_text = ""
+        self.speech_done = False
+        self.is_recording = False
+        self.is_speaking = False
+        self.post_text = ""
+        self.post_done = not self.post_enabled
+        self.is_post_active = False
+
+    def _build_section(self, *, final: bool) -> Group:
+        ts = self.current_timestamp or datetime.now()
+        title = ts.strftime("%Y-%m-%d %H:%M:%S")
+        text = Text(overflow="fold", no_wrap=False)
+        text.append("Speech: ", style="bold")
+        text.append(self._speech_state_label(final=final))
+        text.append("\n")
+        if self.speech_text.strip():
+            text.append(self.speech_text.strip())
+        else:
+            text.append("...", style="dim")
+
+        text.append("\n\n")
+        text.append("Post treatment: ", style="bold")
+        text.append(self._post_state_label(final=final))
+        if self.post_enabled:
+            text.append("\n")
+            if self.post_text.strip():
+                text.append(self.post_text.strip())
+            else:
+                text.append("...", style="dim")
+
+        rule_style = "cyan" if final else "green"
+        top = Rule(title, style=rule_style)
+        bottom = Rule(style=rule_style)
+        return Group(top, text, bottom, Text())
+
+    def _speech_state_label(self, *, final: bool) -> str:
+        if self.is_recording and not final:
+            return "Recording"
+        if self.is_speaking and not final:
+            return "Speaking"
+        if self.speech_text:
+            return "Done" if self.speech_done else "Idle"
+        return "Idle"
+
+    def _post_state_label(self, *, final: bool) -> str:
+        if not self.post_enabled:
+            return "No"
+        if self.is_post_active and not final:
+            return "Running"
+        if self.post_text:
+            return "Done" if self.post_done else "Waiting"
+        return "Waiting"
+
+
 class IndicatorTask:
     SEQ_NUM = 2_000_000_000
     UPDATE_INTERVAL = 0.2
@@ -2868,8 +3184,11 @@ class IndicatorTask:
             state.append(IndicatorTask.State.SPEAKING)
         if self.comm.is_post_treatment_active:
             state.append(IndicatorTask.State.POST_TREATMENT)
-        if state != self.last_state:
-            print(f"State: {', '.join([s.name.replace('_', ' ').title() for s in state]) or 'Idle'}", file=sys.stderr)
+        if DEBUG_TO_STDOUT and state != self.last_state:
+            print(
+                f"State: {', '.join([s.name.replace('_', ' ').title() for s in state]) or 'Idle'}",
+                file=sys.stderr,
+            )
             self.last_state = state
         return " (Twistting...)" if state else ""
 
@@ -2941,6 +3260,9 @@ async def main_async():
                 else DeepgramTranscriptionTask
             )(comm, app_config)
             indicator_task = IndicatorTask(comm)
+            if OUTPUT_TO_STDOUT:
+                terminal_display_task = TerminalDisplayTask(comm, app_config)
+                tg.create_task(terminal_display_task.run())
 
             tg.create_task(hotkey_task.run())
             tg.create_task(capture_task.run())

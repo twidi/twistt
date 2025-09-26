@@ -9,3 +9,4 @@ platformdirs
 python-ydotool
 openai
 janus
+rich
