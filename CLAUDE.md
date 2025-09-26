@@ -60,9 +60,10 @@ Provider-specific API keys:
 
 ## Output Modes
 
-The application supports two output modes (`--output-mode` or `TWISTT_OUTPUT_MODE`):
+The application supports three output modes (`--output-mode` or `TWISTT_OUTPUT_MODE`):
 - **batch** (default): Processes and pastes text incrementally as segments are detected by the API. Each segment maintains context from previous segments when using post-treatment.
 - **full**: Accumulates all text while the key is held and processes/pastes only when released. Post-treatment runs without context between sessions.
+- **none**: Disables all paste/typing output. Transcription and post-treatment still execute (BufferTask simply discards insert/correction commands), keeping terminal feedback available without touching the cursor.
 
 Additionally, a post-correction mode (`--post-correct` or `TWISTT_POST_CORRECT`) pastes raw transcription immediately and, once the post-treatment result is fully available, edits the pasted text in-place using only arrow keys and backspace to minimize disruption.
 
@@ -75,5 +76,5 @@ No formal test suite exists. Testing is manual:
 4. Test post-treatment with different prompts, models, and providers
 5. Verify post-treatment maintains transcription order
 6. Test provider switching (OpenAI, Cerebras, OpenRouter) for post-treatment
-7. Test output modes (batch vs full) with and without post-treatment
+7. Test output modes (batch vs full vs none) with and without post-treatment
 8. Test toggle mode activation/deactivation with same hotkey when multiple hotkeys are configured

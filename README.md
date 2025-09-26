@@ -162,7 +162,7 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 | `-np, --no-post`                               | `TWISTT_POST_TREATMENT_DISABLED`                    | false                         | Disable post-treatment regardless of prompts or files                                                                                             |
 | `-kcb, --cerebras-api-key`                     | `TWISTT_CEREBRAS_API_KEY` or `CEREBRAS_API_KEY`     | -                             | Cerebras API key                                                                                                                                  |
 | `-kor, --openrouter-api-key`                   | `TWISTT_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` | -                             | OpenRouter API key                                                                                                                                |
-| `-o, --output-mode`                            | `TWISTT_OUTPUT_MODE`                                | batch                         | Output mode: batch (incremental) or full (complete on release)                                                                                    |
+| `-o, --output-mode, -no, --no-output-mode`     | `TWISTT_OUTPUT_MODE`                                | batch                         | Output mode: batch (incremental), full (complete on release), or none (disabled)                                                                  |
 | `-t, --use-typing, -nt, --no-use-typing`       | `TWISTT_USE_TYPING`                                 | false                         | Type ASCII characters directly (slower); clipboard still handles non-ASCII. Use `-t`/`--use-typing` to enable, `-nt`/`--no-use-typing` to disable |
 | `-c, --config PATH`                            | `TWISTT_CONFIG`                                     | `~/.config/twistt/config.env` | Load configuration overrides from the specified file instead of the default user config                                                           |
 | `-sc, --save-config [PATH]`                    | `TWISTT_CONFIG`                                     | false                         | Persist provided command-line values to a config file (defaults to `~/.config/twistt/config.env` or `TWISTT_CONFIG` if set)                       |
@@ -301,11 +301,13 @@ An indicator ("(Twisting...)" text) is shown at the cursor position when recordi
 
 ### Output Modes
 
-Twistt supports two output modes that control when text is processed and output:
+Twistt supports three output modes that control when text is processed and output:
 
 - **batch mode** (default): Text is processed and can be output incrementally as you speak. Each pause triggers processing of that segment. With post-treatment enabled, each segment maintains context from previous segments.
 
 - **full mode**: All text is accumulated while you hold the key and only processed/output when you release it. With post-treatment, the entire text is processed at once without maintaining context between sessions. This mode is useful when you want to speak a complete thought before any processing occurs.
+
+- **none**: Twistt skips all output entirely. Transcription and post-treatment still run (just like batch mode), but nothing is pasted or typed at the cursor position. Use when you only want live feedback in the terminal or plan to copy results manually later.
 
 ### Tips
 
@@ -316,7 +318,7 @@ Twistt supports two output modes that control when text is processed and output:
 - **Multiple sentences**: Keep holding the key to transcribe continuously
 - **Pause support**: Brief pauses are handled automatically
 - **Live feedback**: Watch the terminal to see transcription as it processes
-- **Output mode choice**: Use `--output-mode full` when you want to complete your entire thought before processing
+- **Output mode choice**: Use `--output-mode full` when you want to complete your entire thought before processing, or `--no-output-mode` to disable output entirely
 - **Post-treatment**: Enable for improved accuracy, especially useful for:
   - Fixing punctuation and capitalization
   - Correcting common speech-to-text errors

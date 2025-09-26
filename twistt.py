@@ -45,6 +45,7 @@ import soundcard as sc
 import sounddevice as sd
 import websockets
 from dotenv import load_dotenv
+from janus import SyncQueueShutDown
 from openai import AsyncOpenAI
 from platformdirs import user_config_dir
 
@@ -139,6 +140,7 @@ class Config:
     class Output(NamedTuple):
         mode: OutputMode
         use_typing: bool
+        active: bool
 
     class App(NamedTuple):
         hotkey: "Config.HotKey"
@@ -332,11 +334,23 @@ class CommandLineParser:
             help=f"OpenRouter API key (env: {prefix}OPENROUTER_API_KEY or OPENROUTER_API_KEY)",
         )
         parser.add_argument(
+            "-no",
+            "--no-output-mode",
+            dest="output_mode",
+            action="store_const",
+            const="none",
+            default=default.get("OUTPUT_MODE", cls._UNDEFINED),
+            help="Disable all output (equivalent to --output-mode none)",
+        )
+        parser.add_argument(
             "-o",
             "--output-mode",
             default=default.get("OUTPUT_MODE", cls._UNDEFINED),
-            choices=[mode.value for mode in OutputMode],
-            help=f"Output mode: batch (incremental) or full (complete on release) (env: {prefix}OUTPUT_MODE)",
+            choices=[mode.value for mode in OutputMode] + ["none"],
+            help=(
+                "Output mode: batch (incremental), full (complete on release), or "
+                f"none (disabled) (env: {prefix}OUTPUT_MODE)"
+            ),
         )
         parser.add_argument(
             "-dtw",
@@ -608,14 +622,19 @@ Please set DEEPGRAM_API_KEY or {prefix}DEEPGRAM_API_KEY environment variable or 
                 post_prompt = args.post_prompt
                 post_treatment_enabled = True
 
-        output_mode = OutputMode(args.output_mode)
+        output_enabled = True
+        if args.output_mode == "none":
+            output_enabled = False
+            output_mode = OutputMode.BATCH
+        else:
+            output_mode = OutputMode(args.output_mode)
         post_provider = PostTreatmentTask.Provider(args.post_provider)
 
         if post_treatment_enabled:
             if args.post_correct and output_mode.is_full:
                 print(
                     "ERROR: Post-treatment correction is not supported with full output mode. "
-                    "Use --output-mode batch or disable --post-correct.",
+                    "Use --output-mode batch or disable --post-correct",
                     file=sys.stderr,
                 )
                 return None
@@ -788,7 +807,9 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
                 else args.cerebras_api_key,
                 correct=args.post_correct and post_treatment_enabled,
             ),
-            output=Config.Output(mode=output_mode, use_typing=args.use_typing),
+            output=Config.Output(
+                mode=output_mode, use_typing=args.use_typing, active=output_enabled
+            ),
         )
 
     @classmethod
@@ -1146,7 +1167,7 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
 
 
 class Comm:
-    def __init__(self):
+    def __init__(self, buffer_active: bool = True):
         self._audio_chunks = janus.Queue()
         self._post_commands = Queue()
         self._buffer_commands = PriorityQueue()
@@ -1159,9 +1180,15 @@ class Comm:
         self._is_post_treatment_active = False
         self._is_indicator_active = False
         self._shutting_down = Event()
+        self._is_buffer_active = buffer_active
 
     def queue_audio_chunks(self, data: bytes):
-        self._audio_chunks.sync_q.put_nowait(data)
+        with suppress(SyncQueueShutDown):
+            self._audio_chunks.sync_q.put_nowait(data)
+
+    @property
+    def is_buffer_active(self) -> bool:
+        return self._is_buffer_active
 
     @property
     def has_audio_chunks(self):
@@ -1239,9 +1266,7 @@ class Comm:
     def toggle_shift_pressed(self, flag: bool):
         self._is_shift_pressed = flag
 
-    def send_display_command(
-        self, cmd: "TerminalDisplayTask.Commands.Command"
-    ) -> None:
+    def send_display_command(self, cmd: "TerminalDisplayTask.Commands.Command") -> None:
         if not OUTPUT_TO_STDOUT:
             return
         try:
@@ -1893,9 +1918,7 @@ class BaseTranscriptionTask:
         return False
 
     def _current_display_text(self, current_transcription: list[str]) -> str:
-        return (
-            self._display_previous_text + "".join(current_transcription)
-        ).strip()
+        return (self._display_previous_text + "".join(current_transcription)).strip()
 
     def _send_speech_display(self, text: str, final: bool):
         if not OUTPUT_TO_STDOUT:
@@ -1997,7 +2020,7 @@ class BaseTranscriptionTask:
                             seq_num=seq,
                             text=final_text,
                             previous_text=previous_text,
-                            stream_output=False,
+                            stream_output=False if self.comm.is_buffer_active else True,
                         )
                     )
                 else:
@@ -2883,7 +2906,8 @@ class BufferTask:
 
     async def run(self):
         try:
-            self._idle_cursor_task = create_task(self._idle_cursor_monitor())
+            if self.comm.is_buffer_active:
+                self._idle_cursor_task = create_task(self._idle_cursor_monitor())
             while not self.comm.is_shutting_down:
                 cmd = await self.comm.dequeue_buffer_command()
                 match cmd:
@@ -2894,7 +2918,7 @@ class BufferTask:
                         seq_num=seq_num,
                         text=text,
                         position_cursor_at=position_cursor_at,
-                    ):
+                    ) if self.comm.is_buffer_active:
                         await self.manager.insert_segment(
                             seq_num, text, position_cursor_at=position_cursor_at
                         )
@@ -2903,7 +2927,7 @@ class BufferTask:
                         seq_num=seq_num,
                         corrected_text=corrected_text,
                         position_cursor_at=position_cursor_at,
-                    ):
+                    ) if self.comm.is_buffer_active:
                         await self.manager.apply_correction(
                             seq_num,
                             corrected_text,
@@ -3011,9 +3035,7 @@ class TerminalDisplayTask:
                 if self.session_active and not (self.is_recording or self.is_speaking):
                     self.speech_done = bool(self.speech_text)
                 self._maybe_finalize()
-            case TerminalDisplayTask.Commands.UpdateSpeechText(
-                text=text, final=final
-            ):
+            case TerminalDisplayTask.Commands.UpdateSpeechText(text=text, final=final):
                 if not self.session_active:
                     self._start_new_session(None)
                 self.speech_text = text
@@ -3032,9 +3054,7 @@ class TerminalDisplayTask:
                     elif self.post_text or not self.session_active:
                         self.post_done = True
                 self._maybe_finalize()
-            case TerminalDisplayTask.Commands.UpdatePostText(
-                text=text, final=final
-            ):
+            case TerminalDisplayTask.Commands.UpdatePostText(text=text, final=final):
                 self.post_text = text
                 if final:
                     self.post_done = True
@@ -3082,7 +3102,9 @@ class TerminalDisplayTask:
             return False
         if not self.speech_text:
             return False
-        speech_ready = self.speech_done and not self.is_recording and not self.is_speaking
+        speech_ready = (
+            self.speech_done and not self.is_recording and not self.is_speaking
+        )
         if not speech_ready:
             return False
         if not self.post_enabled:
@@ -3246,7 +3268,7 @@ async def main_async():
     if app_config is None:
         return
 
-    comm = Comm()
+    comm = Comm(buffer_active=app_config.output.active)
     try:
         async with asyncio.TaskGroup() as tg:
             hotkey_task = HotKeyTask(comm, app_config)
