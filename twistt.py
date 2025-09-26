@@ -1985,32 +1985,32 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
                 if timeout_with_no_transcript:
                     speech_final = True
 
-                if transcript:
-                    origina_transcript = transcript
-                    if is_final and not speech_final:
-                        origina_transcript += " "
-                    transcript = self._delta_transcript + origina_transcript
-                    self._last_transcript_time = now
-                    if self._last_message_was_final and start != self._last_event_start and not self._just_skipped_delta:
-                        if self._delta_transcript:
-                            self._delta_transcript = ""
-                            transcript = origina_transcript
+                origina_transcript = transcript
+                if is_final and not speech_final and origina_transcript:
+                    origina_transcript += " "
+                transcript = self._delta_transcript + origina_transcript
+                self._last_transcript_time = now
+                if self._last_message_was_final and start != self._last_event_start and not self._just_skipped_delta:
+                    if self._delta_transcript:
+                        self._delta_transcript = ""
+                        transcript = origina_transcript
+                    if DEBUG_TO_STDOUT:
+                        debug(f"[TRANS] [DELTA NEW #{self.seq_counter + 1}] {transcript=}")
+                    await self._handle_new_delta(transcript, current_transcription)
+                else:
+                    if is_final and start == self._last_event_start and end < self._last_event_end:
                         if DEBUG_TO_STDOUT:
-                            debug(f"[TRANS] [DELTA NEW #{self.seq_counter + 1}] {transcript=}")
-                        await self._handle_new_delta(transcript, current_transcription)
+                            debug(f"[TRANS] [DELTA SKIP #{self._active_seq_num}] {origina_transcript=}")
+                        self._delta_transcript += origina_transcript
+                        self._just_skipped_delta = True
                     else:
-                        if is_final and start == self._last_event_start and end < self._last_event_end:
-                            if DEBUG_TO_STDOUT:
-                                debug(f"[TRANS] [DELTA SKIP #{self._active_seq_num}] {origina_transcript=}")
-                            self._delta_transcript += origina_transcript
-                            self._just_skipped_delta = True
-                        else:
+                        if transcript:
                             if DEBUG_TO_STDOUT:
                                 debug(f"[TRANS] [DELTA UPDATE #{self._active_seq_num}] {transcript=}")
                             await self._handle_update_last_delta(transcript, current_transcription)
-                            self._just_skipped_delta = False
-                    self._last_event_start = start
-                    self._last_event_end = end
+                        self._just_skipped_delta = False
+                self._last_event_start = start
+                self._last_event_end = end
 
                 if speech_final and (self._has_transcript_since_done_segment or not timeout_with_no_transcript):
                     if DEBUG_TO_STDOUT:
