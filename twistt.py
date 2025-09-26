@@ -2868,8 +2868,8 @@ class IndicatorTask:
             state.append(IndicatorTask.State.SPEAKING)
         if self.comm.is_post_treatment_active:
             state.append(IndicatorTask.State.POST_TREATMENT)
-        if DEBUG_TO_STDOUT and state != self.last_state:
-            debug(f"[STATE UPDATE] {[s.name for s in state] or None}")
+        if state != self.last_state:
+            print(f"State: {', '.join([s.name.replace('_', ' ').title() for s in state]) or 'Idle'}", file=sys.stderr)
             self.last_state = state
         return " (Twistting...)" if state else ""
 
