@@ -315,6 +315,7 @@ Twistt supports three output modes that control when text is processed and outpu
   - When starting recording (together with the hotkey)
   - At any moment while holding the hotkey
   - The earliest Shift press is remembered for the entire recording session
+- **Alt to toggle post-treatment**: Press Alt at any time while recording to toggle post-treatment on/off for the current session. This is useful when you have post-treatment configured but want to temporarily disable it for certain inputs (or the reverse).
 - **Multiple sentences**: Keep holding the key to transcribe continuously
 - **Pause support**: Brief pauses are handled automatically
 - **Live feedback**: Watch the terminal to see transcription as it processes

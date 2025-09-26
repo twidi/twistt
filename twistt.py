@@ -1195,6 +1195,12 @@ class Comm:
     def is_post_enabled(self) -> bool:
         return self._is_post_enabled
 
+    def toggle_post_enabled(self, flag: bool | None = None):
+        self._is_post_enabled = (not self._is_post_enabled) if flag is None else flag
+        self.queue_display_command(
+            TerminalDisplayTask.Commands.UpdatePostEnabled(self._is_post_enabled)
+        )
+
     @property
     def has_audio_chunks(self):
         return not self._audio_chunks.sync_q.empty()
@@ -1271,7 +1277,13 @@ class Comm:
     def toggle_shift_pressed(self, flag: bool):
         self._is_shift_pressed = flag
 
-    def send_display_command(self, cmd: "TerminalDisplayTask.Commands.Command") -> None:
+    def toggle_alt_pressed(self, flag: bool):
+        if flag:
+            self.toggle_post_enabled()
+
+    def queue_display_command(
+        self, cmd: "TerminalDisplayTask.Commands.Command"
+    ) -> None:
         if not OUTPUT_TO_STDOUT:
             return
         try:
@@ -1283,7 +1295,7 @@ class Comm:
         return await self._display_commands.get()
 
     def _send_speech_state_command(self):
-        self.send_display_command(
+        self.queue_display_command(
             TerminalDisplayTask.Commands.UpdateSpeechState(
                 recording=self.is_recording,
                 speaking=self._is_speech_active,
@@ -1300,7 +1312,7 @@ class Comm:
             return
         if flag:
             self._recording.set()
-            self.send_display_command(
+            self.queue_display_command(
                 TerminalDisplayTask.Commands.SessionStart(timestamp=datetime.now())
             )
         else:
@@ -1335,7 +1347,7 @@ class Comm:
         if self._is_post_treatment_active == flag:
             return
         self._is_post_treatment_active = flag
-        self.send_display_command(
+        self.queue_display_command(
             TerminalDisplayTask.Commands.UpdatePostState(active=flag)
         )
 
@@ -1362,7 +1374,7 @@ class Comm:
 
     async def shutdown(self):
         self._shutting_down.set()
-        self.send_display_command(TerminalDisplayTask.Commands.Shutdown())
+        self.queue_display_command(TerminalDisplayTask.Commands.Shutdown())
         await self.queue_post_command(PostTreatmentTask.Commands.Shutdown())
         await self.queue_buffer_command(BufferTask.Commands.Shutdown())
         await self.queue_keyboard_command(OutputTask.Commands.Shutdown())
@@ -1538,6 +1550,7 @@ class OutputTask:
 
 class HotKeyTask:
     SHIFT_CODES = {ecodes.KEY_LEFTSHIFT, ecodes.KEY_RIGHTSHIFT}
+    ALT_CODES = {ecodes.KEY_LEFTALT, ecodes.KEY_RIGHTALT}
     KEY_DOWN = evdev.KeyEvent.key_down
     KEY_UP = evdev.KeyEvent.key_up
 
@@ -1636,6 +1649,13 @@ class HotKeyTask:
                                 self.comm.toggle_shift_pressed(True)
                             case self.KEY_UP:
                                 self.comm.toggle_shift_pressed(False)
+
+                    elif self.comm.is_recording and scancode in self.ALT_CODES:
+                        match key_event.keystate:
+                            case self.KEY_DOWN:
+                                self.comm.toggle_alt_pressed(True)
+                            case self.KEY_UP:
+                                self.comm.toggle_alt_pressed(False)
 
             except Exception as exc:
                 if not received_event:
@@ -1927,7 +1947,7 @@ class BaseTranscriptionTask:
     def _send_speech_display(self, text: str, final: bool):
         if not OUTPUT_TO_STDOUT:
             return
-        self.comm.send_display_command(
+        self.comm.queue_display_command(
             TerminalDisplayTask.Commands.UpdateSpeechText(text=text, final=final)
         )
 
@@ -2481,7 +2501,7 @@ ${current_text}
     def _send_post_display(self, text: str, final: bool):
         if not OUTPUT_TO_STDOUT:
             return
-        self.comm.send_display_command(
+        self.comm.queue_display_command(
             TerminalDisplayTask.Commands.UpdatePostText(text=text, final=final)
         )
 
@@ -2981,6 +3001,9 @@ class TerminalDisplayTask:
             text: str
             final: bool
 
+        class UpdatePostEnabled(NamedTuple):
+            active: bool
+
         class Shutdown(NamedTuple):
             pass
 
@@ -2990,12 +3013,13 @@ class TerminalDisplayTask:
             | UpdateSpeechText
             | UpdatePostState
             | UpdatePostText
+            | UpdatePostEnabled
             | Shutdown
         )
 
     def __init__(self, comm: Comm, config: Config.App):
         self.comm = comm
-        self.post_enabled = config.post.start_enabled
+        self.config = config
         self.console = Console()
         self.live: Live | None = None
         self.completed_sections: list[Group] = []
@@ -3007,8 +3031,12 @@ class TerminalDisplayTask:
         self.is_recording = False
         self.is_speaking = False
         self.post_text = ""
-        self.post_done = not self.post_enabled
+        self.post_done = not config.post.start_enabled
         self.is_post_active = False
+
+    @property
+    def post_enabled(self):
+        return self.config.post.configured and self.comm.is_post_enabled
 
     async def run(self):
         try:
@@ -3069,6 +3097,8 @@ class TerminalDisplayTask:
                 elif self.post_text:
                     self.post_done = False
                 self._maybe_finalize()
+            case TerminalDisplayTask.Commands.UpdatePostEnabled():
+                pass  # automatically handled by the refresh calling _post_state_label
             case TerminalDisplayTask.Commands.Shutdown():
                 self._finalize_session(force=True)
                 return False
@@ -3160,11 +3190,11 @@ class TerminalDisplayTask:
         text.append("\n\n")
         text.append("Post treatment: ", style="bold")
         text.append(self._post_state_label(final=final))
-        if self.post_enabled:
+        if self.config.post.configured:
             text.append("\n")
             if self.post_text.strip():
                 text.append(self.post_text.strip())
-            else:
+            elif self.post_enabled:
                 text.append("...", style="dim")
 
         rule_style = "cyan" if final else "green"
@@ -3182,13 +3212,16 @@ class TerminalDisplayTask:
         return "Idle"
 
     def _post_state_label(self, *, final: bool) -> str:
-        if not self.post_enabled:
-            return "No"
+        if not self.config.post.configured:
+            return "Not configured"
+        if not self.comm.is_post_enabled:
+            return "Disabled"
         if self.is_post_active and not final:
             return "Running"
         if self.post_text:
-            return "Done" if self.post_done else "Waiting"
-        return "Waiting"
+            if self.post_done:
+                return "Disabled" if not self.post_enabled else "Idle"
+        return "Idle"
 
 
 class IndicatorTask:
