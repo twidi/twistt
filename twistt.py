@@ -1899,7 +1899,6 @@ class OpenAITranscriptionTask(BaseTranscriptionTask):
 
 class DeepgramTranscriptionTask(BaseTranscriptionTask):
     SAMPLE_RATE = 16_000
-    IDLE_TIMEOUT_SECONDS = 2.0
 
     class Model(Enum):
         NOVA_2 = "nova-2"
@@ -1981,7 +1980,9 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
                 end = start + event.get("duration")
                 now = time.perf_counter()
 
-                timeout_with_no_transcript = not transcript and now - self._last_transcript_time >= self.IDLE_TIMEOUT_SECONDS
+                timeout_with_no_transcript = (
+                    not transcript and now - self._last_transcript_time >= self.config.transcription.silence_duration_ms / 1000
+                )
                 if timeout_with_no_transcript:
                     speech_final = True
 
