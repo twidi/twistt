@@ -1695,7 +1695,7 @@ class BaseTranscriptionTask:
         return False
 
     def _current_display_text(self, current_transcription: list[str]) -> str:
-        return (self._display_previous_text + "".join(current_transcription)).strip()
+        return (self._display_previous_text + "".join(current_transcription)).strip(" ")
 
     def _send_speech_display(self, text: str, final: bool):
         if not OUTPUT_TO_STDOUT:
@@ -1756,7 +1756,7 @@ class BaseTranscriptionTask:
         self._has_transcript_since_done_segment = False
         if text is None:
             text = "".join(current_transcription)
-        display_text = (self._display_previous_text + text).strip()
+        display_text = (self._display_previous_text + text).strip(" ")
         if not text:
             current_transcription.clear()
             self.comm.toggle_speech_active(False)
@@ -2124,7 +2124,7 @@ ${current_text}
             pass
 
     async def _handle_segment(self, cmd: PostTreatmentTask.Commands.ProcessSegment):
-        if not cmd.previous_text.strip():
+        if not cmd.previous_text.strip(" "):
             self._post_display_text = ""
         base = self._post_display_text
         chunks = []
@@ -2133,7 +2133,7 @@ ${current_text}
             if piece is None:
                 break
             display_chunks.append(piece)
-            self._send_post_display((base + "".join(display_chunks)).strip(), False)
+            self._send_post_display((base + "".join(display_chunks)).strip(" "), False)
             if self._use_post_correction:
                 chunks.append(piece)
             else:
@@ -2145,9 +2145,9 @@ ${current_text}
         else:
             # Add trailing space
             await self.comm.queue_buffer_command(BufferTask.Commands.InsertSegment(seq_num=self._next_buffer_seq(), text=" "))
-            final_piece = "".join(display_chunks) or cmd.text.strip()
+            final_piece = "".join(display_chunks) or cmd.text.strip(" ")
 
-        final_display = (base + (final_piece or "")).strip()
+        final_display = (base + (final_piece or "")).strip(" ")
         self._send_post_display(final_display, True)
         self._post_display_text = (final_display + " ") if final_display else base
 
@@ -2159,12 +2159,12 @@ ${current_text}
             if piece is None:
                 break
             display_chunks.append(piece)
-            self._send_post_display("".join(display_chunks).strip(), False)
+            self._send_post_display("".join(display_chunks).strip(" "), False)
             if self._use_post_correction:
                 chunks.append(piece)
             else:
                 await self.comm.queue_buffer_command(BufferTask.Commands.InsertSegment(seq_num=self._next_buffer_seq(), text=piece))
-        final_piece = "".join(display_chunks) or cmd.text.strip()
+        final_piece = "".join(display_chunks) or cmd.text.strip(" ")
         self._send_post_display(final_piece, True)
         self._post_display_text = (final_piece + " ") if final_piece else ""
 
@@ -2778,8 +2778,8 @@ class TerminalDisplayTask:
         text.append("Speech: ", style="bold")
         text.append(self._speech_state_label(final=final))
         text.append("\n")
-        if self.speech_text.strip():
-            text.append(self.speech_text.strip())
+        if speech_text := self.speech_text.strip(" "):
+            text.append(speech_text)
         else:
             text.append("...", style="dim")
 
@@ -2788,8 +2788,8 @@ class TerminalDisplayTask:
         text.append(self._post_state_label(final=final))
         if self.config.post.configured:
             text.append("\n")
-            if self.post_text.strip():
-                text.append(self.post_text.strip())
+            if speech_text := self.post_text.strip(" "):
+                text.append(speech_text)
             elif self.post_enabled:
                 text.append("...", style="dim")
 
@@ -2815,6 +2815,8 @@ class TerminalDisplayTask:
         if self.is_post_active and not final:
             return "Running"
         if self.post_text and self.post_done:
+            if self.speech_done:
+                return "Done"
             return "Disabled" if not self.post_enabled else "Idle"
         return "Idle"
 
