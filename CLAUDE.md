@@ -48,7 +48,7 @@ Configuration priority (highest to lowest):
 3. Local `.env` file in script directory
 4. Environment variables
 
-Key environment variables use `TWISTT_` prefix (e.g., `TWISTT_OPENAI_API_KEY`, `TWISTT_HOTKEY` or `TWISTT_HOTKEYS`, `TWISTT_POST_TREATMENT_PROMPT`, `TWISTT_POST_TREATMENT_PROVIDER`, `TWISTT_OUTPUT_MODE`, `TWISTT_POST_CORRECT`, `TWISTT_POST_TREATMENT_DISABLED`, `TWISTT_USE_TYPING`).
+Key environment variables use `TWISTT_` prefix (e.g., `TWISTT_OPENAI_API_KEY`, `TWISTT_HOTKEY` or `TWISTT_HOTKEYS`, `TWISTT_POST_TREATMENT_PROMPT`, `TWISTT_POST_TREATMENT_PROVIDER`, `TWISTT_OUTPUT_MODE`, `TWISTT_POST_CORRECT`, `TWISTT_POST_TREATMENT_DISABLED`, `TWISTT_USE_TYPING`, `TWISTT_SILENCE_DURATION`).
 
 `TWISTT_USE_TYPING` (or `--use-typing`) enables per-character typing for ASCII text, which is slower because of key delays; clipboard paste remains the fallback for non-ASCII characters.
 

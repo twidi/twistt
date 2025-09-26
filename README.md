@@ -113,6 +113,7 @@ TWISTT_HOTKEY=F9           # Single hotkey
 TWISTT_HOTKEYS=F8,F9,F10   # Multiple hotkeys (comma-separated)
 TWISTT_MODEL=gpt-4o-transcribe   # For OpenAI; for Deepgram use e.g. nova-2-general
 TWISTT_LANGUAGE=en  # Leave empty or omit for auto-detect
+TWISTT_SILENCE_DURATION=500  # Milliseconds of silence before ending the current segment
 TWISTT_GAIN=1.0
 TWISTT_MICROPHONE=Elgato Wave 3  # Optional text filter to auto-select a microphone
 TWISTT_DOUBLE_TAP_WINDOW=0.5  # Time window for double-tap detection
@@ -147,6 +148,7 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 | `-dtw, --double-tap-window`                    | `TWISTT_DOUBLE_TAP_WINDOW`                          | 0.5                           | Time window in seconds for double-tap detection                                                                                                   |
 | `-m, --model`                                  | `TWISTT_MODEL`                                      | gpt-4o-transcribe             | Transcription model (for OpenAI or Deepgram)                                                                                                      |
 | `-l, --language`                               | `TWISTT_LANGUAGE`                                   | Auto-detect                   | Transcription language (ISO 639-1)                                                                                                                |
+| `-sd, --silence-duration`                     | `TWISTT_SILENCE_DURATION`                           | 500                           | Silence duration in milliseconds before the transcription service ends the current segment                                                       |
 | `-g, --gain`                                   | `TWISTT_GAIN`                                       | 1.0                           | Microphone amplification                                                                                                                          |
 | `-mic, --microphone`                           | `TWISTT_MICROPHONE`                                 | Default input                 | Text filter or ID to select the microphone<br/>Pass without a value to force interactive selection and ignore env defaults                        |
 | `-koa, --openai-api-key`                       | `TWISTT_OPENAI_API_KEY` or `OPENAI_API_KEY`         | -                             | OpenAI API key                                                                                                                                    |

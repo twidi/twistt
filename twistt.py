@@ -121,6 +121,7 @@ class Config:
         api_key: str
         model: OpenAITranscriptionTask.Model | DeepgramTranscriptionTask.Model
         language: Optional[str]
+        silence_duration_ms: int
 
     class PostTreatment(NamedTuple):
         enabled: bool
@@ -152,6 +153,7 @@ class CommandLineParser:
         "hotkey": f"{ENV_PREFIX}HOTKEY",
         "model": f"{ENV_PREFIX}MODEL",
         "language": f"{ENV_PREFIX}LANGUAGE",
+        "silence_duration": f"{ENV_PREFIX}SILENCE_DURATION",
         "gain": f"{ENV_PREFIX}GAIN",
         "microphone": f"{ENV_PREFIX}MICROPHONE",
         "openai_api_key": f"{ENV_PREFIX}OPENAI_API_KEY",
@@ -219,6 +221,16 @@ class CommandLineParser:
             "--language",
             default=default.get("LANGUAGE", cls._UNDEFINED),
             help=f"Transcription language, leave empty for auto-detect (env: {prefix}LANGUAGE)",
+        )
+        parser.add_argument(
+            "-sd",
+            "--silence-duration",
+            type=int,
+            default=default.get("SILENCE_DURATION", cls._UNDEFINED),
+            help=(
+                "Silence duration in milliseconds before ending a speech turn "
+                f"(env: {prefix}SILENCE_DURATION)"
+            ),
         )
         parser.add_argument(
             "-g",
@@ -443,6 +455,7 @@ class CommandLineParser:
                 "MODEL", OpenAITranscriptionTask.Model.GPT_4O_TRANSCRIBE.value
             ),
             "LANGUAGE": cls.get_env("LANGUAGE"),
+            "SILENCE_DURATION": int(cls.get_env("SILENCE_DURATION", "500")),
             "GAIN": float(cls.get_env("GAIN", "1.0")),
             "MICROPHONE": cls.get_env("MICROPHONE"),
             "OPENAI_API_KEY": cls.get_env("OPENAI_API_KEY", prefix_optional=True),
@@ -756,6 +769,7 @@ Please set OPENROUTER_API_KEY or {prefix}OPENROUTER_API_KEY environment variable
                 else args.deepgram_api_key,
                 model=transcription_model,
                 language=args.language,
+                silence_duration_ms=int(args.silence_duration),
             ),
             post=Config.PostTreatment(
                 enabled=post_treatment_enabled,
@@ -1984,7 +1998,7 @@ class OpenAITranscriptionTask(BaseTranscriptionTask):
                     "type": "server_vad",
                     "threshold": 0.5,
                     "prefix_padding_ms": 300,
-                    "silence_duration_ms": 500,
+                    "silence_duration_ms": self.config.transcription.silence_duration_ms,
                 },
                 "input_audio_transcription": {
                     "model": self.config.transcription.model.value,
@@ -2093,7 +2107,7 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
             "smart_format": "true",
             "interim_results": "true",
             # "vad_events": "true",
-            "endpointing": "500",
+            "endpointing": str(self.config.transcription.silence_duration_ms),
         }
         if self.config.transcription.language:
             params["language"] = self.config.transcription.language
