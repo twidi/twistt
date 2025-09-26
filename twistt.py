@@ -619,38 +619,63 @@ class CommandLineParser:
             os.environ["YDOTOOL_SOCKET"] = args.ydotool_socket
         pydotool_init()
 
-        print(f'Transcription model: "{transcription_model.value}" from "{provider.value}"')
-        if args.language:
-            print(f"Language: {args.language}")
-        else:
-            print("Language: Auto-detect")
+        # Display configuration using Rich
+        from rich.panel import Panel
+        from rich.table import Table
+
+        console = Console()
+
+        # Create configuration table
+        config_table = Table(show_header=False, box=None, padding=(0, 1))
+        config_table.add_column(style="bold cyan", width=20)
+        config_table.add_column()
+
+        # Transcription settings
+        config_table.add_row("Transcription", f"[yellow]{transcription_model.value}[/yellow] from [green]{provider.value}[/green]")
+        config_table.add_row("Language", f"[yellow]{args.language}[/yellow]" if args.language else "[dim]Auto-detect[/dim]")
         if args.gain != 1.0:
-            print(f"Audio gain: {args.gain}x")
+            config_table.add_row("Audio gain", f"[yellow]{args.gain}x[/yellow]")
+
+        # Input settings
+        hotkeys_display = ", ".join([k.strip().upper() for k in args.hotkey.split(",")])
+        config_table.add_row("Hotkey" + ("s" if "," in args.hotkey else ""), f"[bold yellow]{hotkeys_display}[/bold yellow]")
+        config_table.add_row("", "[dim]Hold: push-to-talk | Double-tap: toggle mode[/dim]")
+        config_table.add_row("Keyboard", f"[yellow]{keyboard.name}[/yellow]")
+        mic_display_name = microphone.name or microphone.id or "microphone"
+        config_table.add_row("Microphone", f"[yellow]{mic_display_name}[/yellow]")
+
+        # Post-treatment settings
         post_treatment_enabled = False
         if post_treatment_configured:
             post_treatment_enabled = not args.no_post
-            print(
-                f"Post-treatment: Configured ({'' if post_treatment_enabled else 'not '}activated) "
-                f'via "{args.post_model}" from "{post_provider.value}"'
-            )
+            status = "[green]Enabled[/green]" if post_treatment_enabled else "[red]Disabled[/red]"
+            status += " [dim](Press [bold]Alt[/bold] to toggle)[/dim]"
+            config_table.add_row("Post-treatment", f"Via [yellow]{args.post_model}[/yellow] from [green]{post_provider.value}[/green] - {status}")
+            if args.post_correct:
+                config_table.add_row("", "[yellow]Correct mode: Edit in-place[/yellow]")
+            else:
+                config_table.add_row("", "[yellow]Post-treatment without intermediate transcription[/yellow]")
             if post_prompt:
                 preview = post_prompt[:50] + "..." if len(post_prompt) > 50 else post_prompt
-                print(f"Post-treatment prompt: {preview}")
-            if args.post_correct:
-                print("Post-treatment correct mode: Enabled (waits for correction, then edits in-place)")
-        hotkeys_display = ", ".join([k.strip().upper() for k in args.hotkey.split(",")])
-        print(f"Using key(s) '{hotkeys_display}': hold for push-to-talk, double-tap to toggle (press same key again to stop).")
-        print(f"Listening on {keyboard.name}.")
-        if args.use_typing:
-            print(
-                "ASCII characters will be typed directly; non-ASCII text still uses clipboard paste via Ctrl+V "
-                "(or Ctrl+Shift+V if Shift is pressed at any time)."
-            )
+                config_table.add_row("", f"[dim]Prompt: {preview}[/dim]")
+
+        # Output settings
+        output_method = "Type directly (ASCII) (Non ASCII is pasted via clipboard )" if args.use_typing else "Paste via clipboard"
+        if post_treatment_configured:
+            output_method += " as transcription / post-treatment comes" if output_mode.is_batch else " at end of transcription / post-treatment"
         else:
-            print("Text will be pasted by simulating Ctrl+V (or Ctrl+Shift+V if Shift is pressed at any time).")
-        mic_display_name = microphone.name or microphone.id or "microphone"
-        print(f"Recording from {mic_display_name}.")
-        print("Press Ctrl+C to stop the program.")
+            output_method += " as transcription comes" if output_mode.is_batch else " at end of transcription"
+        config_table.add_row("Output method", f"[yellow]{output_method}[/yellow]")
+        if not args.use_typing:
+            config_table.add_row("", "[dim]Uses Ctrl+V to paste (or Ctrl+Shift+V if Shift is pressed)[/dim]")
+
+        # Display the configuration panel
+        console.print(Panel(config_table, title="[bold]Twistt Configuration[/bold]", border_style="blue"))
+        console.print()
+        console.print(
+            f"[bold green]Ready![/bold green] Hold (or double tap) [bold yellow]{hotkeys_display}[/bold yellow] to start recording. "
+            f"Press [bold red]Ctrl+C[/bold red] to stop the program."
+        )
 
         if args.save_config is True or isinstance(args.save_config, str):
             save_config_path = None
@@ -1011,6 +1036,8 @@ class Comm:
         self._is_indicator_active = False
         self._shutting_down = Event()
         self._is_buffer_active = buffer_active
+        self._active_hotkey_name: str | None = None
+        self._is_hotkey_toggle_mode: bool = False
 
     def queue_audio_chunks(self, data: bytes):
         with suppress(SyncQueueShutDown):
@@ -1122,6 +1149,8 @@ class Comm:
             TerminalDisplayTask.Commands.UpdateSpeechState(
                 recording=self.is_recording,
                 speaking=self._is_speech_active,
+                hotkey=self._active_hotkey_name,
+                is_toggle=self._is_hotkey_toggle_mode,
             )
         )
 
@@ -1129,15 +1158,25 @@ class Comm:
     def is_recording(self):
         return self._recording.is_set()
 
-    def toggle_recording(self, flag: bool):
+    def toggle_recording(self, flag: bool, hotkey_name: str | None = None, is_toggle: bool = False):
         was_recording = self._recording.is_set()
         if flag == was_recording:
             return
         if flag:
             self._recording.set()
-            self.queue_display_command(TerminalDisplayTask.Commands.SessionStart(timestamp=datetime.now()))
+            self._active_hotkey_name = hotkey_name
+            self._is_hotkey_toggle_mode = is_toggle
+            self.queue_display_command(
+                TerminalDisplayTask.Commands.SessionStart(
+                    timestamp=datetime.now(),
+                    hotkey=hotkey_name,
+                    is_toggle=is_toggle,
+                )
+            )
         else:
             self._recording.clear()
+            self._active_hotkey_name = None
+            self._is_hotkey_toggle_mode = False
         self._send_speech_state_command()
 
     def wait_for_recording_task(self):
@@ -1408,12 +1447,15 @@ class HotKeyTask:
                                     active_hotkey = scancode
                                     hotkey_pressed = True
                                     name = next(k for k, v in F_KEY_CODES.items() if v == scancode)
-                                    print(f"[Toggle mode activated with {name.upper()}]")
+                                    if not OUTPUT_TO_STDOUT:
+                                        print(f"[Toggle mode activated with {name.upper()}]")
+                                    self.comm.toggle_recording(True, name.upper(), True)
                                 else:
                                     is_toggle_mode = False
                                     hotkey_pressed = True
                                     active_hotkey = scancode
-                                self.comm.toggle_recording(True)
+                                    name = next(k for k, v in F_KEY_CODES.items() if v == scancode)
+                                    self.comm.toggle_recording(True, name.upper(), False)
                                 if not OUTPUT_TO_STDOUT:
                                     print(f"\n--- {datetime.now()} ---")
 
@@ -1421,7 +1463,7 @@ class HotKeyTask:
                                 last_release_time[scancode] = current_time
                                 hotkey_pressed = False
                                 active_hotkey = None
-                                self.comm.toggle_recording(False)
+                                self.comm.toggle_recording(False, None, False)
 
                             case self.KEY_UP if is_toggle_mode:
                                 last_release_time[scancode] = current_time
@@ -1434,7 +1476,7 @@ class HotKeyTask:
                                 toggle_stop_time = current_time
                                 name = next(k for k, v in F_KEY_CODES.items() if v == scancode)
                                 print(f"[Toggle mode deactivated with {name.upper()}]")
-                                self.comm.toggle_recording(False)
+                                self.comm.toggle_recording(False, None, False)
 
                     elif self.comm.is_recording and scancode in self.SHIFT_CODES:
                         match key_event.keystate:
@@ -1600,7 +1642,7 @@ class BaseTranscriptionTask:
                 errprint(f"Error in transcription task (attempt {attempt}/{max_attempts}): {exc}")
                 if attempt >= max_attempts:
                     errprint("ERROR: Reached maximum consecutive websocket retries; stopping transcription.")
-                    self.comm.toggle_recording(False)
+                    self.comm.toggle_recording(False, None, False)
                     continue
                 delay = self._ws_retry_delay(attempt)
                 if delay:
@@ -2588,10 +2630,14 @@ class TerminalDisplayTask:
     class Commands:
         class SessionStart(NamedTuple):
             timestamp: datetime
+            hotkey: str | None
+            is_toggle: bool
 
         class UpdateSpeechState(NamedTuple):
             recording: bool
             speaking: bool
+            hotkey: str | None
+            is_toggle: bool
 
         class UpdateSpeechText(NamedTuple):
             text: str
@@ -2628,6 +2674,8 @@ class TerminalDisplayTask:
         self.post_text = ""
         self.post_done = not config.post.start_enabled
         self.is_post_active = False
+        self.active_hotkey: str | None = None
+        self.is_toggle: bool = False
 
     @property
     def post_enabled(self):
@@ -2656,12 +2704,16 @@ class TerminalDisplayTask:
 
     async def _handle_cmd(self, cmd: TerminalDisplayTask.Commands.Command) -> bool:
         match cmd:
-            case self.Commands.SessionStart(timestamp=timestamp):
+            case self.Commands.SessionStart(timestamp=timestamp, hotkey=hotkey, is_toggle=is_toggle):
+                self.active_hotkey = hotkey
+                self.is_toggle = is_toggle
                 self._start_new_session(timestamp)
 
-            case self.Commands.UpdateSpeechState(recording=recording, speaking=speaking):
+            case self.Commands.UpdateSpeechState(recording=recording, speaking=speaking, hotkey=hotkey, is_toggle=is_toggle):
                 self.is_recording = recording
                 self.is_speaking = speaking
+                self.active_hotkey = hotkey
+                self.is_toggle = is_toggle
                 if self.session_active and not (self.is_recording or self.is_speaking):
                     self.speech_done = bool(self.speech_text)
                 self._maybe_finalize()
@@ -2773,7 +2825,7 @@ class TerminalDisplayTask:
 
     def _build_section(self, *, final: bool) -> Group:
         ts = self.current_timestamp or datetime.now()
-        title = ts.strftime("%Y-%m-%d %H:%M:%S")
+        title = "Start: " + ts.strftime("%Y-%m-%d %H:%M:%S")
         text = Text(overflow="fold", no_wrap=False)
         text.append("Speech: ", style="bold")
         text.append(self._speech_state_label(final=final))
@@ -2795,7 +2847,27 @@ class TerminalDisplayTask:
 
         rule_style = "cyan" if final else "green"
         top = Rule(title, style=rule_style)
-        bottom = Rule(style=rule_style)
+
+        # Determine bottom rule title based on state
+        bottom_title = ""
+        if not final:
+            if self.is_recording and self.active_hotkey:
+                # Show stop instruction during recording
+                bottom_title = f"Press {self.active_hotkey} again to stop" if self.is_toggle else f"Release {self.active_hotkey} to stop"
+            elif self.is_speaking:
+                # Show processing status after recording
+                bottom_title = "Processing speech..."
+            elif self.is_post_active and self.post_enabled:
+                bottom_title = "Post-processing..."
+            elif self.session_active and self.speech_done and (not self.post_enabled or self.post_done):
+                # Everything is done, show end timestamp
+                bottom_title = f"End: {datetime.now():%Y-%m-%d %H:%M:%S}"
+        else:
+            # For finalized sessions, show end timestamp
+            bottom_title = f"End: {datetime.now():%Y-%m-%d %H:%M:%S}"
+
+        bottom = Rule(bottom_title, style=rule_style)
+
         return Group(top, text, bottom, Text())
 
     def _speech_state_label(self, *, final: bool) -> str:
