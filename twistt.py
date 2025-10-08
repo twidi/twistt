@@ -267,8 +267,11 @@ class CommandLineParser:
         parser.add_argument(
             "-p",
             "--post-prompt",
+            nargs="?",
+            const="__USE_ENV__",
             default=default.get("POST_TREATMENT_PROMPT", cls._UNDEFINED),
-            help=f"Post-treatment prompt instructions or path to file (env: {prefix}POST_TREATMENT_PROMPT)",
+            help=f"Post-treatment prompt instructions or path to file. "
+            f"Without value: uses {prefix}POST_TREATMENT_PROMPT and overrides {prefix}POST_TREATMENT_DISABLED",
         )
         parser.add_argument(
             "-pm",
@@ -483,8 +486,31 @@ class CommandLineParser:
             )
             return None
 
+        # Detect if -p/--post-prompt and --no-post were explicitly passed on command line
+        # Note: We check if the argument was provided by looking at sys.argv
+        # We also check if args.post_prompt == "__USE_ENV__" which indicates -p without value
+        post_prompt_from_cli = (
+            "-p" in sys.argv
+            or any(arg == "--post-prompt" or arg.startswith("--post-prompt=") for arg in sys.argv)
+            or args.post_prompt == "__USE_ENV__"
+        )
+        no_post_from_cli = "-np" in sys.argv or "--no-post" in sys.argv
+
+        # Validation: cannot use both -p and --no-post explicitly in CLI
+        if post_prompt_from_cli and no_post_from_cli:
+            errprint("ERROR: Cannot use both -p/--post-prompt and --no-post/-np arguments together")
+            return None
+
         post_prompt = None
         post_treatment_configured = False
+
+        # Handle -p without value: use environment variable
+        if args.post_prompt == "__USE_ENV__":
+            env_prompt = cls.get_env("POST_TREATMENT_PROMPT")
+            if not env_prompt:
+                errprint(f"ERROR: -p/--post-prompt was specified without a value, but {prefix}POST_TREATMENT_PROMPT environment variable is not set")
+                return None
+            args.post_prompt = env_prompt
 
         if args.post_prompt:
             # Try to find a file with this name/path, otherwise use as direct text
@@ -518,10 +544,8 @@ class CommandLineParser:
 
             # Try to find an existing file
             found_file = None
-            try:
+            with suppress(StopIteration):
                 found_file = next(path for path in prompt_file_paths if path.exists() and path.is_file())
-            except StopIteration:
-                pass  # File not found, will use as text
 
             if found_file:
                 # Read from file
@@ -633,7 +657,9 @@ class CommandLineParser:
         # Post-treatment settings
         post_treatment_enabled = False
         if post_treatment_configured:
-            post_treatment_enabled = not args.no_post
+            # If -p was explicitly passed on CLI, enable post-treatment and override POST_TREATMENT_DISABLED config
+            # Otherwise, respect the no_post setting (from config or CLI)
+            post_treatment_enabled = post_prompt_from_cli or not args.no_post
             status = "[green]Enabled[/green]" if post_treatment_enabled else "[red]Disabled[/red]"
             status += " [dim](Press [bold]Alt[/bold] to toggle)[/dim]"
             config_table.add_row("Post-treatment", f"Via [yellow]{args.post_model}[/yellow] from [green]{post_provider.value}[/green] - {status}")

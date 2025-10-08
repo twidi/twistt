@@ -147,13 +147,13 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 | `-dtw, --double-tap-window`                    | `TWISTT_DOUBLE_TAP_WINDOW`                          | 0.5                           | Time window in seconds for double-tap detection                                                                                                   |
 | `-m, --model`                                  | `TWISTT_MODEL`                                      | gpt-4o-transcribe             | Transcription model (for OpenAI or Deepgram)                                                                                                      |
 | `-l, --language`                               | `TWISTT_LANGUAGE`                                   | Auto-detect                   | Transcription language (ISO 639-1)                                                                                                                |
-| `-sd, --silence-duration`                     | `TWISTT_SILENCE_DURATION`                           | 500                           | Silence duration in milliseconds before the transcription service ends the current segment                                                       |
+| `-sd, --silence-duration`                      | `TWISTT_SILENCE_DURATION`                           | 500                           | Silence duration in milliseconds before the transcription service ends the current segment                                                        |
 | `-g, --gain`                                   | `TWISTT_GAIN`                                       | 1.0                           | Microphone amplification                                                                                                                          |
 | `-mic, --microphone`                           | `TWISTT_MICROPHONE`                                 | Default input                 | Text filter or ID to select the microphone<br/>Pass without a value to force interactive selection and ignore env defaults                        |
 | `-koa, --openai-api-key`                       | `TWISTT_OPENAI_API_KEY` or `OPENAI_API_KEY`         | -                             | OpenAI API key                                                                                                                                    |
 | `-kdg, --deepgram-api-key`                     | `TWISTT_DEEPGRAM_API_KEY` or `DEEPGRAM_API_KEY`     | -                             | Deepgram API key                                                                                                                                  |
 | `-ys, --ydotool-socket`                        | `TWISTT_YDOTOOL_SOCKET` or `YDOTOOL_SOCKET`         | Auto-detect                   | Path to ydotool socket                                                                                                                            |
-| `-p, --post-prompt`                            | `TWISTT_POST_TREATMENT_PROMPT`                      | -                             | Post-treatment instructions or path to file (auto-detects files, uses text otherwise)                                                             |
+| `-p, --post-prompt`                            | `TWISTT_POST_TREATMENT_PROMPT`                      | -                             | Post-treatment instructions or path to file. Without value: uses env variable and overrides `TWISTT_POST_TREATMENT_DISABLED`                      |
 | `-pm, --post-model`                            | `TWISTT_POST_TREATMENT_MODEL`                       | gpt-4o-mini                   | Model for post-treatment                                                                                                                          |
 | `-pp, --post-provider`                         | `TWISTT_POST_TREATMENT_PROVIDER`                    | openai                        | Provider for post-treatment (openai, cerebras, openrouter)                                                                                        |
 | `-pc, --post-correct, -npc, --no-post-correct` | `TWISTT_POST_TREATMENT_CORRECT`                     | false                         | Apply post-treatment by correcting already-output text in-place (only in batch output mode)                                                       |
@@ -208,7 +208,27 @@ The `--post-prompt` argument and `TWISTT_POST_TREATMENT_PROMPT` environment vari
 - The first existing file is used; if no file is found, the value is treated as direct text
 - Empty files are rejected
 
-This allows you to easily create and reuse prompts for different situations, or quickly test inline prompts:
+**Enabling post-treatment with `-p` flag:**
+
+When you pass `-p` or `--post-prompt` without a value, it:
+- Uses the value from `TWISTT_POST_TREATMENT_PROMPT` environment variable
+- Overrides `TWISTT_POST_TREATMENT_DISABLED=true` if set in config
+- Errors if `TWISTT_POST_TREATMENT_PROMPT` is not defined
+- Cannot be combined with `--no-post` (will error)
+
+This is useful when you have post-treatment disabled by default but want to enable it for a specific session:
+
+```bash
+# In your config.env:
+# TWISTT_POST_TREATMENT_PROMPT="Fix grammar and punctuation"
+# TWISTT_POST_TREATMENT_DISABLED=true
+
+./twistt.py                    # Post-treatment disabled (per config)
+./twistt.py -p                 # Post-treatment enabled (overrides DISABLED setting)
+./twistt.py -p "Custom prompt" # Post-treatment with custom prompt
+```
+
+**Other examples:**
 
 ```bash
 ./twistt.py --post-prompt translate            # Uses translate.txt from config dir if exists, else literal text

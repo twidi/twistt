@@ -50,6 +50,8 @@ Configuration priority (highest to lowest):
 
 Key environment variables use `TWISTT_` prefix (e.g., `TWISTT_OPENAI_API_KEY`, `TWISTT_HOTKEY` or `TWISTT_HOTKEYS`, `TWISTT_POST_TREATMENT_PROMPT` (can be text or file path), `TWISTT_POST_TREATMENT_PROVIDER`, `TWISTT_OUTPUT_MODE`, `TWISTT_POST_CORRECT`, `TWISTT_POST_TREATMENT_DISABLED`, `TWISTT_USE_TYPING`, `TWISTT_SILENCE_DURATION`).
 
+**Note on post-treatment activation**: Passing `-p` or `--post-prompt` without a value uses `TWISTT_POST_TREATMENT_PROMPT` and overrides `TWISTT_POST_TREATMENT_DISABLED=true` if set in config. This allows enabling post-treatment on-demand even when disabled by default. Error if combined with `--no-post` or if `TWISTT_POST_TREATMENT_PROMPT` is not set.
+
 `TWISTT_USE_TYPING` (or `--use-typing`) enables per-character typing for ASCII text, which is slower because of key delays; clipboard paste remains the fallback for non-ASCII characters.
 
 Multiple hotkeys can be specified by separating them with commas (e.g., `TWISTT_HOTKEY=F8,F9,F10` or `--hotkey F8,F9,F10`).
