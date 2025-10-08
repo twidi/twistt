@@ -161,7 +161,6 @@ class CommandLineParser:
     _PROMPT_FOR_MICROPHONE = object()
     _PROMPT_FOR_KEYBOARD = object()
     _UNDEFINED = object()
-    _POST_PROMPT_FILE_ENV_KEY = f"{ENV_PREFIX}POST_TREATMENT_PROMPT_FILE"
     _DEST_TO_ENV = {
         "hotkey": f"{ENV_PREFIX}HOTKEY",
         "model": f"{ENV_PREFIX}MODEL",
@@ -173,7 +172,6 @@ class CommandLineParser:
         "deepgram_api_key": f"{ENV_PREFIX}DEEPGRAM_API_KEY",
         "ydotool_socket": f"{ENV_PREFIX}YDOTOOL_SOCKET",
         "post_prompt": f"{ENV_PREFIX}POST_TREATMENT_PROMPT",
-        "post_prompt_file": _POST_PROMPT_FILE_ENV_KEY,
         "post_model": f"{ENV_PREFIX}POST_TREATMENT_MODEL",
         "post_provider": f"{ENV_PREFIX}POST_TREATMENT_PROVIDER",
         "post_correct": f"{ENV_PREFIX}POST_TREATMENT_CORRECT",
@@ -185,8 +183,6 @@ class CommandLineParser:
         "use_typing": f"{ENV_PREFIX}USE_TYPING",
         "keyboard": f"{ENV_PREFIX}KEYBOARD",
     }
-    _post_prompt_file: str = ""
-    _post_prompt_file_relative_dir: Path | None = None
 
     @classmethod
     def get_env(cls, name: str, default: str | None = None, prefix_optional: bool = False):
@@ -272,13 +268,7 @@ class CommandLineParser:
             "-p",
             "--post-prompt",
             default=default.get("POST_TREATMENT_PROMPT", cls._UNDEFINED),
-            help=f"Post-treatment prompt instructions (env: {prefix}POST_TREATMENT_PROMPT)",
-        )
-        parser.add_argument(
-            "-pf",
-            "--post-prompt-file",
-            default=default.get("POST_TREATMENT_PROMPT_FILE", cls._UNDEFINED),
-            help=f"Path to file containing post-treatment prompt (env: {prefix}POST_TREATMENT_PROMPT_FILE)",
+            help=f"Post-treatment prompt instructions or path to file (env: {prefix}POST_TREATMENT_PROMPT)",
         )
         parser.add_argument(
             "-pm",
@@ -384,8 +374,6 @@ class CommandLineParser:
 
     @classmethod
     def parse(cls) -> Config.App | None:
-        cls.check_post_prompt_file_defining(Path.cwd())
-
         config_path_mandatory = False
         if config_path_str := cls._extract_config_path_from_argv():
             config_path_mandatory = True
@@ -456,7 +444,6 @@ class CommandLineParser:
             "DEEPGRAM_API_KEY": cls.get_env("DEEPGRAM_API_KEY", prefix_optional=True),
             "YDOTOOL_SOCKET": cls.get_env("YDOTOOL_SOCKET", prefix_optional=True),
             "POST_TREATMENT_PROMPT": cls.get_env("POST_TREATMENT_PROMPT", ""),
-            "POST_TREATMENT_PROMPT_FILE": cls.get_env("POST_TREATMENT_PROMPT_FILE", ""),
             "POST_TREATMENT_MODEL": cls.get_env("POST_TREATMENT_MODEL", "gpt-4o-mini"),
             "POST_TREATMENT_PROVIDER": cls.get_env("POST_TREATMENT_PROVIDER", PostTreatmentTask.Provider.OPENAI.value),
             "POST_TREATMENT_CORRECT": cls.get_env_bool("POST_TREATMENT_CORRECT"),
@@ -499,26 +486,24 @@ class CommandLineParser:
         post_prompt = None
         post_treatment_configured = False
 
-        if "post_prompt_file" in provided_args:
-            cls.check_post_prompt_file_defining(Path.cwd(), args.post_prompt_file)
-
-        if cls._post_prompt_file:
-            prompt_file_path = Path(cls._post_prompt_file).expanduser()
+        if args.post_prompt:
+            # Try to find a file with this name/path, otherwise use as direct text
+            prompt_value = args.post_prompt
+            prompt_file_path = Path(prompt_value).expanduser()
             prompt_exts = [None, ".txt", ".prompt"]
 
-            if not prompt_file_path.is_absolute() and (cls._post_prompt_file.startswith("./") or cls._post_prompt_file.startswith("../")):
-                prompt_file_path = cls._post_prompt_file_relative_dir / prompt_file_path
-
+            # Build list of possible file paths
             if prompt_file_path.is_absolute():
-                prompt_file_path = prompt_file_path
+                # Absolute path: check with and without extensions
                 if prompt_file_path.suffix:
                     prompt_file_paths = [prompt_file_path]
                 else:
                     prompt_file_paths = [prompt_file_path.with_suffix(ext) if ext is not None else prompt_file_path for ext in prompt_exts]
-
             else:
+                # Relative path: search in current dir, script dir, and config dir
                 prompt_file_dirs = [
-                    cls._post_prompt_file_relative_dir,
+                    Path.cwd(),
+                    Path(__file__).parent,
                     config_dir,
                 ]
                 if prompt_file_path.suffix:
@@ -530,28 +515,29 @@ class CommandLineParser:
                     ]
 
             prompt_file_paths = [path.resolve(strict=False) for path in prompt_file_paths]
+
+            # Try to find an existing file
+            found_file = None
             try:
-                prompt_file_path = next(path for path in prompt_file_paths if path.exists() and path.is_file())
+                found_file = next(path for path in prompt_file_paths if path.exists() and path.is_file())
             except StopIteration:
-                errprint(
-                    f"ERROR: Post-treatment prompt file{'s' if len(prompt_file_paths) > 1 else ''} "
-                    f"not found: {', '.join(path.as_posix() for path in prompt_file_paths)}"
-                )
-                return None
+                pass  # File not found, will use as text
 
-            try:
-                post_prompt = prompt_file_path.read_text(encoding="utf-8").strip()
-                if not post_prompt:
-                    errprint(f"ERROR: Post-treatment prompt file is empty: {prompt_file_path}")
+            if found_file:
+                # Read from file
+                try:
+                    post_prompt = found_file.read_text(encoding="utf-8").strip()
+                    if not post_prompt:
+                        errprint(f"ERROR: Post-treatment prompt file is empty: {found_file}")
+                        return None
+                    post_treatment_configured = True
+                except Exception as exc:
+                    errprint(f"ERROR: Unable to read post-treatment prompt file: {exc}")
                     return None
+            else:
+                # Use as direct text
+                post_prompt = prompt_value
                 post_treatment_configured = True
-            except Exception as exc:
-                errprint(f"ERROR: Unable to read post-treatment prompt file: {exc}")
-                return None
-
-        elif args.post_prompt:
-            post_prompt = args.post_prompt
-            post_treatment_configured = True
 
         output_enabled = True
         if args.output_mode == "none":
@@ -726,20 +712,11 @@ class CommandLineParser:
         )
 
     @classmethod
-    def check_post_prompt_file_defining(cls, directory: Path, path: str | None = None) -> str | None:
-        if path is None:
-            path = os.getenv(cls._POST_PROMPT_FILE_ENV_KEY, "")
-        cls._post_prompt_file = path.strip()
-        if cls._post_prompt_file:
-            cls._post_prompt_file_relative_dir = directory
-
-    @classmethod
     def _load_env_files(cls, config_path: Path | None = None) -> bool:
         # Check for env file in current directory first, then in script directory.
         for directory in {Path.cwd(), Path(__file__).parent}:
             if (env_path := (directory / ".env")).exists() and env_path.is_file():
                 load_dotenv(env_path, override=False)
-                cls.check_post_prompt_file_defining(env_path.parent)
 
         # Then check for config file, with inheritance
         if config_path.exists() and config_path.is_file():
@@ -766,7 +743,6 @@ class CommandLineParser:
             return False
 
         load_dotenv(dotenv_path=config_path, override=False)
-        cls.check_post_prompt_file_defining(config_path.parent)
 
         parent_value = (os.environ.pop(f"{cls.ENV_PREFIX}PARENT_CONFIG", None) or "").strip()
         if not parent_value:

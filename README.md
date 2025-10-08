@@ -125,8 +125,7 @@ TWISTT_OUTPUT_MODE=batch  # batch (default) or full
 TWISTT_USE_TYPING=false  # Type ASCII characters via ydotool instead of copy/paste (slower)
 
 # Post-treatment settings (optional)
-TWISTT_POST_TREATMENT_PROMPT="Fix grammar and punctuation"
-TWISTT_POST_TREATMENT_PROMPT_FILE=/path/to/prompt.txt  # Alternative to direct prompt
+TWISTT_POST_TREATMENT_PROMPT="Fix grammar and punctuation"  # Can also be a path to a file
 TWISTT_POST_TREATMENT_MODEL=gpt-4o-mini  # Model for post-treatment
 TWISTT_POST_TREATMENT_PROVIDER=openai  # Provider: openai, cerebras, or openrouter
 # Post-treatment correct mode (apply corrections in-place with keyboard; requires batch output mode)
@@ -154,8 +153,7 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 | `-koa, --openai-api-key`                       | `TWISTT_OPENAI_API_KEY` or `OPENAI_API_KEY`         | -                             | OpenAI API key                                                                                                                                    |
 | `-kdg, --deepgram-api-key`                     | `TWISTT_DEEPGRAM_API_KEY` or `DEEPGRAM_API_KEY`     | -                             | Deepgram API key                                                                                                                                  |
 | `-ys, --ydotool-socket`                        | `TWISTT_YDOTOOL_SOCKET` or `YDOTOOL_SOCKET`         | Auto-detect                   | Path to ydotool socket                                                                                                                            |
-| `-p, --post-prompt`                            | `TWISTT_POST_TREATMENT_PROMPT`                      | -                             | Post-treatment instructions                                                                                                                       |
-| `-pf, --post-prompt-file`                      | `TWISTT_POST_TREATMENT_PROMPT_FILE`                 | -                             | File containing post-treatment prompt                                                                                                             |
+| `-p, --post-prompt`                            | `TWISTT_POST_TREATMENT_PROMPT`                      | -                             | Post-treatment instructions or path to file (auto-detects files, uses text otherwise)                                                             |
 | `-pm, --post-model`                            | `TWISTT_POST_TREATMENT_MODEL`                       | gpt-4o-mini                   | Model for post-treatment                                                                                                                          |
 | `-pp, --post-provider`                         | `TWISTT_POST_TREATMENT_PROVIDER`                    | openai                        | Provider for post-treatment (openai, cerebras, openrouter)                                                                                        |
 | `-pc, --post-correct, -npc, --no-post-correct` | `TWISTT_POST_TREATMENT_CORRECT`                     | false                         | Apply post-treatment by correcting already-output text in-place (only in batch output mode)                                                       |
@@ -195,25 +193,28 @@ In those examples, `nova.env` and `gpt.env` being in `~/.config/twistt/`, they c
 
 Parent paths can be relative (resolved from the child config's directory) or absolute. Circular references are detected and will cause an error.
 
-### Post-Treatment Prompt File
+### Post-Treatment Prompt
 
-You can point Twistt to a reusable prompt file for post-treatment through any of the usual configuration layers:
+The `--post-prompt` argument and `TWISTT_POST_TREATMENT_PROMPT` environment variable accept either direct text or a path to a file. Twistt automatically detects which one you're providing:
 
-- Pass `--post-prompt-file /path/to/prompt` at launch. Relative paths are interpreted from the current working directory or, if not beginning with `./` or `../`, will also be searched for in the config directory `~/.config/twistt/`.
-- Export `TWISTT_POST_TREATMENT_PROMPT_FILE=/path/to/prompt` (or put it in a `.env`). Directories will be as above: current working directory, then config directory if not beginning with `./` or `../`.
-- Add `TWISTT_POST_TREATMENT_PROMPT_FILE=` entries in `~/.config/twistt/config.env` (or another file loaded via `--config`). Relative paths in these files resolve from the config’s directory, then fall back to the config directory.
+- If the value matches an existing file path, the file content is used as the prompt
+- Otherwise, the value is used directly as the prompt text
 
-Shell expansion such as `~` is supported in all cases.
-When using non-absolute paths, you can include directories, like `prompts/file`, and it will resolve it as expected.
+**File resolution:**
+- Absolute paths are checked directly
+- Relative paths are searched in: current directory → script directory → `~/.config/twistt/`
+- Shell expansion such as `~` is supported
+- When the filename has no extension, Twistt tries with no extension, then `.txt` and `.prompt` variants
+- The first existing file is used; if no file is found, the value is treated as direct text
+- Empty files are rejected
 
-When the filename has no extension, Twistt automatically tries with no extension, then `.txt` and `.prompt` variants. The first existing file is used; otherwise the error message lists every path that was checked. Empty files are rejected.
-
-Those options allow you to easily create and reuse prompts for different situations.
+This allows you to easily create and reuse prompts for different situations, or quickly test inline prompts:
 
 ```bash
-./twistt.py --prompt-file translate
-./twistt.py --prompt-file prose
-./twistt.py --no-post  # disable post-treatment, ignoring prompts configured via CLI, env, or config files
+./twistt.py --post-prompt translate            # Uses translate.txt from config dir if exists, else literal text
+./twistt.py --post-prompt "Fix grammar"        # Direct text (no matching file)
+./twistt.py --post-prompt ./prompts/formal.txt # Explicit file path
+./twistt.py --no-post                          # Disable post-treatment entirely
 ```
 
 ## Usage
@@ -240,7 +241,7 @@ Those options allow you to easily create and reuse prompts for different situati
 ./twistt.py --post-prompt "Fix grammar, punctuation, and obvious errors"
 
 # Use a file for more complex post-treatment instructions
-./twistt.py --post-prompt-file instructions.txt
+./twistt.py --post-prompt instructions.txt
 
 # Specify a different model for post-treatment
 ./twistt.py --post-prompt "Make the text more formal" --post-model gpt-4o
@@ -368,7 +369,7 @@ Keep the conversational tone.
 
 Then use it with:
 ```bash
-./twistt.py --post-prompt-file corrections.txt
+./twistt.py --post-prompt corrections.txt
 ```
 
 ### Post-Treatment Examples
@@ -384,7 +385,7 @@ Then use it with:
 ./twistt.py --post-prompt "Make the text more formal and professional"
 
 # Use a more powerful model for complex corrections
-./twistt.py --post-prompt-file complex_rules.txt --post-model gpt-4o
+./twistt.py --post-prompt complex_rules.txt --post-model gpt-4o
 
 # Use Cerebras for faster processing
 export CEREBRAS_API_KEY=csk-...
