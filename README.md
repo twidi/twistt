@@ -123,6 +123,7 @@ TWISTT_YDOTOOL_SOCKET=/run/user/1000/.ydotool_socket  # Optional, auto-detected 
 # Output mode
 TWISTT_OUTPUT_MODE=batch  # batch (default) or full
 TWISTT_USE_TYPING=false  # Type ASCII characters via ydotool instead of copy/paste (slower)
+TWISTT_KEYBOARD_DELAY=20  # Delay in milliseconds between keyboard actions (default: 20ms)
 
 # Post-treatment settings (optional)
 TWISTT_POST_TREATMENT_PROMPT="Fix grammar and punctuation"  # Can also be a path to a file
@@ -162,6 +163,7 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 | `-kor, --openrouter-api-key`                   | `TWISTT_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` | -                             | OpenRouter API key                                                                                                                                |
 | `-o, --output-mode, -no, --no-output-mode`     | `TWISTT_OUTPUT_MODE`                                | batch                         | Output mode: batch (incremental), full (complete on release), or none (disabled)                                                                  |
 | `-t, --use-typing, -nt, --no-use-typing`       | `TWISTT_USE_TYPING`                                 | false                         | Type ASCII characters directly (slower); clipboard still handles non-ASCII. Use `-t`/`--use-typing` to enable, `-nt`/`--no-use-typing` to disable |
+| `-kd, --keyboard-delay`                        | `TWISTT_KEYBOARD_DELAY`                             | 20                            | Delay in milliseconds between keyboard actions (typing, paste, navigation keys). Increase if you experience character ordering issues             |
 | `-c, --config PATH`                            | `TWISTT_CONFIG`                                     | `~/.config/twistt/config.env` | Load configuration overrides from the specified file instead of the default user config                                                           |
 | `-sc, --save-config [PATH]`                    | `TWISTT_CONFIG`                                     | false                         | Persist provided command-line values to a config file (defaults to `~/.config/twistt/config.env` or `TWISTT_CONFIG` if set)                       |
 

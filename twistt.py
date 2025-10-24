@@ -147,6 +147,7 @@ class Config:
         mode: OutputMode
         use_typing: bool
         active: bool
+        keyboard_delay_ms: int
 
     class App(NamedTuple):
         hotkey: Config.HotKey
@@ -182,6 +183,7 @@ class CommandLineParser:
         "double_tap_window": f"{ENV_PREFIX}DOUBLE_TAP_WINDOW",
         "use_typing": f"{ENV_PREFIX}USE_TYPING",
         "keyboard": f"{ENV_PREFIX}KEYBOARD",
+        "keyboard_delay": f"{ENV_PREFIX}KEYBOARD_DELAY",
     }
 
     @classmethod
@@ -368,6 +370,13 @@ class CommandLineParser:
             help=f"Text filter for selecting the keyboard input device; pass without a value to pick interactively (env: {prefix}KEYBOARD)",
         )
         parser.add_argument(
+            "-kd",
+            "--keyboard-delay",
+            type=int,
+            default=default.get("KEYBOARD_DELAY", cls._UNDEFINED),
+            help=f"Delay in milliseconds between keyboard actions (typing, paste, navigation keys). Default: 20ms (env: {prefix}KEYBOARD_DELAY)",
+        )
+        parser.add_argument(
             "-sc",
             "--save-config",
             nargs="?",
@@ -457,6 +466,7 @@ class CommandLineParser:
             "DOUBLE_TAP_WINDOW": float(cls.get_env("DOUBLE_TAP_WINDOW", "0.5")),
             "USE_TYPING": cls.get_env_bool("USE_TYPING"),
             "KEYBOARD": cls.get_env("KEYBOARD"),
+            "KEYBOARD_DELAY": int(cls.get_env("KEYBOARD_DELAY", "20")),
             "CONFIG_PATH": config_path.as_posix(),
         }
 
@@ -734,7 +744,12 @@ class CommandLineParser:
                 else args.cerebras_api_key,
                 correct=args.post_correct and post_treatment_configured,
             ),
-            output=Config.Output(mode=output_mode, use_typing=args.use_typing, active=output_enabled),
+            output=Config.Output(
+                mode=output_mode,
+                use_typing=args.use_typing,
+                active=output_enabled,
+                keyboard_delay_ms=args.keyboard_delay,
+            ),
         )
 
     @classmethod
@@ -1276,8 +1291,8 @@ class OutputTask:
     def __init__(self, comm: Comm, config: Config.App):
         self.comm = comm
         self.config = config
-        self._delay_between_keys_ms = KEY_DEFAULT_DELAY
-        self._delay_between_actions_s = KEY_DEFAULT_DELAY / 1000
+        self._delay_between_keys_ms = config.output.keyboard_delay_ms
+        self._delay_between_actions_s = config.output.keyboard_delay_ms / 1000
         self._last_action_time = 0.0
         self._previous_clipboard: str | None = None
         self._restore_clipboard_handle: asyncio.TimerHandle | None = None
@@ -1347,7 +1362,11 @@ class OutputTask:
     def _copy_paste(self, text: str, use_shift_to_paste: bool = False):
         self._copy_to_clipboard(text)
         combo = self.Combo.CTRL_SHIFT_V.value if use_shift_to_paste else self.Combo.CTRL_V.value
-        key_combination(list(combo))
+        key_combination(
+            list(combo),
+            each_delay_ms=self._delay_between_keys_ms,
+            press_ms=self._delay_between_keys_ms,
+        )
 
     def _write_text(self, text: str, use_shift_to_paste: bool = False):
         if not self.config.output.use_typing:
@@ -1359,13 +1378,19 @@ class OutputTask:
 
         def flush_ascii_buffer():
             if ascii_buffer:
-                type_string("".join(ascii_buffer))
+                type_string(
+                    "".join(ascii_buffer),
+                    hold_delay_ms=self._delay_between_keys_ms,
+                    each_char_delay_ms=self._delay_between_keys_ms,
+                )
                 ascii_buffer.clear()
+                time.sleep(self._delay_between_actions_s)
 
         def flush_non_ascii_buffer():
             if non_ascii_buffer:
                 self._copy_paste("".join(non_ascii_buffer), use_shift_to_paste)
                 non_ascii_buffer.clear()
+                time.sleep(self._delay_between_actions_s)
 
         for char in text:
             if ord(char) <= 127:
