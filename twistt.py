@@ -2690,7 +2690,6 @@ class TerminalDisplayTask:
         self.config = config
         self.console = Console()
         self.live: Live | None = None
-        self.completed_sections: list[Group] = []
         self.session_active = False
         self.session_count = 0
         self.current_timestamp: datetime | None = None
@@ -2801,12 +2800,9 @@ class TerminalDisplayTask:
         self.live.update(self._renderable(), refresh=True)
 
     def _renderable(self):
-        sections = list(self.completed_sections)
         if self.session_active:
-            sections.append(self._build_section(final=False))
-        if not sections:
-            return Text("Waiting for speech...", style="dim")
-        return Group(*sections)
+            return self._build_section(final=False)
+        return Text("Waiting for speech...", style="dim")
 
     def _maybe_finalize(self):
         if self._session_finished():
@@ -2839,7 +2835,7 @@ class TerminalDisplayTask:
             self.is_post_active = False
             return
         section = self._build_section(final=True)
-        self.completed_sections.append(section)
+        self.console.print(section)
         self.session_active = False
         self.current_timestamp = None
         self.speech_text = ""
