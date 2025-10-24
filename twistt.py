@@ -2167,8 +2167,11 @@ ${current_text}
         self.config = config
         self.client = self._build_client()
         self._buffer_seq_counter = 1_000_000
-        self._use_post_correction = self.comm.is_post_enabled and self.config.post.correct and self.config.output.mode.is_batch
         self._post_display_text = ""
+
+    @property
+    def _use_post_correction(self) -> bool:
+        return self.comm.is_post_enabled and self.config.post.correct and self.config.output.mode.is_batch
 
     def _next_buffer_seq(self) -> int:
         seq = self._buffer_seq_counter
