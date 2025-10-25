@@ -2056,6 +2056,9 @@ class BaseTranscriptionTask:
     async def on_data(self, raw, previous_transcriptions, current_transcription) -> bool:
         raise NotImplementedError
 
+    async def should_stop_receiver(self, ws) -> bool:
+        return not self.comm.is_transcribing
+
     async def _receiver(self, ws, previous_transcriptions, current_transcription):
         try:
             while True:
@@ -2064,7 +2067,7 @@ class BaseTranscriptionTask:
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=self.CHUNK_TIMEOUT)
                 except TimeoutError:
-                    if not self.comm.is_transcribing:
+                    if await self.should_stop_receiver(ws):
                         break
                     continue
                 should_continue = await self.on_data(raw, previous_transcriptions, current_transcription)
@@ -2216,6 +2219,12 @@ class OpenAITranscriptionTask(BaseTranscriptionTask):
         SPEECH_STARTED = "input_audio_buffer.speech_started"
         DELTA = "conversation.item.input_audio_transcription.delta"
         DONE = "conversation.item.input_audio_transcription.completed"
+        COMMIT = "input_audio_buffer.commit"
+
+    def __init__(self, comm: Comm, config: Config.App):
+        self.waiting_for_transcription_when_no_speech_no_recording = False
+        self.first_audio_when_no_speech_no_recording : float | None = None
+        super().__init__(comm, config)
 
     @cached_property
     def ws_url(self) -> str:
@@ -2253,7 +2262,12 @@ class OpenAITranscriptionTask(BaseTranscriptionTask):
             data["session"]["input_audio_transcription"]["language"] = self.config.transcription.language
         return json.dumps(data)
 
+    def reset_after_waiting_when_no_speech_no_recording(self):
+        self.waiting_for_transcription_when_no_speech_no_recording = False
+        self.first_audio_when_no_speech_no_recording = None
+
     async def on_connected(self, ws):
+        self.reset_after_waiting_when_no_speech_no_recording()
         await super().on_connected(ws)
         await ws.send(self._first_message)
 
@@ -2267,6 +2281,36 @@ class OpenAITranscriptionTask(BaseTranscriptionTask):
             )
         )
 
+    async def should_stop_receiver(self, ws) -> bool:
+        if not await super().should_stop_receiver(ws):
+            return False
+
+        if not self.comm.is_speech_active:
+            if not self.waiting_for_transcription_when_no_speech_no_recording:
+                debug("Period with audio when no speech no recording starts")
+                self.waiting_for_transcription_when_no_speech_no_recording = True
+            if self.first_audio_when_no_speech_no_recording is None and not self.comm.is_recording:
+                self.first_audio_when_no_speech_no_recording = time.perf_counter()
+
+        if not self.waiting_for_transcription_when_no_speech_no_recording:
+            return True
+
+        if not self.comm.is_recording and not self.comm.has_audio_chunks:
+
+            if self.first_audio_when_no_speech_no_recording is None:
+                self.waiting_for_transcription_when_no_speech_no_recording = True
+                self.first_audio_when_no_speech_no_recording = time.perf_counter()
+
+            delay = time.perf_counter() - self.first_audio_when_no_speech_no_recording
+            if delay > 1:
+                debug("Not recording since 1s; STOPPING RECEIVER")
+                return True
+
+            debug(f"Not recording since > {delay:.1f}ms; Send commit and wait...")
+            await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+
+        return False
+
     async def on_data(self, raw, previous_transcriptions, current_transcription) -> bool:
         event = json.loads(raw)
 
@@ -2274,15 +2318,21 @@ class OpenAITranscriptionTask(BaseTranscriptionTask):
             event_type = self.Event(event.get("type", ""))
         except ValueError:
             return True
+        debug("OPENAI EVENT: ", event)
 
         match event_type:
             case self.Event.SPEECH_STARTED:
+                self.reset_after_waiting_when_no_speech_no_recording()
                 await self._handle_start_of_speech()
 
             case self.Event.DELTA:
+                if not self.comm.is_speech_active:
+                    self.reset_after_waiting_when_no_speech_no_recording()
+                    await self._handle_start_of_speech()
                 await self._handle_new_delta(event.get("delta"), current_transcription)
 
             case self.Event.DONE:
+                self.reset_after_waiting_when_no_speech_no_recording()
                 await self._handle_done_segment(
                     event.get("transcript"),
                     previous_transcriptions,
@@ -3279,7 +3329,7 @@ class IndicatorTask:
         if self.comm.is_post_treatment_active:
             state.append(IndicatorTask.State.POST_TREATMENT)
         if DEBUG_TO_STDOUT and state != self.last_state:
-            errprint(f"State: {', '.join([s.name.replace('_', ' ').title() for s in state]) or 'Idle'}")
+            debug(f"State: {', '.join([s.name.replace('_', ' ').title() for s in state]) or 'Idle'}")
             self.last_state = state
         return " (Twistting...)" if state else ""
 
