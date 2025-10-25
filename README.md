@@ -125,6 +125,9 @@ TWISTT_OUTPUT_MODE=batch  # batch (default) or full
 TWISTT_USE_TYPING=false  # Type ASCII characters via ydotool instead of copy/paste (slower)
 TWISTT_KEYBOARD_DELAY=20  # Delay in milliseconds between keyboard actions (default: 20ms)
 
+# Logging
+TWISTT_LOG=/path/to/custom/twistt.log  # Optional, defaults to ~/.config/twistt/twistt.log
+
 # Post-treatment settings (optional)
 TWISTT_POST_TREATMENT_PROMPT="Fix grammar and punctuation"  # Can also be a path to a file
 TWISTT_POST_TREATMENT_MODEL=gpt-4o-mini  # Model for post-treatment
@@ -164,6 +167,7 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 | `-o, --output-mode, -no, --no-output-mode`     | `TWISTT_OUTPUT_MODE`                                | batch                         | Output mode: batch (incremental), full (complete on release), or none (disabled)                                                                  |
 | `-t, --use-typing, -nt, --no-use-typing`       | `TWISTT_USE_TYPING`                                 | false                         | Type ASCII characters directly (slower); clipboard still handles non-ASCII. Use `-t`/`--use-typing` to enable, `-nt`/`--no-use-typing` to disable |
 | `-kd, --keyboard-delay`                        | `TWISTT_KEYBOARD_DELAY`                             | 20                            | Delay in milliseconds between keyboard actions (typing, paste, navigation keys). Increase if you experience character ordering issues             |
+| `--log`                                        | `TWISTT_LOG`                                        | `~/.config/twistt/twistt.log` | Path to log file where transcription sessions are saved                                                                                           |
 | `-c, --config PATH`                            | `TWISTT_CONFIG`                                     | `~/.config/twistt/config.env` | Load configuration overrides from the specified file instead of the default user config                                                           |
 | `-sc, --save-config [PATH]`                    | `TWISTT_CONFIG`                                     | false                         | Persist provided command-line values to a config file (defaults to `~/.config/twistt/config.env` or `TWISTT_CONFIG` if set)                       |
 
@@ -194,6 +198,25 @@ TWISTT_USE_TYPING=true
 In those examples, `nova.env` and `gpt.env` being in `~/.config/twistt/`, they can be used like that: `twistt.py --config nova` or `./twistt.py --config gpt` (without passing the full path and the `.env` extension to the config argument)
 
 Parent paths can be relative (resolved from the child config's directory) or absolute. Circular references are detected and will cause an error.
+
+### Logging
+
+All transcription sessions are automatically logged to a file. By default, logs are saved to `~/.config/twistt/twistt.log`. You can customize the log file location using:
+
+- Command-line argument: `--log /path/to/logfile.log`
+- Environment variable: `TWISTT_LOG=/path/to/logfile.log`
+
+The log file contains:
+- Configuration panel (displayed at startup)
+- Completed transcription sessions with timestamps
+- Both raw transcription and post-treatment results (if enabled)
+
+Note: Live updates during recording are **not** logged, only finalized sessions are saved.
+
+To disable logging, point the log file to `/dev/null`:
+```bash
+./twistt.py --log /dev/null
+```
 
 ### Post-Treatment Prompt
 
@@ -296,6 +319,12 @@ TWISTT_PROVIDER=deepgram TWISTT_DEEPGRAM_API_KEY=dg_xxx ./twistt.py --model nova
 ./twistt.py --config ~/.config/twistt/french.env
 ./twistt.py --config french  # equivalent to the one above
 ./twistt.py --config /path/to/gaming.env
+
+# Specify a custom log file
+./twistt.py --log /tmp/twistt-debug.log
+
+# Disable logging (output to /dev/null)
+./twistt.py --log /dev/null
 ```
 
 ### How It Works

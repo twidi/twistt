@@ -58,6 +58,8 @@ Key environment variables use `TWISTT_` prefix (e.g., `TWISTT_OPENAI_API_KEY`, `
 
 Multiple hotkeys can be specified by separating them with commas (e.g., `TWISTT_HOTKEY=F8,F9,F10` or `--hotkey F8,F9,F10`).
 
+`TWISTT_LOG` (or `--log`) specifies the path to the log file. Default is `~/.config/twistt/twistt.log`. All transcription sessions (configuration panel and finalized transcriptions) are logged to this file.
+
 Provider-specific API keys:
 - `TWISTT_CEREBRAS_API_KEY` or `CEREBRAS_API_KEY` for Cerebras
 - `TWISTT_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` for OpenRouter

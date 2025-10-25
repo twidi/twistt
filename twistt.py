@@ -74,6 +74,38 @@ from rich.live import Live
 from rich.rule import Rule
 from rich.text import Text
 
+
+class ConsoleWithLogging:
+    """Console wrapper that outputs to both stdout and a log file"""
+
+    def __init__(self, log_file, default_log_width=5000):
+        self.console = Console()
+        self.log_console = Console(
+            file=log_file,
+            force_terminal=False,
+            legacy_windows=False,
+            width=default_log_width,
+        )
+
+    def print_and_log(self, *objects, log_max_width=None, **kwargs):
+        """Print to both console and log file
+
+        Args:
+            *objects: What to display
+            log_max_width: If specified, limits width in log (must be <= default_log_width)
+            **kwargs: Other arguments passed to print()
+        """
+        # Terminal
+        self.console.print(*objects, **kwargs)
+
+        # Log
+        self.log_console.print(*objects, **kwargs, width=log_max_width)
+
+    def print(self, *objects, **kwargs):
+        """Print only to console, not to log"""
+        self.console.print(*objects, **kwargs)
+
+
 F_KEY_CODES = {
     "f1": ecodes.KEY_F1,
     "f2": ecodes.KEY_F2,
@@ -150,6 +182,7 @@ class Config:
         keyboard_delay_ms: int
 
     class App(NamedTuple):
+        console: ConsoleWithLogging
         hotkey: Config.HotKey
         capture: Config.Capture
         transcription: Config.Transcription
@@ -377,6 +410,11 @@ class CommandLineParser:
             help=f"Delay in milliseconds between keyboard actions (typing, paste, navigation keys). Default: 20ms (env: {prefix}KEYBOARD_DELAY)",
         )
         parser.add_argument(
+            "--log",
+            default=default.get("LOG", cls._UNDEFINED),
+            help=f"Path to log file. Default: ~/.config/twistt/twistt.log (env: {prefix}LOG)",
+        )
+        parser.add_argument(
             "-sc",
             "--save-config",
             nargs="?",
@@ -467,6 +505,7 @@ class CommandLineParser:
             "USE_TYPING": cls.get_env_bool("USE_TYPING"),
             "KEYBOARD": cls.get_env("KEYBOARD"),
             "KEYBOARD_DELAY": int(cls.get_env("KEYBOARD_DELAY", "20")),
+            "LOG": cls.get_env("LOG"),
             "CONFIG_PATH": config_path.as_posix(),
         }
 
@@ -643,7 +682,19 @@ class CommandLineParser:
         from rich.panel import Panel
         from rich.table import Table
 
-        console = Console()
+        # Setup logging to file
+        if args.log:
+            log_path = Path(args.log).expanduser()
+        else:
+            log_dir = Path(user_config_dir("twistt", ensure_exists=True))
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / "twistt.log"
+
+        # Ensure log directory exists
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_file = open(log_path, "a", encoding="utf-8")
+
+        console = ConsoleWithLogging(log_file)
 
         # Create configuration table
         config_table = Table(show_header=False, box=None, padding=(0, 1))
@@ -692,11 +743,11 @@ class CommandLineParser:
             config_table.add_row("", "[dim]Uses Ctrl+V to paste (or Ctrl+Shift+V if Shift is pressed)[/dim]")
 
         # Display the configuration panel
-        console.print(Panel(config_table, title="[bold]Twistt Configuration[/bold]", border_style="blue"))
+        console.print_and_log(Panel(config_table, title="[bold]Twistt Configuration[/bold]", border_style="blue"), log_max_width=150)
         console.print()
         console.print(
             f"[bold green]Ready![/bold green] Hold (or double tap) [bold yellow]{hotkeys_display}[/bold yellow] to start recording. "
-            f"Press [bold red]Ctrl+C[/bold red] to stop the program."
+            f"Press [bold red]Ctrl+C[/bold red] to stop the program.\n"
         )
 
         if args.save_config is True or isinstance(args.save_config, str):
@@ -714,6 +765,7 @@ class CommandLineParser:
             )
 
         return Config.App(
+            console=console,
             hotkey=Config.HotKey(
                 device=keyboard,
                 codes=hotkey_codes,
@@ -2691,7 +2743,7 @@ class TerminalDisplayTask:
     def __init__(self, comm: Comm, config: Config.App):
         self.comm = comm
         self.config = config
-        self.console = Console()
+        self.console = config.console
         self.live: Live | None = None
         self.session_active = False
         self.session_count = 0
@@ -2714,7 +2766,7 @@ class TerminalDisplayTask:
         try:
             with Live(
                 self._renderable(),
-                console=self.console,
+                console=self.console.console,
                 refresh_per_second=8,
                 auto_refresh=False,
                 transient=False,
@@ -2838,7 +2890,13 @@ class TerminalDisplayTask:
             self.is_post_active = False
             return
         section = self._build_section(final=True)
-        self.console.print(section)
+        # Extract components: top_rule, content, bottom_rule
+        top, content, bottom = section.renderables
+        # Print with different widths: rules at 50, content at 5000 (default)
+        self.console.print_and_log(top, log_max_width=50)
+        self.console.print_and_log(content)
+        self.console.print_and_log(bottom, log_max_width=50)
+        self.console.print_and_log()
         self.session_active = False
         self.current_timestamp = None
         self.speech_text = ""
@@ -2853,19 +2911,21 @@ class TerminalDisplayTask:
         ts = self.current_timestamp or datetime.now()
         title = "Start: " + ts.strftime("%Y-%m-%d %H:%M:%S")
         text = Text(overflow="fold", no_wrap=False)
+        text.append("[", style="bold cyan")
         text.append("Speech: ", style="bold")
         text.append(self._speech_state_label(final=final))
-        text.append("\n")
+        text.append("]\n\n", style="bold cyan")
         if speech_text := self.speech_text.strip(" "):
             text.append(speech_text)
         else:
             text.append("...", style="dim")
 
-        text.append("\n\n")
-        text.append("Post treatment: ", style="bold")
-        text.append(self._post_state_label(final=final))
-        if self.config.post.configured:
-            text.append("\n")
+        if self.config.post.configured and (self.post_enabled or self.post_text):
+            text.append("\n\n")
+            text.append("[", style="bold cyan")
+            text.append("Post treatment: ", style="bold")
+            text.append(self._post_state_label(final=final))
+            text.append("]\n\n", style="bold cyan")
             if speech_text := self.post_text.strip(" "):
                 text.append(speech_text)
             elif self.post_enabled:
@@ -2894,7 +2954,7 @@ class TerminalDisplayTask:
 
         bottom = Rule(bottom_title, style=rule_style)
 
-        return Group(top, text, bottom, Text())
+        return Group(top, text, bottom)
 
     def _speech_state_label(self, *, final: bool) -> str:
         if self.is_recording and not final:
