@@ -169,6 +169,7 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 | `-kd, --keyboard-delay`                        | `TWISTT_KEYBOARD_DELAY`                             | 20                            | Delay in milliseconds between keyboard actions (typing, paste, navigation keys). Increase if you experience character ordering issues                                                                                   |
 | `--log`                                        | `TWISTT_LOG`                                        | `~/.config/twistt/twistt.log` | Path to log file where transcription sessions are saved                                                                                                                                                                 |
 | `--check`                                      | -                                                   | -                             | Display configuration and exit without logging anything to file. Useful for verifying settings before running.                                                                                                          |
+| `--list-configs [DIR]`                         | -                                                   | -                             | List all configuration files found in `~/.config/twistt/` (or DIR if specified) with their variables and exit. API keys are masked, all values are limited to 100 characters.                                            |
 | `-c, --config PATH`                            | `TWISTT_CONFIG`                                     | `~/.config/twistt/config.env` | Load configuration from file(s). Can be specified multiple times or use `::` separator. Later files override earlier ones. Prefix with `::` to include default config. Example: `-c ::fr.env` (default + modifier)      |
 | `-sc, --save-config [PATH]`                    | `TWISTT_CONFIG`                                     | false                         | Persist provided command-line values to a config file (defaults to `~/.config/twistt/config.env` or `TWISTT_CONFIG` if set)                                                                                             |
 
@@ -260,6 +261,50 @@ This will:
 1. Load `config.env` (parent of `gpt.env`)
 2. Load `gpt.env` (overrides `config.env`)
 3. Load `local.env` (overrides both `config.env` and `gpt.env`)
+
+### Listing Available Configurations
+
+Use `--list-configs` to see all configuration files in `~/.config/twistt/` and their variables:
+
+```bash
+./twistt.py --list-configs
+
+# Or list configs from a specific directory
+./twistt.py --list-configs /path/to/configs
+```
+
+This displays:
+- All `.env` files in the config directory, sorted alphabetically
+- For each file:
+  - Filename with parent config shown in parentheses if defined
+  - All variables in alphabetical order
+  - API keys are masked (only first 3 characters + "...")
+  - All values are limited to 100 characters with newlines replaced by spaces
+  - "..." is appended only if the value exceeds 100 characters
+
+Example output:
+```
+Configuration files found in: /home/user/.config/twistt
+
+config.env
+  TWISTT_HOTKEY = F8,F9
+  TWISTT_LANGUAGE = fr
+  TWISTT_OPENAI_API_KEY = sk-...
+  TWISTT_POST_TREATMENT_PROMPT = Fix grammar and punctuation. Remove filler words like "um" and "uh". Keep the conversational...
+
+fr.env
+  TWISTT_LANGUAGE = fr
+
+gpt.env (parent config: ~/.config/twistt/config.env)
+  TWISTT_MODEL = gpt-4o-transcribe
+  TWISTT_USE_TYPING = false
+```
+
+This is useful for:
+- Discovering what config files you have
+- Understanding config inheritance relationships
+- Verifying variable values without opening files
+- Security: checking API keys are set without revealing full values
 
 ### Logging
 
@@ -433,6 +478,10 @@ TWISTT_PROVIDER=deepgram TWISTT_DEEPGRAM_API_KEY=dg_xxx ./twistt.py --model nova
 # Check configuration without starting (useful to verify settings)
 ./twistt.py --check
 ./twistt.py --config french --check  # Verify a specific config
+
+# List all available config files and their variables
+./twistt.py --list-configs
+./twistt.py --list-configs /path/to/configs  # List from custom directory
 ```
 
 ### How It Works

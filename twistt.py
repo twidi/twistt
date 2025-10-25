@@ -46,7 +46,7 @@ import pyperclipfix as pyperclip
 import soundcard as sc
 import sounddevice as sd
 import websockets
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 from evdev import InputDevice, categorize, ecodes
 from janus import SyncQueueShutDown
 from openai import AsyncOpenAI
@@ -54,7 +54,6 @@ from platformdirs import user_config_dir
 from pydotool import (
     DOWN,
     KEY_BACKSPACE,
-    KEY_DEFAULT_DELAY,
     KEY_DELETE,
     KEY_LEFT,
     KEY_LEFTCTRL,
@@ -342,6 +341,7 @@ class CommandLineParser:
 
     @classmethod
     def _create_arguments(cls, parser: argparse.ArgumentParser, default: dict[str, str | bool | None]):
+        config_dir = Path(user_config_dir("twistt", ensure_exists=False))
         prefix = cls.ENV_PREFIX
         parser.add_argument(
             "-c",
@@ -526,7 +526,7 @@ class CommandLineParser:
         parser.add_argument(
             "--log",
             default=default.get("LOG", cls._UNDEFINED),
-            help=f"Path to log file. Default: ~/.config/twistt/twistt.log (env: {prefix}LOG)",
+            help=f"Path to log file. Default: {config_dir / 'twistt.log'} (env: {prefix}LOG)",
         )
         parser.add_argument(
             "--check",
@@ -539,6 +539,14 @@ class CommandLineParser:
             nargs="?",
             const=True,
             help=f"Persist provided command-line options into a config file. Without a value defaults to {default.get('CONFIG_PATH')}.",
+        )
+        parser.add_argument(
+            "--list-configs",
+            nargs="?",
+            const=True,
+            default=False,
+            metavar="DIR",
+            help=f"List all configuration files found in the given config directory (dedfault to {config_dir}) and their variables, then exit",
         )
 
     @classmethod
@@ -580,6 +588,10 @@ class CommandLineParser:
 
     @classmethod
     def parse(cls) -> Config.App | None:
+        # Check if --list-configs was requested (exit early if so)
+        if cls._check_list_configs():
+            return None
+
         # Extract config paths from CLI arguments
         config_path_strs = cls._extract_config_paths_from_argv()
 
@@ -1129,7 +1141,7 @@ class CommandLineParser:
     def _get_args_defined_on_cli(cls) -> set[str]:
         parser = argparse.ArgumentParser(add_help=False)
         cls._create_arguments(parser, {})
-        ignore_keys = {"config", "save_config", "check"}
+        ignore_keys = {"config", "save_config", "check", "list_configs"}
         return {key for key, value in vars(parser.parse_known_args()[0]).items() if value is not cls._UNDEFINED and key not in ignore_keys}
 
     @classmethod
@@ -1241,6 +1253,97 @@ class CommandLineParser:
                     config_paths.append(stripped)
 
         return config_paths if config_paths else None
+
+    @classmethod
+    def _check_list_configs(cls) -> bool:
+        """Check if --list-configs argument was provided.
+
+        Returns:
+            True if --list-configs was provided (and configs were listed), False otherwise
+        """
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument("--list-configs", nargs="?", const=True, default=False)
+        args = parser.parse_known_args()[0]
+
+        if args.list_configs:
+            # If it's True (no value provided), use None to indicate default directory
+            # Otherwise use the provided directory path
+            config_dir = None if args.list_configs is True else args.list_configs
+            cls._list_configs(config_dir)
+            return True
+        return False
+
+    @classmethod
+    def _list_configs(cls, config_dir_path: str | None = None) -> None:
+        """List all configuration files in the config directory with their variables.
+
+        Args:
+            config_dir_path: Optional directory path. If None, uses default config directory.
+        """
+        if config_dir_path:
+            config_dir = Path(config_dir_path).expanduser().resolve()
+        else:
+            config_dir = Path(user_config_dir("twistt", ensure_exists=False))
+
+        if not config_dir.exists():
+            print(f"Config directory does not exist: {config_dir}")
+            return
+
+        # Find all .env files in the config directory
+        config_files = sorted(config_dir.glob("*.env"))
+
+        if not config_files:
+            print(f"No configuration files found in: {config_dir}")
+            return
+
+        print(f"Configuration files found in: {config_dir}\n")
+
+        for config_file in config_files:
+            try:
+                # Use dotenv_values to parse the file properly
+                env_dict = dotenv_values(config_file)
+
+                # Separate parent config from other variables
+                parent_config = env_dict.pop(f"{cls.ENV_PREFIX}PARENT_CONFIG", None)
+
+                # Display filename with parent config if present
+                if parent_config:
+                    print(f"{config_file.name} (parent config: {parent_config})")
+                else:
+                    print(f"{config_file.name}")
+
+                # Display variables in alphabetical order
+                for key in sorted(env_dict.keys()):
+                    value = env_dict[key]
+                    if value is None:
+                        continue
+                    formatted_value = cls._format_config_value(key, value)
+                    print(f"  {key} = {formatted_value}")
+
+            except Exception as exc:
+                print(f"  Error reading file: {exc}")
+                continue
+
+            print()  # Empty line between files
+
+    @classmethod
+    def _format_config_value(cls, key: str, value: str) -> str:
+        """Format a config value for display.
+
+        For API keys: show only first 3 characters + "..."
+        For all other values: replace newlines with spaces, limit to 100 characters
+        """
+        # Check if this is an API key
+        if "API_KEY" in key.upper():
+            if len(value) <= 3:
+                return value
+            return f"{value[:3]}..."
+
+        # For all other values, replace newlines with spaces and limit to 100 characters
+        value_single_line = value.replace("\n", " ").replace("\r", " ")
+        if len(value_single_line) > 100:
+            return f"{value_single_line[:100]}..."
+        return value_single_line
 
     @staticmethod
     def _env_truthy(val: str | None) -> bool:
