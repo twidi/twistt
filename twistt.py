@@ -87,21 +87,39 @@ class ConsoleWithLogging:
             legacy_windows=False,
             width=default_log_width,
         )
+        self._delayed_log_buffer = []  # Buffer for delayed log entries
 
-    def print_and_log(self, *objects, log_max_width=None, **kwargs):
+    def _flush_delayed_log_buffer(self):
+        """Flush any delayed log entries to the log file"""
+        if not self._delayed_log_buffer:
+            return
+        for objects, kwargs in self._delayed_log_buffer:
+            self.log_console.print(*objects, **kwargs)
+        self._delayed_log_buffer.clear()
+
+    def print_and_log(self, *objects, log_max_width=None, delay_log=False, **kwargs):
         """Print to both console and log file
 
         Args:
             *objects: What to display
             log_max_width: If specified, limits width in log (must be <= default_log_width)
+            delay_log: If True, buffer log output until next non-delayed print_and_log
             **kwargs: Other arguments passed to print()
         """
-        # Terminal
+        # Terminal (always immediate)
         self.console.print(*objects, **kwargs)
 
         # Log (only if enabled)
         if self.enable_logging:
-            self.log_console.print(*objects, **kwargs, width=log_max_width)
+            if delay_log:
+                # Buffer this log entry
+                log_kwargs = {**kwargs, 'width': log_max_width}
+                self._delayed_log_buffer.append((objects, log_kwargs))
+            else:
+                # Flush any delayed entries first
+                self._flush_delayed_log_buffer()
+                # Then log this entry
+                self.log_console.print(*objects, **kwargs, width=log_max_width)
 
     def print(self, *objects, **kwargs):
         """Print only to console, not to log"""
@@ -936,7 +954,7 @@ class CommandLineParser:
         config_table.add_row("  Log", f"[yellow]{format_path(log_path)}[/yellow]")
 
         # Display the configuration panel
-        console.print_and_log(Panel(config_table, title="[bold]Twistt Configuration[/bold]", border_style="blue"), log_max_width=150)
+        console.print_and_log(Panel(config_table, title="[bold]Twistt Configuration[/bold]", border_style="blue"), log_max_width=150, delay_log=True)
         console.print()
 
         # If --check mode, display success and exit
