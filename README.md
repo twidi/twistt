@@ -169,23 +169,70 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 | `-kd, --keyboard-delay`                        | `TWISTT_KEYBOARD_DELAY`                             | 20                            | Delay in milliseconds between keyboard actions (typing, paste, navigation keys). Increase if you experience character ordering issues                                                                                   |
 | `--log`                                        | `TWISTT_LOG`                                        | `~/.config/twistt/twistt.log` | Path to log file where transcription sessions are saved                                                                                                                                                                 |
 | `--check`                                      | -                                                   | -                             | Display configuration and exit without logging anything to file. Useful for verifying settings before running.                                                                                                          |
-| `-c, --config PATH`                            | `TWISTT_CONFIG`                                     | `~/.config/twistt/config.env` | Load configuration overrides from the specified file instead of the default user config                                                                                                                                 |
+| `-c, --config PATH`                            | `TWISTT_CONFIG`                                     | `~/.config/twistt/config.env` | Load configuration from file(s). Can be specified multiple times or use `::` separator. Later files override earlier ones. Prefix with `::` to include default config. Example: `-c ::fr.env` (default + modifier)      |
 | `-sc, --save-config [PATH]`                    | `TWISTT_CONFIG`                                     | false                         | Persist provided command-line values to a config file (defaults to `~/.config/twistt/config.env` or `TWISTT_CONFIG` if set)                                                                                             |
 
 Selecting a microphone sets the `PULSE_SOURCE` environment variable for Twistt only, so your system default input stays untouched. Run `./twistt.py --microphone` without a value to pick from the list even if an environment variable is set.
 
-Use `--config` (or `TWISTT_CONFIG`) to load settings from a specific file while leaving the default user config untouched. If you provide a relative path that doesn't exist in the current directory, and a file with that name (plus `.env`) exists in `~/.config/twistt/`, it will be used automatically. For example, `--config work` will use `~/.config/twistt/work.env` if `work` doesn't exist locally. Use `--save-config` to capture only the options you explicitly pass on the command line; existing keys in the config file are preserved. Provide a path (or set `TWISTT_CONFIG`) to control which file gets written. `TWISTT_CONFIG` is read only from the process environment—do not place it in `.env` files or `config.env`.
+Use `--config` (or `TWISTT_CONFIG`) to load settings from one or more files. You can specify multiple config files either by using `-c` multiple times or by separating paths with `::` in a single argument or environment variable. Later files override values from earlier ones.
 
-### Config Inheritance
+**Including the default config**: Prefix any `-c` value with `::` to include the default config (`~/.config/twistt/config.env`) as the base, allowing you to use modifier files that only specify what differs. For example, `-c ::fr.env` combines the default config with `fr.env` (where `fr.env` might only set `TWISTT_LANGUAGE=fr`). Without the `::` prefix, `-c` replaces the default config entirely.
 
-Config files can define `TWISTT_PARENT_CONFIG` to inherit from another config file. Values in the child file take precedence. This allows creating presets that only specify what differs from a base configuration:
+If you provide a relative path that doesn't exist in the current directory, and a file with that name (plus `.env`) exists in `~/.config/twistt/`, it will be used automatically. For example, `--config work` will use `~/.config/twistt/work.env` if `work` doesn't exist locally. Use `--save-config` to capture only the options you explicitly pass on the command line; existing keys in the config file are preserved. Provide a path (or set `TWISTT_CONFIG`) to control which file gets written. `TWISTT_CONFIG` is read only from the process environment—do not place it in `.env` files or `config.env`.
+
+### Config Inheritance and Multiple Config Files
+
+Twistt supports two complementary ways to combine configuration files:
+
+**1. Multiple config files via `-c` or `TWISTT_CONFIG`:**
+
+You can specify multiple config files that are loaded in sequence, with later files overriding values from earlier ones:
+
+```bash
+# Load multiple configs via command line
+./twistt.py -c base.env -c project.env -c local.env
+
+# Or using :: separator
+./twistt.py -c "base.env::project.env::local.env"
+
+# Or via environment variable
+TWISTT_CONFIG="base.env::project.env" ./twistt.py
+```
+
+In these examples:
+- `base.env` is loaded first (lowest priority)
+- `project.env` overrides values from `base.env`
+- `local.env` overrides values from both `base.env` and `project.env` (highest priority)
+
+**Using modifier files with the default config:**
+
+Create small config files that only specify what differs from your default configuration, then use the `::` prefix to combine them:
+
+```bash
+# Create a French language modifier
+echo "TWISTT_LANGUAGE=fr" > ~/.config/twistt/fr.env
+
+# Create a high-gain modifier for quiet microphones
+echo "TWISTT_GAIN=3.0" > ~/.config/twistt/loud.env
+
+# Use modifiers with default config
+./twistt.py -c ::fr.env  # French language + all default settings
+./twistt.py -c ::loud.env  # High gain + all default settings
+./twistt.py -c ::fr.env -c ::loud.env  # French + high gain + all defaults
+```
+
+This is particularly useful when you have a well-configured default setup and only want to temporarily change one or two settings.
+
+**2. Parent config inheritance via `TWISTT_PARENT_CONFIG`:**
+
+Individual config files can define `TWISTT_PARENT_CONFIG` to inherit from another config file. Values in the child file take precedence over the parent:
 
 ```bash
 # ~/.config/twistt/config.env - shared settings
 TWISTT_OPENAI_API_KEY=sk-...
 ...
 
-# ~/.config/twistt/gpt.env - inherits base and use open ai model without typing mode (because not recommended) 
+# ~/.config/twistt/gpt.env - inherits base and use open ai model without typing mode (because not recommended)
 TWISTT_PARENT_CONFIG=config.env
 TWISTT_MODEL=gpt-4o-transcribe
 TWISTT_USE_TYPING=false
@@ -199,6 +246,20 @@ TWISTT_USE_TYPING=true
 In those examples, `nova.env` and `gpt.env` being in `~/.config/twistt/`, they can be used like that: `twistt.py --config nova` or `./twistt.py --config gpt` (without passing the full path and the `.env` extension to the config argument)
 
 Parent paths can be relative (resolved from the child config's directory) or absolute. Circular references are detected and will cause an error.
+
+**Combining both approaches:**
+
+You can mix multiple config files and parent inheritance. For example:
+
+```bash
+# Load base config with its parent, then override with local settings
+./twistt.py -c gpt.env -c local.env
+```
+
+This will:
+1. Load `config.env` (parent of `gpt.env`)
+2. Load `gpt.env` (overrides `config.env`)
+3. Load `local.env` (overrides both `config.env` and `gpt.env`)
 
 ### Logging
 
@@ -353,6 +414,15 @@ TWISTT_PROVIDER=deepgram TWISTT_DEEPGRAM_API_KEY=dg_xxx ./twistt.py --model nova
 ./twistt.py --config ~/.config/twistt/french.env
 ./twistt.py --config french  # equivalent to the one above
 ./twistt.py --config /path/to/gaming.env
+
+# Load multiple config files (later files override earlier ones)
+./twistt.py --config base.env --config local.env
+./twistt.py -c "base.env::project.env::local.env"
+
+# Use modifier files with default config (:: prefix includes default)
+./twistt.py -c ::fr.env  # Combines default config + fr.env modifier
+./twistt.py -c :: -c local.env  # Combines default config + local.env
+./twistt.py -c ::  # Uses only default config explicitly
 
 # Specify a custom log file
 ./twistt.py --log /tmp/twistt-debug.log

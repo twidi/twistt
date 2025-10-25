@@ -328,8 +328,12 @@ class CommandLineParser:
         parser.add_argument(
             "-c",
             "--config",
-            default=default.get("CONFIG_PATH", cls._UNDEFINED),
-            help=f"Path to config file to load instead of the default user config ({default.get('CONFIG_PATH')})",
+            action="append",
+            default=None,
+            help=f"Path to config file to load instead of the default user config ({default.get('CONFIG_PATH')}). "
+            f"Can be specified multiple times or use '::' separator for multiple files. "
+            f"Prefix any value with '::' to include default config. "
+            f"Example: -c base.env -c local.env or -c 'base.env::local.env' or -c ::fr.env",
         )
         parser.add_argument(
             "-k",
@@ -520,40 +524,87 @@ class CommandLineParser:
         )
 
     @classmethod
-    def parse(cls) -> Config.App | None:
-        config_path_mandatory = False
-        if config_path_str := cls._extract_config_path_from_argv():
-            config_path_mandatory = True
-        else:
-            config_path_str = (os.getenv(f"{cls.ENV_PREFIX}CONFIG") or "").strip()
+    def _resolve_config_paths(cls, config_path_strs: list[str] | None, config_dir: Path) -> tuple[list[Path], bool]:
+        """Resolve config path strings to absolute Path objects.
 
-        config_dir = Path(user_config_dir("twistt", ensure_exists=False))
+        Args:
+            config_path_strs: List of config path strings from CLI or env var, or None
+            config_dir: Config directory path (~/.config/twistt)
 
-        config_path = None
-        if config_path_str:
+        Returns:
+            Tuple of (resolved_paths, mandatory) where:
+            - resolved_paths: List of resolved Path objects (may be empty if default should be used)
+            - mandatory: True if paths were explicitly provided and must exist
+        """
+        if not config_path_strs:
+            return [], False
+
+        resolved_paths = []
+        for config_path_str in config_path_strs:
             config_path = Path(config_path_str)
             # If it's not an absolute path and the path does not exist relative to the current directory
             # we try to find it in the config dir with .env extension (`foo` => `~/.config/twistt/foo.env`)
             if (
                 not config_path.is_absolute()
                 and not (Path.cwd() / config_path).exists()
-                and not (config_path := (config_dir / f"{config_path}.env")).exists()
+                and (fallback := (config_dir / f"{config_path}.env")).exists()
             ):
-                config_path = None
+                config_path = fallback
 
-        if config_path is None:
-            config_path = config_dir / "config.env"
+            config_path = config_path.expanduser()
+            if not config_path.is_absolute():
+                config_path = (Path.cwd() / config_path).resolve(strict=False)
+            config_path = config_path.resolve(strict=False)
 
-        config_path = config_path.expanduser()
-        if not config_path.is_absolute():
-            config_path = (Path.cwd() / config_path).resolve(strict=False)
-        config_path = config_path.resolve(strict=False)
+            resolved_paths.append(config_path)
 
-        if config_path_mandatory and not config_path.exists() and not config_path.is_file():
-            errprint(f"ERROR: Config file {config_path} does not exist or is not a file")
-            return None
+        return resolved_paths, True
 
-        success, loaded_config_files = cls._load_env_files(config_path)
+    @classmethod
+    def parse(cls) -> Config.App | None:
+        # Extract config paths from CLI arguments
+        config_path_strs = cls._extract_config_paths_from_argv()
+
+        # If no CLI args, check environment variable (supports :: separator)
+        if config_path_strs is None:
+            env_config = (os.getenv(f"{cls.ENV_PREFIX}CONFIG") or "").strip()
+            if env_config:
+                config_path_strs = [part.strip() for part in env_config.split("::") if part.strip()]
+
+        config_dir = Path(user_config_dir("twistt", ensure_exists=False))
+        default_config_path = config_dir / "config.env"
+
+        # Check if any config path starts with :: (indicates we should include default config)
+        include_default = False
+        if config_path_strs:
+            include_default = any(p.startswith("::") for p in config_path_strs)
+            # Remove :: prefix from all paths
+            config_path_strs = [p[2:] if p.startswith("::") else p for p in config_path_strs]
+            # Remove empty strings after :: prefix removal
+            config_path_strs = [p for p in config_path_strs if p]
+
+        # Resolve config paths
+        config_paths, config_paths_mandatory = cls._resolve_config_paths(config_path_strs, config_dir)
+
+        # If :: prefix was used, prepend default config (lower priority)
+        if include_default:
+            config_paths = [default_config_path] + config_paths
+
+        # If no config paths specified, use default
+        if not config_paths:
+            config_paths = [default_config_path]
+
+        # The last config path has highest priority (used for save_config default)
+        config_path = config_paths[-1]
+
+        # Validate mandatory config files exist
+        if config_paths_mandatory:
+            for config_path_to_check in config_paths:
+                if not config_path_to_check.exists() or not config_path_to_check.is_file():
+                    errprint(f"ERROR: Config file {config_path_to_check} does not exist or is not a file")
+                    return None
+
+        success, loaded_config_files = cls._load_env_files(config_paths)
         if not success:
             return None
 
@@ -953,8 +1004,11 @@ class CommandLineParser:
         )
 
     @classmethod
-    def _load_env_files(cls, config_path: Path | None = None) -> tuple[bool, list[Path]]:
+    def _load_env_files(cls, config_paths: list[Path]) -> tuple[bool, list[Path]]:
         """Load environment files and return success status and list of loaded files.
+
+        Args:
+            config_paths: List of config file paths to load
 
         Returns:
             Tuple of (success, loaded_files) where loaded_files contains paths in load order
@@ -967,12 +1021,16 @@ class CommandLineParser:
                 load_dotenv(env_path, override=False)
                 loaded_files.append(env_path.resolve())
 
-        # Then check for config file, with inheritance
+        # Then check for config files, with inheritance
+        # Load in reverse order so that later files have priority (with override=False, first loaded wins)
         config_files = []
-        if config_path.exists() and config_path.is_file():
-            success, config_files = cls._load_config_with_parents(config_path)
-            if not success:
-                return False, []
+        for config_path in reversed(config_paths):
+            if config_path.exists() and config_path.is_file():
+                success, files = cls._load_config_with_parents(config_path)
+                if not success:
+                    return False, []
+                # Prepend files to maintain display order (first specified = first shown)
+                config_files = files + config_files
 
         return True, loaded_files + config_files
 
@@ -1138,13 +1196,32 @@ class CommandLineParser:
         return target_path
 
     @classmethod
-    def _extract_config_path_from_argv(cls) -> str | None:
+    def _extract_config_paths_from_argv(cls) -> list[str] | None:
+        """Extract config paths from command line arguments.
+
+        Returns:
+            List of config path strings, or None if no -c/--config was specified
+        """
         parser = argparse.ArgumentParser(add_help=False)
-        parser.add_argument("-c", "--config")
+        parser.add_argument("-c", "--config", action="append")
         args = parser.parse_known_args()[0]
         if args.config is None:
             return None
-        return None if args.config is None else Path(args.config.strip())
+
+        # Flatten all -c arguments and split by :: delimiter
+        # BUT preserve :: prefix for special handling (to include default config)
+        config_paths = []
+        for config_arg in args.config:
+            parts = config_arg.split("::")
+            for i, part in enumerate(parts):
+                stripped = part.strip()
+                # Keep :: prefix if this was the first part and was empty
+                if i == 0 and not stripped and config_arg.startswith("::"):
+                    config_paths.append("::")
+                elif stripped:
+                    config_paths.append(stripped)
+
+        return config_paths if config_paths else None
 
     @staticmethod
     def _env_truthy(val: str | None) -> bool:

@@ -50,6 +50,20 @@ Configuration priority (highest to lowest):
 
 Key environment variables use `TWISTT_` prefix (e.g., `TWISTT_OPENAI_API_KEY`, `TWISTT_HOTKEY` or `TWISTT_HOTKEYS`, `TWISTT_POST_TREATMENT_PROMPT`, `TWISTT_POST_TREATMENT_PROVIDER`, `TWISTT_OUTPUT_MODE`, `TWISTT_POST_CORRECT`, `TWISTT_POST_TREATMENT_DISABLED`, `TWISTT_USE_TYPING`, `TWISTT_KEYBOARD_DELAY`, `TWISTT_SILENCE_DURATION`).
 
+**Configuration files (`TWISTT_CONFIG` and `-c`/`--config`)**:
+- Environment variable: can specify multiple config files separated by `::` delimiter (e.g., `TWISTT_CONFIG="base.env::local.env"`)
+- `-c` argument can be specified multiple times: `-c base.env -c local.env`
+- Each `-c` value can contain `::` separators for multiple files: `-c "base.env::local.env"`
+- Config files are loaded in reverse order (last specified file has highest priority)
+- Example: `-c file1.env -c file2.env` → file2.env values override file1.env values
+- Files can use relative paths (resolved in config dir `~/.config/twistt/`) or absolute paths
+- Each config file can define `TWISTT_PARENT_CONFIG` to inherit from another config file
+- **Include default config**: Prefix any `-c` value with `::` to include the default config (`~/.config/twistt/config.env`) first:
+  - `-c ::` → uses only default config
+  - `-c ::fr.env` → combines default config + fr.env (fr.env as modifier)
+  - `-c base.env -c ::local.env` → combines default config + base.env + local.env
+  - Without `::` prefix: `-c` replaces default config entirely
+
 **Post-treatment prompts (`TWISTT_POST_TREATMENT_PROMPT` and `-p`/`--post-prompt`)**:
 - Environment variable: can specify multiple prompts separated by `::` delimiter (e.g., `TWISTT_POST_TREATMENT_PROMPT="prompt1.txt::Fix grammar::prompt2.txt"`)
 - Each part is resolved as a file path (if exists) or literal text
