@@ -78,8 +78,9 @@ from rich.text import Text
 class ConsoleWithLogging:
     """Console wrapper that outputs to both stdout and a log file"""
 
-    def __init__(self, log_file, default_log_width=5000):
+    def __init__(self, log_file, default_log_width=5000, enable_logging=True):
         self.console = Console()
+        self.enable_logging = enable_logging
         self.log_console = Console(
             file=log_file,
             force_terminal=False,
@@ -98,8 +99,9 @@ class ConsoleWithLogging:
         # Terminal
         self.console.print(*objects, **kwargs)
 
-        # Log
-        self.log_console.print(*objects, **kwargs, width=log_max_width)
+        # Log (only if enabled)
+        if self.enable_logging:
+            self.log_console.print(*objects, **kwargs, width=log_max_width)
 
     def print(self, *objects, **kwargs):
         """Print only to console, not to log"""
@@ -505,6 +507,11 @@ class CommandLineParser:
             help=f"Path to log file. Default: ~/.config/twistt/twistt.log (env: {prefix}LOG)",
         )
         parser.add_argument(
+            "--check",
+            action="store_true",
+            help="Display configuration and exit without logging anything to file",
+        )
+        parser.add_argument(
             "-sc",
             "--save-config",
             nargs="?",
@@ -779,7 +786,7 @@ class CommandLineParser:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(log_path, "a", encoding="utf-8")
 
-        console = ConsoleWithLogging(log_file)
+        console = ConsoleWithLogging(log_file, enable_logging=not args.check)
 
         # Create configuration table
         config_table = Table(show_header=False, box=None, padding=(0, 1))
@@ -880,6 +887,12 @@ class CommandLineParser:
         # Display the configuration panel
         console.print_and_log(Panel(config_table, title="[bold]Twistt Configuration[/bold]", border_style="blue"), log_max_width=150)
         console.print()
+
+        # If --check mode, display success and exit
+        if args.check:
+            console.print("[bold green]Configuration check passed![/bold green] Everything looks good.\n")
+            return None
+
         console.print(
             f"[bold green]Ready![/bold green] Hold (or double tap) [bold yellow]{hotkeys_display}[/bold yellow] to start recording. "
             f"Press [bold red]Ctrl+C[/bold red] to stop the program.\n"
@@ -1039,7 +1052,7 @@ class CommandLineParser:
     def _get_args_defined_on_cli(cls) -> set[str]:
         parser = argparse.ArgumentParser(add_help=False)
         cls._create_arguments(parser, {})
-        ignore_keys = {"config", "save_config"}
+        ignore_keys = {"config", "save_config", "check"}
         return {key for key, value in vars(parser.parse_known_args()[0]).items() if value is not cls._UNDEFINED and key not in ignore_keys}
 
     @classmethod

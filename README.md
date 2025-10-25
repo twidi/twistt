@@ -168,6 +168,7 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 | `-t, --use-typing, -nt, --no-use-typing`       | `TWISTT_USE_TYPING`                                 | false                         | Type ASCII characters directly (slower); clipboard still handles non-ASCII. Use `-t`/`--use-typing` to enable, `-nt`/`--no-use-typing` to disable                                                                       |
 | `-kd, --keyboard-delay`                        | `TWISTT_KEYBOARD_DELAY`                             | 20                            | Delay in milliseconds between keyboard actions (typing, paste, navigation keys). Increase if you experience character ordering issues                                                                                   |
 | `--log`                                        | `TWISTT_LOG`                                        | `~/.config/twistt/twistt.log` | Path to log file where transcription sessions are saved                                                                                                                                                                 |
+| `--check`                                      | -                                                   | -                             | Display configuration and exit without logging anything to file. Useful for verifying settings before running.                                                                                                          |
 | `-c, --config PATH`                            | `TWISTT_CONFIG`                                     | `~/.config/twistt/config.env` | Load configuration overrides from the specified file instead of the default user config                                                                                                                                 |
 | `-sc, --save-config [PATH]`                    | `TWISTT_CONFIG`                                     | false                         | Persist provided command-line values to a config file (defaults to `~/.config/twistt/config.env` or `TWISTT_CONFIG` if set)                                                                                             |
 
@@ -358,6 +359,10 @@ TWISTT_PROVIDER=deepgram TWISTT_DEEPGRAM_API_KEY=dg_xxx ./twistt.py --model nova
 
 # Disable logging (output to /dev/null)
 ./twistt.py --log /dev/null
+
+# Check configuration without starting (useful to verify settings)
+./twistt.py --check
+./twistt.py --config french --check  # Verify a specific config
 ```
 
 ### How It Works
