@@ -51,14 +51,17 @@ Configuration priority (highest to lowest):
 Key environment variables use `TWISTT_` prefix (e.g., `TWISTT_OPENAI_API_KEY`, `TWISTT_HOTKEY` or `TWISTT_HOTKEYS`, `TWISTT_POST_TREATMENT_PROMPT`, `TWISTT_POST_TREATMENT_PROVIDER`, `TWISTT_OUTPUT_MODE`, `TWISTT_POST_CORRECT`, `TWISTT_POST_TREATMENT_DISABLED`, `TWISTT_USE_TYPING`, `TWISTT_KEYBOARD_DELAY`, `TWISTT_SILENCE_DURATION`).
 
 **Post-treatment prompts (`TWISTT_POST_TREATMENT_PROMPT` and `-p`/`--post-prompt`)**:
-- Can specify multiple prompts separated by `::` delimiter (e.g., `TWISTT_POST_TREATMENT_PROMPT="prompt1.txt::Fix grammar::prompt2.txt"`)
+- Environment variable: can specify multiple prompts separated by `::` delimiter (e.g., `TWISTT_POST_TREATMENT_PROMPT="prompt1.txt::Fix grammar::prompt2.txt"`)
 - Each part is resolved as a file path (if exists) or literal text
 - All prompts are concatenated with double newlines (`\n\n`) between them
-- `-p` argument behavior:
-  - Without value: uses `TWISTT_POST_TREATMENT_PROMPT` and overrides `TWISTT_POST_TREATMENT_DISABLED=true`
-  - With value starting with `::`: appends to `TWISTT_POST_TREATMENT_PROMPT` (e.g., `-p "::extra.txt"`)
-  - With value not starting with `::`: replaces `TWISTT_POST_TREATMENT_PROMPT` entirely (e.g., `-p "custom.txt"`)
-- Order of concatenation: environment variable prompts first, then `-p` prompts (if in append mode)
+- `-p` argument can be specified multiple times: `-p file1.txt -p "Fix grammar" -p file2.txt`
+- Each `-p` value can contain `::` separators for multiple prompts: `-p "prompt1.txt::Fix grammar"`
+- If ANY `-p` value starts with `::`, the environment variable is included first:
+  - `-p ::` → uses only `TWISTT_POST_TREATMENT_PROMPT`
+  - `-p "::extra.txt"` → combines env var + extra.txt
+  - `-p file1.txt -p "::file2.txt"` → combines env var + file1.txt + file2.txt
+- Without `::` prefix: `-p` replaces `TWISTT_POST_TREATMENT_PROMPT` entirely
+- Order of concatenation: env var (if requested) → all `-p` values in order (with `::` prefix removed)
 
 `TWISTT_USE_TYPING` (or `--use-typing`) enables per-character typing for ASCII text, which is slower because of key delays; clipboard paste remains the fallback for non-ASCII characters.
 

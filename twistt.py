@@ -392,11 +392,11 @@ class CommandLineParser:
         parser.add_argument(
             "-p",
             "--post-prompt",
-            nargs="?",
-            const="__USE_ENV__",
-            default=default.get("POST_TREATMENT_PROMPT", cls._UNDEFINED),
-            help=f"Post-treatment prompt instructions or path to file. "
-            f"Without value: uses {prefix}POST_TREATMENT_PROMPT and overrides {prefix}POST_TREATMENT_DISABLED",
+            action="append",
+            default=None,
+            help=f"Post-treatment prompt instructions, file path, or multiple separated by '::'. "
+            f"Can be specified multiple times. Prefix any value with '::' to include {prefix}POST_TREATMENT_PROMPT. "
+            f"Example: -p ::base.txt -p 'Fix grammar'",
         )
         parser.add_argument(
             "-pm",
@@ -627,13 +627,7 @@ class CommandLineParser:
             return None
 
         # Detect if -p/--post-prompt and --no-post were explicitly passed on command line
-        # Note: We check if the argument was provided by looking at sys.argv
-        # We also check if args.post_prompt == "__USE_ENV__" which indicates -p without value
-        post_prompt_from_cli = (
-            "-p" in sys.argv
-            or any(arg == "--post-prompt" or arg.startswith("--post-prompt=") for arg in sys.argv)
-            or args.post_prompt == "__USE_ENV__"
-        )
+        post_prompt_from_cli = args.post_prompt is not None
         no_post_from_cli = "-np" in sys.argv or "--no-post" in sys.argv
 
         # Validation: cannot use both -p and --no-post explicitly in CLI
@@ -655,50 +649,51 @@ class CommandLineParser:
             if not env_prompt_content and env_prompts_str:
                 # Error occurred during resolution
                 return None
-            post_prompt_files.extend(env_files)
 
-        # Handle -p without value: use environment variable
-        if args.post_prompt == "__USE_ENV__":
-            if not env_prompts_str:
-                errprint(f"ERROR: -p/--post-prompt was specified without a value, but {prefix}POST_TREATMENT_PROMPT environment variable is not set")
+        # Process -p arguments (can be multiple)
+        if args.post_prompt:
+            # Check if any -p value starts with :: (indicates we should include env var)
+            include_env = any(p.startswith("::") for p in args.post_prompt)
+
+            if include_env and not env_prompts_str:
+                errprint(f"ERROR: -p/--post-prompt with '::' prefix was specified, but {prefix}POST_TREATMENT_PROMPT environment variable is not set")
                 return None
-            # Use env prompts only
-            post_prompt = env_prompt_content
-            post_prompt_total_count = env_prompt_count
-            post_treatment_configured = bool(post_prompt)
-        elif args.post_prompt:
-            # -p was provided with a value
-            cli_prompts_str = args.post_prompt
 
-            # Check if it starts with :: (append mode)
-            if cli_prompts_str.startswith("::"):
-                # Append mode: combine env + cli
-                cli_prompts_str = cli_prompts_str[2:]  # Remove :: prefix
-                cli_prompt_content, cli_files, cli_prompt_count = cls._resolve_prompts(cli_prompts_str, config_dir)
-                if not cli_prompt_content and cli_prompts_str:
+            # Collect all prompt contents
+            all_contents = []
+
+            # Add env var first if requested
+            if include_env:
+                all_contents.append(env_prompt_content)
+                post_prompt_files.extend(env_files)
+                post_prompt_total_count += env_prompt_count
+
+            # Process each -p value in order
+            for p_value in args.post_prompt:
+                # Remove :: prefix if present
+                p_clean = p_value[2:] if p_value.startswith("::") else p_value
+
+                # Skip empty values (e.g., "-p ::" with nothing after)
+                if not p_clean:
+                    continue
+
+                # Resolve this prompt part (may contain :: separator for multiple prompts)
+                cli_prompt_content, cli_files, cli_prompt_count = cls._resolve_prompts(p_clean, config_dir)
+                if not cli_prompt_content:
                     return None
-                post_prompt_files.extend(cli_files)
 
-                # Combine env and cli prompts
-                if env_prompt_content:
-                    post_prompt = f"{env_prompt_content}\n\n{cli_prompt_content}"
-                else:
-                    post_prompt = cli_prompt_content
-                post_prompt_total_count = env_prompt_count + cli_prompt_count
-            else:
-                # Replace mode: use only cli prompts
-                post_prompt_files = []  # Clear env files
-                cli_prompt_content, cli_files, cli_prompt_count = cls._resolve_prompts(cli_prompts_str, config_dir)
-                if not cli_prompt_content and cli_prompts_str:
-                    return None
+                all_contents.append(cli_prompt_content)
                 post_prompt_files.extend(cli_files)
-                post_prompt = cli_prompt_content
-                post_prompt_total_count = cli_prompt_count
+                post_prompt_total_count += cli_prompt_count
 
+            # Combine all contents
+            post_prompt = "\n\n".join(all_contents)
             post_treatment_configured = bool(post_prompt)
+
         elif env_prompt_content:
             # No -p provided, but env var is set
             post_prompt = env_prompt_content
+            post_prompt_files.extend(env_files)
             post_prompt_total_count = env_prompt_count
             post_treatment_configured = True
 

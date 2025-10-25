@@ -144,32 +144,32 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 
 ### Available Options
 
-| Option                                         | Environment Variable                                | Default                       | Description                                                                                                                                                                                         |
-|------------------------------------------------|-----------------------------------------------------|-------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `-k, --hotkey`                                 | `TWISTT_HOTKEY` or `TWISTT_HOTKEYS`                 | F9                            | Push-to-talk key(s) (F1-F12), comma-separated for multiple                                                                                                                                          |
-| `-kb, --keyboard`                              | `TWISTT_KEYBOARD`                                   | -                             | Filter text for automatically selecting the keyboard input device<br/>Pass without a value to force interactive selection and ignore env defaults                                                   |
-| `-dtw, --double-tap-window`                    | `TWISTT_DOUBLE_TAP_WINDOW`                          | 0.5                           | Time window in seconds for double-tap detection                                                                                                                                                     |
-| `-m, --model`                                  | `TWISTT_MODEL`                                      | gpt-4o-transcribe             | Transcription model (for OpenAI or Deepgram)                                                                                                                                                        |
-| `-l, --language`                               | `TWISTT_LANGUAGE`                                   | Auto-detect                   | Transcription language (ISO 639-1)                                                                                                                                                                  |
-| `-sd, --silence-duration`                      | `TWISTT_SILENCE_DURATION`                           | 500                           | Silence duration in milliseconds before the transcription service ends the current segment                                                                                                          |
-| `-g, --gain`                                   | `TWISTT_GAIN`                                       | 1.0                           | Microphone amplification                                                                                                                                                                            |
-| `-mic, --microphone`                           | `TWISTT_MICROPHONE`                                 | Default input                 | Text filter or ID to select the microphone<br/>Pass without a value to force interactive selection and ignore env defaults                                                                          |
-| `-koa, --openai-api-key`                       | `TWISTT_OPENAI_API_KEY` or `OPENAI_API_KEY`         | -                             | OpenAI API key                                                                                                                                                                                      |
-| `-kdg, --deepgram-api-key`                     | `TWISTT_DEEPGRAM_API_KEY` or `DEEPGRAM_API_KEY`     | -                             | Deepgram API key                                                                                                                                                                                    |
-| `-ys, --ydotool-socket`                        | `TWISTT_YDOTOOL_SOCKET` or `YDOTOOL_SOCKET`         | Auto-detect                   | Path to ydotool socket                                                                                                                                                                              |
-| `-p, --post-prompt`                            | `TWISTT_POST_TREATMENT_PROMPT`                      | -                             | Post-treatment instructions, file paths, or multiple separated by `::`. Prefix with `::` to append to env variable. Without value: uses env variable and overrides `TWISTT_POST_TREATMENT_DISABLED` |
-| `-pm, --post-model`                            | `TWISTT_POST_TREATMENT_MODEL`                       | gpt-4o-mini                   | Model for post-treatment                                                                                                                                                                            |
-| `-pp, --post-provider`                         | `TWISTT_POST_TREATMENT_PROVIDER`                    | openai                        | Provider for post-treatment (openai, cerebras, openrouter)                                                                                                                                          |
-| `-pc, --post-correct, -npc, --no-post-correct` | `TWISTT_POST_TREATMENT_CORRECT`                     | false                         | Apply post-treatment by correcting already-output text in-place (only in batch output mode)                                                                                                         |
-| `-np, --no-post`                               | `TWISTT_POST_TREATMENT_DISABLED`                    | false                         | Disable post-treatment regardless of prompts or files                                                                                                                                               |
-| `-kcb, --cerebras-api-key`                     | `TWISTT_CEREBRAS_API_KEY` or `CEREBRAS_API_KEY`     | -                             | Cerebras API key                                                                                                                                                                                    |
-| `-kor, --openrouter-api-key`                   | `TWISTT_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` | -                             | OpenRouter API key                                                                                                                                                                                  |
-| `-o, --output-mode, -no, --no-output-mode`     | `TWISTT_OUTPUT_MODE`                                | batch                         | Output mode: batch (incremental), full (complete on release), or none (disabled)                                                                                                                    |
-| `-t, --use-typing, -nt, --no-use-typing`       | `TWISTT_USE_TYPING`                                 | false                         | Type ASCII characters directly (slower); clipboard still handles non-ASCII. Use `-t`/`--use-typing` to enable, `-nt`/`--no-use-typing` to disable                                                   |
-| `-kd, --keyboard-delay`                        | `TWISTT_KEYBOARD_DELAY`                             | 20                            | Delay in milliseconds between keyboard actions (typing, paste, navigation keys). Increase if you experience character ordering issues                                                               |
-| `--log`                                        | `TWISTT_LOG`                                        | `~/.config/twistt/twistt.log` | Path to log file where transcription sessions are saved                                                                                                                                             |
-| `-c, --config PATH`                            | `TWISTT_CONFIG`                                     | `~/.config/twistt/config.env` | Load configuration overrides from the specified file instead of the default user config                                                                                                             |
-| `-sc, --save-config [PATH]`                    | `TWISTT_CONFIG`                                     | false                         | Persist provided command-line values to a config file (defaults to `~/.config/twistt/config.env` or `TWISTT_CONFIG` if set)                                                                         |
+| Option                                         | Environment Variable                                | Default                       | Description                                                                                                                                                                                                             |
+|------------------------------------------------|-----------------------------------------------------|-------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `-k, --hotkey`                                 | `TWISTT_HOTKEY` or `TWISTT_HOTKEYS`                 | F9                            | Push-to-talk key(s) (F1-F12), comma-separated for multiple                                                                                                                                                              |
+| `-kb, --keyboard`                              | `TWISTT_KEYBOARD`                                   | -                             | Filter text for automatically selecting the keyboard input device<br/>Pass without a value to force interactive selection and ignore env defaults                                                                       |
+| `-dtw, --double-tap-window`                    | `TWISTT_DOUBLE_TAP_WINDOW`                          | 0.5                           | Time window in seconds for double-tap detection                                                                                                                                                                         |
+| `-m, --model`                                  | `TWISTT_MODEL`                                      | gpt-4o-transcribe             | Transcription model (for OpenAI or Deepgram)                                                                                                                                                                            |
+| `-l, --language`                               | `TWISTT_LANGUAGE`                                   | Auto-detect                   | Transcription language (ISO 639-1)                                                                                                                                                                                      |
+| `-sd, --silence-duration`                      | `TWISTT_SILENCE_DURATION`                           | 500                           | Silence duration in milliseconds before the transcription service ends the current segment                                                                                                                              |
+| `-g, --gain`                                   | `TWISTT_GAIN`                                       | 1.0                           | Microphone amplification                                                                                                                                                                                                |
+| `-mic, --microphone`                           | `TWISTT_MICROPHONE`                                 | Default input                 | Text filter or ID to select the microphone<br/>Pass without a value to force interactive selection and ignore env defaults                                                                                              |
+| `-koa, --openai-api-key`                       | `TWISTT_OPENAI_API_KEY` or `OPENAI_API_KEY`         | -                             | OpenAI API key                                                                                                                                                                                                          |
+| `-kdg, --deepgram-api-key`                     | `TWISTT_DEEPGRAM_API_KEY` or `DEEPGRAM_API_KEY`     | -                             | Deepgram API key                                                                                                                                                                                                        |
+| `-ys, --ydotool-socket`                        | `TWISTT_YDOTOOL_SOCKET` or `YDOTOOL_SOCKET`         | Auto-detect                   | Path to ydotool socket                                                                                                                                                                                                  |
+| `-p, --post-prompt`                            | `TWISTT_POST_TREATMENT_PROMPT`                      | -                             | Post-treatment prompt (text/file). Can be specified multiple times. Within a value, use `::` to separate multiple prompts. Prefix any `-p` value with `::` to include env/config variable. Example: `-p :: -p file.txt` |
+| `-pm, --post-model`                            | `TWISTT_POST_TREATMENT_MODEL`                       | gpt-4o-mini                   | Model for post-treatment                                                                                                                                                                                                |
+| `-pp, --post-provider`                         | `TWISTT_POST_TREATMENT_PROVIDER`                    | openai                        | Provider for post-treatment (openai, cerebras, openrouter)                                                                                                                                                              |
+| `-pc, --post-correct, -npc, --no-post-correct` | `TWISTT_POST_TREATMENT_CORRECT`                     | false                         | Apply post-treatment by correcting already-output text in-place (only in batch output mode)                                                                                                                             |
+| `-np, --no-post`                               | `TWISTT_POST_TREATMENT_DISABLED`                    | false                         | Disable post-treatment regardless of prompts or files                                                                                                                                                                   |
+| `-kcb, --cerebras-api-key`                     | `TWISTT_CEREBRAS_API_KEY` or `CEREBRAS_API_KEY`     | -                             | Cerebras API key                                                                                                                                                                                                        |
+| `-kor, --openrouter-api-key`                   | `TWISTT_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` | -                             | OpenRouter API key                                                                                                                                                                                                      |
+| `-o, --output-mode, -no, --no-output-mode`     | `TWISTT_OUTPUT_MODE`                                | batch                         | Output mode: batch (incremental), full (complete on release), or none (disabled)                                                                                                                                        |
+| `-t, --use-typing, -nt, --no-use-typing`       | `TWISTT_USE_TYPING`                                 | false                         | Type ASCII characters directly (slower); clipboard still handles non-ASCII. Use `-t`/`--use-typing` to enable, `-nt`/`--no-use-typing` to disable                                                                       |
+| `-kd, --keyboard-delay`                        | `TWISTT_KEYBOARD_DELAY`                             | 20                            | Delay in milliseconds between keyboard actions (typing, paste, navigation keys). Increase if you experience character ordering issues                                                                                   |
+| `--log`                                        | `TWISTT_LOG`                                        | `~/.config/twistt/twistt.log` | Path to log file where transcription sessions are saved                                                                                                                                                                 |
+| `-c, --config PATH`                            | `TWISTT_CONFIG`                                     | `~/.config/twistt/config.env` | Load configuration overrides from the specified file instead of the default user config                                                                                                                                 |
+| `-sc, --save-config [PATH]`                    | `TWISTT_CONFIG`                                     | false                         | Persist provided command-line values to a config file (defaults to `~/.config/twistt/config.env` or `TWISTT_CONFIG` if set)                                                                                             |
 
 Selecting a microphone sets the `PULSE_SOURCE` environment variable for Twistt only, so your system default input stays untouched. Run `./twistt.py --microphone` without a value to pick from the list even if an environment variable is set.
 
@@ -242,46 +242,54 @@ TWISTT_POST_TREATMENT_PROMPT="corrections.txt::Make it formal"
 
 **Using `-p` / `--post-prompt` argument:**
 
-The `-p` flag has three modes:
+The `-p` flag can be specified multiple times and supports two modes:
 
-1. **Without value** - uses `TWISTT_POST_TREATMENT_PROMPT` from environment:
-   ```bash
-   ./twistt.py -p  # Uses TWISTT_POST_TREATMENT_PROMPT, overrides TWISTT_POST_TREATMENT_DISABLED
-   ```
-
-2. **Replace mode** (default) - ignores environment variable:
+1. **Replace mode** (default) - ignores environment variable:
    ```bash
    ./twistt.py -p "Fix grammar"                    # Uses only this prompt
    ./twistt.py -p "prompt1.txt::Make it formal"    # Combines these two
+   ./twistt.py -p file1.txt -p "Fix grammar"       # Multiple -p: file1.txt + literal text
    ```
 
-3. **Append mode** (with `::` prefix) - adds to environment variable:
+2. **Append mode** (prefix ANY `-p` value with `::`) - includes environment variable:
    ```bash
    # If TWISTT_POST_TREATMENT_PROMPT="base.txt"
+   ./twistt.py -p "::"                       # Uses only base.txt (env var)
    ./twistt.py -p "::extra.txt"              # Combines: base.txt + extra.txt
-   ./twistt.py -p "::extra.txt::Fix grammar" # Combines: base.txt + extra.txt + literal text
+   ./twistt.py -p :: -p file1.txt            # Combines: base.txt + file1.txt
+   ./twistt.py -p file1.txt -p "::file2.txt" # Combines: base.txt + file1.txt + file2.txt
    ```
 
-**Order of combination:** Environment variable prompts first, then `-p` prompts (in append mode).
+**Key points:**
+- You can use `-p` multiple times: `-p file1.txt -p file2.txt -p "Fix grammar"`
+- If ANY `-p` value starts with `::`, the environment variable is included **first**
+- Order: env var (if requested) → all `-p` values in order (with `::` prefix removed)
+- Each `-p` value can contain `::` separators for multiple prompts within one argument
 
 **Examples:**
 
 ```bash
-# Single prompts (backward compatible)
-./twistt.py --post-prompt translate            # Uses translate.txt if exists, else literal text
-./twistt.py --post-prompt "Fix grammar"        # Direct text
-./twistt.py --post-prompt ./prompts/formal.txt # Explicit file path
+# Single prompts
+./twistt.py -p translate            # Uses translate.txt if exists, else literal text
+./twistt.py -p "Fix grammar"        # Direct text
+./twistt.py -p ./prompts/formal.txt # Explicit file path
 
 # Multiple prompts via environment
 TWISTT_POST_TREATMENT_PROMPT="base.txt::Fix grammar"
 ./twistt.py  # Uses both prompts combined
 
-# Multiple prompts via CLI
-./twistt.py -p "prompt1.txt::Make formal::prompt2.txt"
+# Multiple -p arguments
+./twistt.py -p file1.txt -p "Fix grammar" -p file2.txt
 
-# Appending to environment prompts
+# Mixing :: separator and multiple -p
+./twistt.py -p "prompt1.txt::Make formal" -p prompt2.txt
+
+# Including environment variable
 TWISTT_POST_TREATMENT_PROMPT="base.txt"
-./twistt.py -p "::extra.txt"  # Uses base.txt + extra.txt
+./twistt.py -p ::               # Uses only base.txt
+./twistt.py -p "::extra.txt"    # Uses base.txt + extra.txt
+./twistt.py -p :: -p custom.txt # Uses base.txt + custom.txt
+./twistt.py -p file1.txt -p "::file2.txt"  # Uses base.txt + file1.txt + file2.txt
 
 # Disable post-treatment
 ./twistt.py --no-post
