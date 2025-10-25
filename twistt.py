@@ -855,7 +855,7 @@ class CommandLineParser:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(log_path, "a", encoding="utf-8")
 
-        console = ConsoleWithLogging(log_file, enable_logging=not args.check)
+        console = ConsoleWithLogging(log_file, enable_logging=not args.check and not DEBUG_TO_STDOUT)
 
         # Create configuration table
         config_table = Table(show_header=False, box=None, padding=(0, 1))
