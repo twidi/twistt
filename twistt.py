@@ -865,8 +865,6 @@ class CommandLineParser:
         # Transcription settings
         config_table.add_row("Transcription", f"[yellow]{transcription_model.value}[/yellow] from [green]{provider.value}[/green]")
         config_table.add_row("Language", f"[yellow]{args.language}[/yellow]" if args.language else "[dim]Auto-detect[/dim]")
-        if args.gain != 1.0:
-            config_table.add_row("Audio gain", f"[yellow]{args.gain}x[/yellow]")
 
         # Input settings
         hotkeys_display = ", ".join([k.strip().upper() for k in args.hotkey.split(",")])
@@ -875,6 +873,9 @@ class CommandLineParser:
         config_table.add_row("Keyboard", f"[yellow]{keyboard.name}[/yellow]")
         mic_display_name = microphone.name or microphone.id or "microphone"
         config_table.add_row("Microphone", f"[yellow]{mic_display_name}[/yellow]")
+        if args.gain != 1.0:
+            config_table.add_row("Audio gain", f"[yellow]{args.gain}x[/yellow]")
+        config_table.add_row("Silence duration", f"[yellow]{int(args.silence_duration)}ms[/yellow]")
 
         # Post-treatment settings
         post_treatment_enabled = False
