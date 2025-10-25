@@ -456,7 +456,8 @@ class CommandLineParser:
             errprint(f"ERROR: Config file {config_path} does not exist or is not a file")
             return None
 
-        if not cls._load_env_files(config_path):
+        success, loaded_config_files = cls._load_env_files(config_path)
+        if not success:
             return None
 
         epilog = """Configuration files:
@@ -551,6 +552,7 @@ class CommandLineParser:
             return None
 
         post_prompt = None
+        post_prompt_file = None  # Track if prompt was loaded from a file
         post_treatment_configured = False
 
         # Handle -p without value: use environment variable
@@ -603,6 +605,7 @@ class CommandLineParser:
                     if not post_prompt:
                         errprint(f"ERROR: Post-treatment prompt file is empty: {found_file}")
                         return None
+                    post_prompt_file = found_file  # Store the file path for display
                     post_treatment_configured = True
                 except Exception as exc:
                     errprint(f"ERROR: Unable to read post-treatment prompt file: {exc}")
@@ -742,6 +745,38 @@ class CommandLineParser:
         if not args.use_typing:
             config_table.add_row("", "[dim]Uses Ctrl+V to paste (or Ctrl+Shift+V if Shift is pressed)[/dim]")
 
+        # Files section
+        def format_path(path: Path) -> str:
+            """Format path for display, using ~ for home directory."""
+            try:
+                return f"~/{path.relative_to(Path.home())}"
+            except ValueError:
+                return str(path)
+
+        # Add separator and files section
+        config_table.add_row("", "")
+        config_table.add_row("[bold]Files", "")
+
+        # Configuration files (in load order - lower priority first)
+        if loaded_config_files:
+            if len(loaded_config_files) == 1:
+                # Single file: display directly on the same line
+                config_table.add_row("  Config", f"[yellow]{format_path(loaded_config_files[0])}[/yellow]")
+            else:
+                # Multiple files: show priority explanation and numbered list
+                config_table.add_row("  Config", "[dim](loaded in priority order, last overrides first)[/dim]")
+                for i, config_file in enumerate(loaded_config_files, 1):
+                    config_table.add_row("", f"[yellow]  {i}. {format_path(config_file)}[/yellow]")
+        else:
+            config_table.add_row("  Config", "[dim]None loaded[/dim]")
+
+        # Post-treatment prompt file
+        if post_prompt_file:
+            config_table.add_row("  Prompt", f"[yellow]{format_path(post_prompt_file)}[/yellow]")
+
+        # Log
+        config_table.add_row("  Log", f"[yellow]{format_path(log_path)}[/yellow]")
+
         # Display the configuration panel
         console.print_and_log(Panel(config_table, title="[bold]Twistt Configuration[/bold]", border_style="blue"), log_max_width=150)
         console.print()
@@ -805,17 +840,28 @@ class CommandLineParser:
         )
 
     @classmethod
-    def _load_env_files(cls, config_path: Path | None = None) -> bool:
+    def _load_env_files(cls, config_path: Path | None = None) -> tuple[bool, list[Path]]:
+        """Load environment files and return success status and list of loaded files.
+
+        Returns:
+            Tuple of (success, loaded_files) where loaded_files contains paths in load order
+        """
+        loaded_files = []
+
         # Check for env file in current directory first, then in script directory.
         for directory in {Path.cwd(), Path(__file__).parent}:
             if (env_path := (directory / ".env")).exists() and env_path.is_file():
                 load_dotenv(env_path, override=False)
+                loaded_files.append(env_path.resolve())
 
         # Then check for config file, with inheritance
+        config_files = []
         if config_path.exists() and config_path.is_file():
-            return cls._load_config_with_parents(config_path)
+            success, config_files = cls._load_config_with_parents(config_path)
+            if not success:
+                return False, []
 
-        return True
+        return True, loaded_files + config_files
 
     @classmethod
     def _load_config_with_parents(
@@ -823,28 +869,50 @@ class CommandLineParser:
         config_path: Path,
         visited: set[Path] | None = None,
         source: Path | None = None,
-    ) -> bool:
+        loaded_files: list[Path] | None = None,
+    ) -> tuple[bool, list[Path]]:
+        """Load config file and its parents recursively.
+
+        Returns:
+            Tuple of (success, loaded_files) where loaded_files contains paths in load order
+            (parents first, then children)
+        """
         os.environ.pop(f"{cls.ENV_PREFIX}PARENT_CONFIG", None)
         visited = set() if visited is None else visited
+        loaded_files = [] if loaded_files is None else loaded_files
+
         if config_path in visited:
             errprint(f"ERROR: Circular TWISTT_PARENT_CONFIG reference detected: {config_path}" + (f" (defined in {source})" if source else ""))
-            return False
+            return False, []
         visited.add(config_path)
 
         if not config_path.exists() or not config_path.is_file():
             errprint(f"ERROR: Config file not found or is not a file: {config_path}" + (f" (defined in {source})" if source else ""))
-            return False
+            return False, []
 
+        # Load the config file first so we can read TWISTT_PARENT_CONFIG from it
         load_dotenv(dotenv_path=config_path, override=False)
 
+        # Check if this config has a parent to load
         parent_value = (os.environ.pop(f"{cls.ENV_PREFIX}PARENT_CONFIG", None) or "").strip()
-        if not parent_value:
-            return True
+        if parent_value:
+            parent_path = Path(parent_value).expanduser()
+            if not parent_path.is_absolute():
+                parent_path = config_path.parent / parent_path
+            success, parent_files = cls._load_config_with_parents(
+                parent_path.resolve(strict=False),
+                visited=visited,
+                source=config_path,
+                loaded_files=[],  # Start fresh for parent chain
+            )
+            if not success:
+                return False, []
+            # Add parent files first (lower priority), then current file (higher priority)
+            loaded_files.extend(parent_files)
 
-        parent_path = Path(parent_value).expanduser()
-        if not parent_path.is_absolute():
-            parent_path = config_path.parent / parent_path
-        return cls._load_config_with_parents(parent_path.resolve(strict=False), visited=visited, source=config_path)
+        loaded_files.append(config_path.resolve())
+
+        return True, loaded_files
 
     @classmethod
     def save_config(
