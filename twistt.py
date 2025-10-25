@@ -231,6 +231,96 @@ class CommandLineParser:
         return cls._env_truthy(cls.get_env(name, str(default), prefix_optional))
 
     @classmethod
+    def _resolve_prompt_part(cls, prompt_value: str, config_dir: Path) -> tuple[str, Path | None]:
+        """
+        Resolve a single prompt part to either file content or literal text.
+
+        Returns:
+            (content, file_path) where file_path is None if using literal text
+        """
+        prompt_file_path = Path(prompt_value).expanduser()
+        prompt_exts = [None, ".txt", ".prompt"]
+
+        # Build list of possible file paths
+        if prompt_file_path.is_absolute():
+            # Absolute path: check with and without extensions
+            if prompt_file_path.suffix:
+                prompt_file_paths = [prompt_file_path]
+            else:
+                prompt_file_paths = [prompt_file_path.with_suffix(ext) if ext is not None else prompt_file_path for ext in prompt_exts]
+        else:
+            # Relative path: search in current dir, script dir, and config dir
+            prompt_file_dirs = [
+                Path.cwd(),
+                Path(__file__).parent,
+                config_dir,
+            ]
+            if prompt_file_path.suffix:
+                prompt_file_paths = [dir_ / prompt_file_path for dir_ in prompt_file_dirs]
+            else:
+                prompt_file_paths = [
+                    dir_ / prompt_file_path.with_suffix(ext) if ext is not None else prompt_file_path
+                    for dir_, ext in product(prompt_file_dirs, prompt_exts)
+                ]
+
+        prompt_file_paths = [path.resolve(strict=False) for path in prompt_file_paths]
+
+        # Try to find an existing file
+        found_file = None
+        with suppress(StopIteration):
+            found_file = next(path for path in prompt_file_paths if path.exists() and path.is_file())
+
+        if found_file:
+            # Read from file
+            try:
+                content = found_file.read_text(encoding="utf-8").strip()
+                if not content:
+                    errprint(f"ERROR: Post-treatment prompt file is empty: {found_file}")
+                    return ("", None)
+                return (content, found_file)
+            except Exception as exc:
+                errprint(f"ERROR: Unable to read post-treatment prompt file: {exc}")
+                return ("", None)
+        else:
+            # Use as direct text
+            return (prompt_value, None)
+
+    @classmethod
+    def _resolve_prompts(cls, prompts_str: str, config_dir: Path) -> tuple[str, list[Path], int]:
+        """
+        Resolve multiple prompts separated by '::' delimiter.
+
+        Returns:
+            (concatenated_content, list_of_files, total_prompt_count)
+        """
+        if not prompts_str:
+            return ("", [], 0)
+
+        # Split by :: delimiter
+        prompt_parts = prompts_str.split("::")
+
+        contents = []
+        files = []
+
+        for part in prompt_parts:
+            part = part.strip()
+            if not part:
+                continue
+
+            content, file_path = cls._resolve_prompt_part(part, config_dir)
+            if not content:
+                # Error already printed in _resolve_prompt_part
+                return ("", [], 0)
+
+            contents.append(content)
+            if file_path:
+                files.append(file_path)
+
+        # Join all contents with double newlines
+        final_content = "\n\n".join(contents)
+        return (final_content, files, len(contents))
+
+    @classmethod
     def _create_arguments(cls, parser: argparse.ArgumentParser, default: dict[str, str | bool | None]):
         prefix = cls.ENV_PREFIX
         parser.add_argument(
@@ -552,68 +642,65 @@ class CommandLineParser:
             return None
 
         post_prompt = None
-        post_prompt_file = None  # Track if prompt was loaded from a file
+        post_prompt_files = []  # Track all files loaded
+        post_prompt_total_count = 0  # Total number of prompts (files + text)
         post_treatment_configured = False
+
+        # First, process environment variable (if any)
+        env_prompts_str = cls.get_env("POST_TREATMENT_PROMPT", "")
+        env_prompt_content = ""
+        env_prompt_count = 0
+        if env_prompts_str:
+            env_prompt_content, env_files, env_prompt_count = cls._resolve_prompts(env_prompts_str, config_dir)
+            if not env_prompt_content and env_prompts_str:
+                # Error occurred during resolution
+                return None
+            post_prompt_files.extend(env_files)
 
         # Handle -p without value: use environment variable
         if args.post_prompt == "__USE_ENV__":
-            env_prompt = cls.get_env("POST_TREATMENT_PROMPT")
-            if not env_prompt:
+            if not env_prompts_str:
                 errprint(f"ERROR: -p/--post-prompt was specified without a value, but {prefix}POST_TREATMENT_PROMPT environment variable is not set")
                 return None
-            args.post_prompt = env_prompt
+            # Use env prompts only
+            post_prompt = env_prompt_content
+            post_prompt_total_count = env_prompt_count
+            post_treatment_configured = bool(post_prompt)
+        elif args.post_prompt:
+            # -p was provided with a value
+            cli_prompts_str = args.post_prompt
 
-        if args.post_prompt:
-            # Try to find a file with this name/path, otherwise use as direct text
-            prompt_value = args.post_prompt
-            prompt_file_path = Path(prompt_value).expanduser()
-            prompt_exts = [None, ".txt", ".prompt"]
-
-            # Build list of possible file paths
-            if prompt_file_path.is_absolute():
-                # Absolute path: check with and without extensions
-                if prompt_file_path.suffix:
-                    prompt_file_paths = [prompt_file_path]
-                else:
-                    prompt_file_paths = [prompt_file_path.with_suffix(ext) if ext is not None else prompt_file_path for ext in prompt_exts]
-            else:
-                # Relative path: search in current dir, script dir, and config dir
-                prompt_file_dirs = [
-                    Path.cwd(),
-                    Path(__file__).parent,
-                    config_dir,
-                ]
-                if prompt_file_path.suffix:
-                    prompt_file_paths = [dir_ / prompt_file_path for dir_ in prompt_file_dirs]
-                else:
-                    prompt_file_paths = [
-                        dir_ / prompt_file_path.with_suffix(ext) if ext is not None else prompt_file_path
-                        for dir_, ext in product(prompt_file_dirs, prompt_exts)
-                    ]
-
-            prompt_file_paths = [path.resolve(strict=False) for path in prompt_file_paths]
-
-            # Try to find an existing file
-            found_file = None
-            with suppress(StopIteration):
-                found_file = next(path for path in prompt_file_paths if path.exists() and path.is_file())
-
-            if found_file:
-                # Read from file
-                try:
-                    post_prompt = found_file.read_text(encoding="utf-8").strip()
-                    if not post_prompt:
-                        errprint(f"ERROR: Post-treatment prompt file is empty: {found_file}")
-                        return None
-                    post_prompt_file = found_file  # Store the file path for display
-                    post_treatment_configured = True
-                except Exception as exc:
-                    errprint(f"ERROR: Unable to read post-treatment prompt file: {exc}")
+            # Check if it starts with :: (append mode)
+            if cli_prompts_str.startswith("::"):
+                # Append mode: combine env + cli
+                cli_prompts_str = cli_prompts_str[2:]  # Remove :: prefix
+                cli_prompt_content, cli_files, cli_prompt_count = cls._resolve_prompts(cli_prompts_str, config_dir)
+                if not cli_prompt_content and cli_prompts_str:
                     return None
+                post_prompt_files.extend(cli_files)
+
+                # Combine env and cli prompts
+                if env_prompt_content:
+                    post_prompt = f"{env_prompt_content}\n\n{cli_prompt_content}"
+                else:
+                    post_prompt = cli_prompt_content
+                post_prompt_total_count = env_prompt_count + cli_prompt_count
             else:
-                # Use as direct text
-                post_prompt = prompt_value
-                post_treatment_configured = True
+                # Replace mode: use only cli prompts
+                post_prompt_files = []  # Clear env files
+                cli_prompt_content, cli_files, cli_prompt_count = cls._resolve_prompts(cli_prompts_str, config_dir)
+                if not cli_prompt_content and cli_prompts_str:
+                    return None
+                post_prompt_files.extend(cli_files)
+                post_prompt = cli_prompt_content
+                post_prompt_total_count = cli_prompt_count
+
+            post_treatment_configured = bool(post_prompt)
+        elif env_prompt_content:
+            # No -p provided, but env var is set
+            post_prompt = env_prompt_content
+            post_prompt_total_count = env_prompt_count
+            post_treatment_configured = True
 
         output_enabled = True
         if args.output_mode == "none":
@@ -732,7 +819,7 @@ class CommandLineParser:
             else:
                 config_table.add_row("", "[yellow]Post-treatment without intermediate transcription[/yellow]")
             if post_prompt:
-                preview = post_prompt[:50] + "..." if len(post_prompt) > 50 else post_prompt
+                preview = post_prompt.replace("\n", " ")[:50] + "..." if len(post_prompt) > 50 else post_prompt.replace("\n", " ")
                 config_table.add_row("", f"[dim]Prompt: {preview}[/dim]")
 
         # Output settings
@@ -770,9 +857,27 @@ class CommandLineParser:
         else:
             config_table.add_row("  Config", "[dim]None loaded[/dim]")
 
-        # Post-treatment prompt file
-        if post_prompt_file:
-            config_table.add_row("  Prompt", f"[yellow]{format_path(post_prompt_file)}[/yellow]")
+        # Post-treatment prompt files
+        if post_prompt_files:
+            num_text_prompts = post_prompt_total_count - len(post_prompt_files)
+
+            if len(post_prompt_files) == 1:
+                if num_text_prompts > 0:
+                    # 1 file + text prompts
+                    text_suffix = f" [dim](plus {num_text_prompts} text prompt{'s' if num_text_prompts > 1 else ''})[/dim]"
+                    config_table.add_row("  Prompt", f"[yellow]{format_path(post_prompt_files[0])}[/yellow]{text_suffix}")
+                else:
+                    # 1 file only
+                    config_table.add_row("  Prompt", f"[yellow]{format_path(post_prompt_files[0])}[/yellow]")
+            else:
+                # Multiple files
+                if num_text_prompts > 0:
+                    text_suffix = f", plus {num_text_prompts} text prompt{'s' if num_text_prompts > 1 else ''}"
+                else:
+                    text_suffix = ""
+                config_table.add_row("  Prompts", f"[dim](combined in order specified{text_suffix})[/dim]")
+                for i, prompt_file in enumerate(post_prompt_files, 1):
+                    config_table.add_row("", f"[yellow]  {i}. {format_path(prompt_file)}[/yellow]")
 
         # Log
         config_table.add_row("  Log", f"[yellow]{format_path(log_path)}[/yellow]")

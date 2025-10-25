@@ -48,9 +48,17 @@ Configuration priority (highest to lowest):
 3. Local `.env` file in script directory
 4. Environment variables
 
-Key environment variables use `TWISTT_` prefix (e.g., `TWISTT_OPENAI_API_KEY`, `TWISTT_HOTKEY` or `TWISTT_HOTKEYS`, `TWISTT_POST_TREATMENT_PROMPT` (can be text or file path), `TWISTT_POST_TREATMENT_PROVIDER`, `TWISTT_OUTPUT_MODE`, `TWISTT_POST_CORRECT`, `TWISTT_POST_TREATMENT_DISABLED`, `TWISTT_USE_TYPING`, `TWISTT_KEYBOARD_DELAY`, `TWISTT_SILENCE_DURATION`).
+Key environment variables use `TWISTT_` prefix (e.g., `TWISTT_OPENAI_API_KEY`, `TWISTT_HOTKEY` or `TWISTT_HOTKEYS`, `TWISTT_POST_TREATMENT_PROMPT`, `TWISTT_POST_TREATMENT_PROVIDER`, `TWISTT_OUTPUT_MODE`, `TWISTT_POST_CORRECT`, `TWISTT_POST_TREATMENT_DISABLED`, `TWISTT_USE_TYPING`, `TWISTT_KEYBOARD_DELAY`, `TWISTT_SILENCE_DURATION`).
 
-**Note on post-treatment activation**: Passing `-p` or `--post-prompt` without a value uses `TWISTT_POST_TREATMENT_PROMPT` and overrides `TWISTT_POST_TREATMENT_DISABLED=true` if set in config. This allows enabling post-treatment on-demand even when disabled by default. Error if combined with `--no-post` or if `TWISTT_POST_TREATMENT_PROMPT` is not set.
+**Post-treatment prompts (`TWISTT_POST_TREATMENT_PROMPT` and `-p`/`--post-prompt`)**:
+- Can specify multiple prompts separated by `::` delimiter (e.g., `TWISTT_POST_TREATMENT_PROMPT="prompt1.txt::Fix grammar::prompt2.txt"`)
+- Each part is resolved as a file path (if exists) or literal text
+- All prompts are concatenated with double newlines (`\n\n`) between them
+- `-p` argument behavior:
+  - Without value: uses `TWISTT_POST_TREATMENT_PROMPT` and overrides `TWISTT_POST_TREATMENT_DISABLED=true`
+  - With value starting with `::`: appends to `TWISTT_POST_TREATMENT_PROMPT` (e.g., `-p "::extra.txt"`)
+  - With value not starting with `::`: replaces `TWISTT_POST_TREATMENT_PROMPT` entirely (e.g., `-p "custom.txt"`)
+- Order of concatenation: environment variable prompts first, then `-p` prompts (if in append mode)
 
 `TWISTT_USE_TYPING` (or `--use-typing`) enables per-character typing for ASCII text, which is slower because of key delays; clipboard paste remains the fallback for non-ASCII characters.
 
@@ -84,3 +92,5 @@ No formal test suite exists. Testing is manual:
 6. Test provider switching (OpenAI, Cerebras, OpenRouter) for post-treatment
 7. Test output modes (batch vs full vs none) with and without post-treatment
 8. Test toggle mode activation/deactivation with same hotkey when multiple hotkeys are configured
+- never care about retro-compatibility, it's a personal project
+- pas besoin d'etre precis apres chaque update quand tu mets a jour CLAUDE.md. par contre il est important de mettre a jour le readme si les modifications ont un impact sur l'utilisateur (notamment tout ce qui est arguments/variables d'environement)
