@@ -2325,9 +2325,12 @@ class OpenAITranscriptionTask(BaseTranscriptionTask):
         DONE = "conversation.item.input_audio_transcription.completed"
         COMMIT = "input_audio_buffer.commit"
 
+    STOP_TIMEOUT_SECONDS = 2.0
+
     def __init__(self, comm: Comm, config: Config.App):
-        self.waiting_for_transcription_when_no_speech_no_recording = False
-        self.first_audio_when_no_speech_no_recording : float | None = None
+        self._commit_sent_after_stop: bool = False
+        self._recording_stopped_at: float | None = None
+        self._ws: Any = None  # Store websocket for sending commit from on_data
         super().__init__(comm, config)
 
     @cached_property
@@ -2366,14 +2369,26 @@ class OpenAITranscriptionTask(BaseTranscriptionTask):
             data["session"]["input_audio_transcription"]["language"] = self.config.transcription.language
         return json.dumps(data)
 
-    def reset_after_waiting_when_no_speech_no_recording(self):
-        self.waiting_for_transcription_when_no_speech_no_recording = False
-        self.first_audio_when_no_speech_no_recording = None
+    def _reset_stop_state(self):
+        self._commit_sent_after_stop = False
+        self._recording_stopped_at = None
 
     async def on_connected(self, ws):
-        self.reset_after_waiting_when_no_speech_no_recording()
+        self._reset_stop_state()
+        self._ws = ws  # Store for later use in on_data
         await super().on_connected(ws)
         await ws.send(self._first_message)
+
+    async def _maybe_send_commit(self):
+        """Send commit if recording stopped and we haven't sent it yet.
+
+        This is called from on_data (on each message received) to ensure
+        the commit is sent as soon as recording stops, not just on timeout.
+        """
+        if not self.comm.is_recording and not self._commit_sent_after_stop and self._ws:
+            await self._ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+            self._commit_sent_after_stop = True
+            self._recording_stopped_at = time.perf_counter()
 
     async def send_audio_chunk(self, ws, chunk: bytes):
         await ws.send(
@@ -2386,36 +2401,26 @@ class OpenAITranscriptionTask(BaseTranscriptionTask):
         )
 
     async def should_stop_receiver(self, ws) -> bool:
-        if not await super().should_stop_receiver(ws):
+        # Try to send commit (also done in on_data, but this handles the case
+        # where no messages are received after recording stops)
+        await self._maybe_send_commit()
+
+        # If we've sent the commit, wait for server response with a timeout
+        if self._recording_stopped_at is not None:
+            delay = time.perf_counter() - self._recording_stopped_at
+            if delay > self.STOP_TIMEOUT_SECONDS:
+                return True
+            # Keep waiting for response
             return False
 
-        if not self.comm.is_speech_active:
-            if not self.waiting_for_transcription_when_no_speech_no_recording:
-                debug("Period with audio when no speech no recording starts")
-                self.waiting_for_transcription_when_no_speech_no_recording = True
-            if self.first_audio_when_no_speech_no_recording is None and not self.comm.is_recording:
-                self.first_audio_when_no_speech_no_recording = time.perf_counter()
-
-        if not self.waiting_for_transcription_when_no_speech_no_recording:
-            return True
-
-        if not self.comm.is_recording and not self.comm.has_audio_chunks:
-
-            if self.first_audio_when_no_speech_no_recording is None:
-                self.waiting_for_transcription_when_no_speech_no_recording = True
-                self.first_audio_when_no_speech_no_recording = time.perf_counter()
-
-            delay = time.perf_counter() - self.first_audio_when_no_speech_no_recording
-            if delay > 1:
-                debug("Not recording since 1s; STOPPING RECEIVER")
-                return True
-
-            debug(f"Not recording since > {delay:.1f}ms; Send commit and wait...")
-            await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
-
-        return False
+        # Normal stop condition: no more transcription activity
+        return await super().should_stop_receiver(ws)
 
     async def on_data(self, raw, previous_transcriptions, current_transcription) -> bool:
+        # Check if we need to send commit (recording stopped but pending transcription)
+        # This is done on every message to ensure quick response when hotkey is released
+        await self._maybe_send_commit()
+
         event = json.loads(raw)
 
         try:
@@ -2426,17 +2431,17 @@ class OpenAITranscriptionTask(BaseTranscriptionTask):
 
         match event_type:
             case self.Event.SPEECH_STARTED:
-                self.reset_after_waiting_when_no_speech_no_recording()
+                self._reset_stop_state()
                 await self._handle_start_of_speech()
 
             case self.Event.DELTA:
                 if not self.comm.is_speech_active:
-                    self.reset_after_waiting_when_no_speech_no_recording()
+                    self._reset_stop_state()
                     await self._handle_start_of_speech()
                 await self._handle_new_delta(event.get("delta"), current_transcription)
 
             case self.Event.DONE:
-                self.reset_after_waiting_when_no_speech_no_recording()
+                self._reset_stop_state()
                 await self._handle_done_segment(
                     event.get("transcript"),
                     previous_transcriptions,
