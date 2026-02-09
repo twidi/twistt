@@ -5,7 +5,7 @@ A Linux speech-to-text transcription tool using OpenAI or Deepgram for STT with 
 ## Features
 
 - **Push-to-Talk**: Hold a function key (F1-F12) to record and transcribe
-- **Toggle mode**: Double-tap the key to start recording, press again to stop
+- **Toggle mode**: Tap (or double-tap) the key to start recording, press again to stop
 - **Smart transcription**: Text appears when you pause or stop speaking
 - **Auto-output**: Automatically outputs transcribed text at cursor position
 - **Multi-language support**: Transcribe in any language supported by the provider
@@ -116,7 +116,8 @@ TWISTT_LANGUAGE=en  # Leave empty or omit for auto-detect
 TWISTT_SILENCE_DURATION=500  # Milliseconds of silence before ending the current segment
 TWISTT_GAIN=1.0
 TWISTT_MICROPHONE=Elgato Wave 3  # Optional text filter to auto-select a microphone
-TWISTT_DOUBLE_TAP_WINDOW=0.5  # Time window for double-tap detection
+TWISTT_DOUBLE_TAP_WINDOW=0.5  # Time window for double-tap detection (and single-tap threshold)
+TWISTT_TOGGLE_MODE=double  # Toggle activation: single (one tap) or double (double-tap)
 TWISTT_KEYBOARD=keychron  # Optional text filter to auto-select matching keyboard
 TWISTT_YDOTOOL_SOCKET=/run/user/1000/.ydotool_socket  # Optional, auto-detected by default
 
@@ -152,7 +153,8 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 |------------------------------------------------|-----------------------------------------------------|-------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `-k, --hotkey`                                 | `TWISTT_HOTKEY` or `TWISTT_HOTKEYS`                 | F9                            | Push-to-talk key(s) (F1-F12), comma-separated for multiple                                                                                                                                                              |
 | `-kb, --keyboard`                              | `TWISTT_KEYBOARD`                                   | -                             | Filter text for automatically selecting the keyboard input device<br/>Pass without a value to force interactive selection and ignore env defaults                                                                       |
-| `-dtw, --double-tap-window`                    | `TWISTT_DOUBLE_TAP_WINDOW`                          | 0.5                           | Time window in seconds for double-tap detection                                                                                                                                                                         |
+| `-dtw, --double-tap-window`                    | `TWISTT_DOUBLE_TAP_WINDOW`                          | 0.5                           | Time window in seconds for double-tap detection (and single-tap threshold)                                                                                                                                              |
+| `-tm, --toggle-mode`                           | `TWISTT_TOGGLE_MODE`                                | double                        | Toggle activation mode: `single` (one tap) or `double` (double-tap)                                                                                                                                                    |
 | `-m, --model`                                  | `TWISTT_MODEL`                                      | gpt-4o-transcribe             | Transcription model (for OpenAI or Deepgram)                                                                                                                                                                            |
 | `-l, --language`                               | `TWISTT_LANGUAGE`                                   | Auto-detect                   | Transcription language (ISO 639-1)                                                                                                                                                                                      |
 | `-sd, --silence-duration`                      | `TWISTT_SILENCE_DURATION`                           | 500                           | Silence duration in milliseconds before the transcription service ends the current segment                                                                                                                              |
@@ -502,13 +504,18 @@ Twistt supports two recording modes:
 5. **Release to transcribe**: Let go of the key
 6. **Auto-output**: Text is automatically output at cursor position
 
-#### Toggle Mode (Double-Tap)
-1. **Start the script**: Run `./twistt.py`
-2. **Position cursor**: Click where you want text to appear
-3. **Double-tap to start**: Press-release-press the same hotkey quickly (within 0.5s)
-4. **Speak freely**: Recording continues without holding any key
-5. **Press to stop**: Press the same hotkey once to stop recording (only the hotkey that started toggle mode can stop it)
-6. **Auto-output**: Text is automatically output at cursor position
+#### Toggle Mode (Single-Tap or Double-Tap)
+
+Toggle mode can be activated with either a single tap or a double tap, depending on the `--toggle-mode` setting:
+
+- **Single-tap mode** (`--toggle-mode single`): A quick tap (shorter than `--double-tap-window`) activates toggle mode. A longer press works as push-to-talk.
+- **Double-tap mode** (`--toggle-mode double`, default): Press-release-press the same hotkey quickly (within `--double-tap-window`) to activate toggle mode.
+
+Once in toggle mode:
+
+1. **Speak freely**: Recording continues without holding any key
+2. **Press to stop**: Press the same hotkey once to stop recording (only the hotkey that started toggle mode can stop it)
+3. **Auto-output**: Text is automatically output at cursor position
 
 The transcription appears where the cursor is located.
 

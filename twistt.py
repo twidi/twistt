@@ -154,6 +154,11 @@ def errprint(*args) -> None:
     print(*args, file=sys.stderr)
 
 
+class ToggleMode(StrEnum):
+    SINGLE = "single"
+    DOUBLE = "double"
+
+
 class OutputMode(Enum):
     BATCH = "batch"
     FULL = "full"
@@ -172,6 +177,7 @@ class Config:
         device: InputDevice
         codes: list[int]
         double_tap_window: float
+        toggle_mode: ToggleMode
 
     class Capture(NamedTuple):
         gain: float
@@ -243,6 +249,7 @@ class CommandLineParser:
         "keyboard_delay": f"{ENV_PREFIX}KEYBOARD_DELAY",
         "indicator_text": f"{ENV_PREFIX}INDICATOR_TEXT",
         "no_indicator": f"{ENV_PREFIX}INDICATOR_TEXT_DISABLED",
+        "toggle_mode": f"{ENV_PREFIX}TOGGLE_MODE",
     }
 
     @classmethod
@@ -499,6 +506,13 @@ class CommandLineParser:
             help=f"Time window in seconds for double-tap detection (env: {prefix}DOUBLE_TAP_WINDOW)",
         )
         parser.add_argument(
+            "-tm",
+            "--toggle-mode",
+            default=default.get("TOGGLE_MODE", cls._UNDEFINED),
+            choices=[mode.value for mode in ToggleMode],
+            help=f"Toggle activation mode: single (one tap) or double (double-tap) (env: {prefix}TOGGLE_MODE)",
+        )
+        parser.add_argument(
             "-t",
             "--use-typing",
             action=argparse.BooleanOptionalAction,
@@ -701,6 +715,7 @@ class CommandLineParser:
             "OPENROUTER_API_KEY": cls.get_env("OPENROUTER_API_KEY", prefix_optional=True),
             "OUTPUT_MODE": cls.get_env("OUTPUT_MODE", OutputMode.BATCH.value),
             "DOUBLE_TAP_WINDOW": float(cls.get_env("DOUBLE_TAP_WINDOW", "0.5")),
+            "TOGGLE_MODE": cls.get_env("TOGGLE_MODE", ToggleMode.DOUBLE.value),
             "USE_TYPING": cls.get_env_bool("USE_TYPING"),
             "KEYBOARD": cls.get_env("KEYBOARD"),
             "KEYBOARD_DELAY": int(cls.get_env("KEYBOARD_DELAY", "20")),
@@ -903,7 +918,10 @@ class CommandLineParser:
         # Input settings
         hotkeys_display = ", ".join([k.strip().upper() for k in args.hotkey.split(",")])
         config_table.add_row("Hotkey" + ("s" if "," in args.hotkey else ""), f"[bold yellow]{hotkeys_display}[/bold yellow]")
-        config_table.add_row("", "[dim]Hold: push-to-talk | Double-tap: toggle mode[/dim]")
+        if args.toggle_mode == ToggleMode.SINGLE.value:
+            config_table.add_row("", "[dim]Tap: toggle mode | Hold: push-to-talk[/dim]")
+        else:
+            config_table.add_row("", "[dim]Hold: push-to-talk | Double-tap: toggle mode[/dim]")
         config_table.add_row("Keyboard", f"[yellow]{keyboard.name}[/yellow]")
         mic_display_name = microphone.name or microphone.id or "microphone"
         config_table.add_row("Microphone", f"[yellow]{mic_display_name}[/yellow]")
@@ -1004,8 +1022,12 @@ class CommandLineParser:
             console.print("[bold green]Configuration check passed![/bold green] Everything looks good.\n")
             return None
 
+        if args.toggle_mode == ToggleMode.SINGLE.value:
+            ready_hint = "Hold (or tap) "
+        else:
+            ready_hint = "Hold (or double tap) "
         console.print(
-            f"[bold green]Ready![/bold green] Hold (or double tap) [bold yellow]{hotkeys_display}[/bold yellow] to start recording. "
+            f"[bold green]Ready![/bold green] {ready_hint}[bold yellow]{hotkeys_display}[/bold yellow] to start recording. "
             f"Press [bold red]Ctrl+C[/bold red] to stop the program.\n"
         )
 
@@ -1029,6 +1051,7 @@ class CommandLineParser:
                 device=keyboard,
                 codes=hotkey_codes,
                 double_tap_window=args.double_tap_window,
+                toggle_mode=ToggleMode(args.toggle_mode),
             ),
             capture=Config.Capture(
                 gain=args.gain,
@@ -1661,6 +1684,12 @@ class Comm:
             self._is_hotkey_toggle_mode = False
         self._send_speech_state_command()
 
+    def switch_to_toggle_mode(self, hotkey_name: str):
+        """Switch current push-to-talk recording to toggle mode (recording stays active)."""
+        self._is_hotkey_toggle_mode = True
+        self._active_hotkey_name = hotkey_name
+        self._send_speech_state_command()
+
     def wait_for_recording_task(self):
         return create_task(self._recording.wait())
 
@@ -1907,6 +1936,7 @@ class HotKeyTask:
         active_hotkey: int | None = None
         toggle_stop_time = 0.0
         toggle_cooldown = 0.5
+        key_down_time = 0.0
 
         received_event = False
         while True:
@@ -1931,10 +1961,13 @@ class HotKeyTask:
                         self.comm.toggle_shift_pressed(shift_pressed)
 
                         match key_event.keystate:
-                            case self.KEY_DOWN if not hotkey_pressed:
+                            case self.KEY_DOWN if not hotkey_pressed and not is_toggle_mode:
                                 if current_time - toggle_stop_time < toggle_cooldown:
                                     continue
-                                if current_time - last_release_time[scancode] < self.config.hotkey.double_tap_window:
+                                if (
+                                    self.config.hotkey.toggle_mode == ToggleMode.DOUBLE
+                                    and current_time - last_release_time[scancode] < self.config.hotkey.double_tap_window
+                                ):
                                     is_toggle_mode = True
                                     active_hotkey = scancode
                                     hotkey_pressed = True
@@ -1946,6 +1979,7 @@ class HotKeyTask:
                                     is_toggle_mode = False
                                     hotkey_pressed = True
                                     active_hotkey = scancode
+                                    key_down_time = current_time
                                     name = next(k for k, v in F_KEY_CODES.items() if v == scancode)
                                     self.comm.toggle_recording(True, name.upper(), False)
                                 if not OUTPUT_TO_STDOUT:
@@ -1953,9 +1987,20 @@ class HotKeyTask:
 
                             case self.KEY_UP if hotkey_pressed and not is_toggle_mode:
                                 last_release_time[scancode] = current_time
-                                hotkey_pressed = False
-                                active_hotkey = None
-                                self.comm.toggle_recording(False, None, False)
+                                if (
+                                    self.config.hotkey.toggle_mode == ToggleMode.SINGLE
+                                    and current_time - key_down_time < self.config.hotkey.double_tap_window
+                                ):
+                                    is_toggle_mode = True
+                                    hotkey_pressed = False
+                                    name = next(k for k, v in F_KEY_CODES.items() if v == scancode)
+                                    if not OUTPUT_TO_STDOUT:
+                                        print(f"[Toggle mode activated with {name.upper()}]")
+                                    self.comm.switch_to_toggle_mode(name.upper())
+                                else:
+                                    hotkey_pressed = False
+                                    active_hotkey = None
+                                    self.comm.toggle_recording(False, None, False)
 
                             case self.KEY_UP if is_toggle_mode:
                                 last_release_time[scancode] = current_time
