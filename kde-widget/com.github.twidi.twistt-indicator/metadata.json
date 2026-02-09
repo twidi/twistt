@@ -1,0 +1,17 @@
+{
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "Stephane Angel (Twidi)"
+            }
+        ],
+        "Category": "System Information",
+        "Description": "Status indicator for Twistt speech-to-text application. Shows a microphone icon that changes color based on the current state: idle (cyan), recording (orange), transcribing (green), or post-processing (violet).",
+        "Icon": "audio-input-microphone",
+        "Id": "com.github.twidi.twistt-indicator",
+        "Name": "Twistt Indicator",
+        "Version": "1.0"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0",
+    "KPackageStructure": "Plasma/Applet"
+}

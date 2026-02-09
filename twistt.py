@@ -4187,6 +4187,9 @@ class TrayIconTask:
                            "pulse": "twistt-post-treatment-dim", "pulse_color": "#602070"},
     }
 
+    # Path for the state file read by the KDE Plasma widget.
+    PLASMA_STATE_FILE = Path(user_data_dir("twistt")) / "plasma-widget-state"
+
     def __init__(self, comm: Comm):
         self.comm = comm
         self._icon: pystray.Icon | None = None
@@ -4255,6 +4258,25 @@ class TrayIconTask:
             indicator.set_icon_theme_path(self._icon_dir)
             indicator.set_icon_full(idle_info["name"], idle_info["tooltip"])
 
+    # ── Plasma widget state file ─────────────────────────────────────
+
+    @classmethod
+    def _write_plasma_state(cls, state: str) -> None:
+        """Write the current state to the file read by the KDE Plasma widget."""
+        try:
+            cls.PLASMA_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            cls.PLASMA_STATE_FILE.write_text(state)
+        except Exception:
+            pass
+
+    @classmethod
+    def _remove_plasma_state(cls) -> None:
+        """Remove the Plasma widget state file (signals app not running)."""
+        try:
+            cls.PLASMA_STATE_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+
     # ── state polling ───────────────────────────────────────────────
 
     def _resolve_state(self) -> str:
@@ -4286,6 +4308,9 @@ class TrayIconTask:
             icon_name = info["pulse"]
         else:
             icon_name = info["name"]
+
+        # Always update the Plasma widget state file (cheap write).
+        self._write_plasma_state(state)
 
         if state == self._current_state and not has_pulse:
             return
@@ -4355,6 +4380,7 @@ class TrayIconTask:
             except CancelledError:
                 pass
             finally:
+                self._remove_plasma_state()
                 if self._icon is not None:
                     with suppress(Exception):
                         self._icon.stop()
@@ -4362,6 +4388,43 @@ class TrayIconTask:
 
         except Exception as exc:
             errprint(f"[tray-icon] Failed to run system tray icon: {exc}")
+
+
+class PlasmaWidgetStateTask:
+    """Lightweight task that only writes the Plasma widget state file.
+
+    Used when the pystray-based tray icon is disabled but the user still has
+    the KDE Plasma widget installed. It polls the same Comm properties as
+    :class:`TrayIconTask` and writes the resolved state to the state file.
+    """
+
+    UPDATE_INTERVAL = TrayIconTask.UPDATE_INTERVAL
+
+    def __init__(self, comm: Comm):
+        self.comm = comm
+
+    def _resolve_state(self) -> str:
+        if self.comm.is_post_treatment_active:
+            return "post_treatment"
+        if self.comm.is_speech_active:
+            return "speech_active"
+        if self.comm.is_recording:
+            return "recording"
+        return "idle"
+
+    async def run(self):
+        try:
+            TrayIconTask._write_plasma_state("idle")
+            try:
+                while not self.comm.is_shutting_down:
+                    TrayIconTask._write_plasma_state(self._resolve_state())
+                    await asyncio.sleep(self.UPDATE_INTERVAL)
+            except CancelledError:
+                pass
+            finally:
+                TrayIconTask._remove_plasma_state()
+        except Exception as exc:
+            errprint(f"[plasma-state] Failed to write Plasma widget state: {exc}")
 
 
 async def main_async():
@@ -4406,6 +4469,11 @@ async def main_async():
                     tg.create_task(tray_icon_task.run())
                 else:
                     errprint("[tray-icon] System tray icon enabled but dependencies not available. Install system libraries (see README) and restart.")
+                    # Still write the state file for the KDE Plasma widget.
+                    tg.create_task(PlasmaWidgetStateTask(comm).run())
+            else:
+                # Tray icon disabled — write the state file for the KDE Plasma widget.
+                tg.create_task(PlasmaWidgetStateTask(comm).run())
 
             if app_config.post.configured:
                 post_task = PostTreatmentTask(comm, app_config)

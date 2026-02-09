@@ -559,6 +559,43 @@ Then just run Twistt normally — the Python packages will be installed automati
 uv run ./twistt.py
 ```
 
+### KDE Plasma Widget
+
+For KDE Plasma users, Twistt provides a standalone panel widget (plasmoid) as an alternative to the system tray icon. The widget displays the same microphone icon with the same color-coded states, but can be placed **anywhere** in your panel — independently of the system tray area.
+
+**States:**
+- **Cyan** (static): idle
+- **Orange** (pulsing): recording
+- **Green** (pulsing): transcribing
+- **Violet** (pulsing): post-processing
+- **Grey** (static): application not running
+
+The widget communicates with Twistt via a lightweight state file (`~/.local/share/twistt/plasma-widget-state`), which is written automatically by Twistt and cleaned up on exit. No extra Python dependencies are needed — the state file is always written, whether the pystray-based tray icon is enabled or not.
+
+**Installation (requires KDE Plasma 6):**
+
+```bash
+kpackagetool6 --type Plasma/Applet --install kde-widget/com.github.twidi.twistt-indicator/
+```
+
+Then right-click your panel → *Add Widgets* → search for **Twistt Indicator** → drag it to your panel.
+
+**Upgrade after update:**
+
+```bash
+kpackagetool6 --type Plasma/Applet --upgrade kde-widget/com.github.twidi.twistt-indicator/
+# Restart Plasma shell to reload the widget
+kquitapp6 plasmashell && kstart plasmashell
+```
+
+**Uninstall:**
+
+```bash
+kpackagetool6 --type Plasma/Applet --remove com.github.twidi.twistt-indicator
+```
+
+The widget and the system tray icon can be used simultaneously, or independently. If you only use the Plasma widget, you can disable the tray icon with `--no-tray-icon`.
+
 ### Audio Ducking
 
 Audio ducking automatically reduces the volume of all system audio outputs (music, videos, notifications, etc.) while recording, to prevent them from being picked up by the microphone and interfering with transcription. Volume is restored as soon as recording stops (key released or toggle off).
