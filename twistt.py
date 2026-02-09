@@ -1926,6 +1926,8 @@ class HotKeyTask:
     ALT_CODES = {ecodes.KEY_LEFTALT, ecodes.KEY_RIGHTALT}
     KEY_DOWN = evdev.KeyEvent.key_down
     KEY_UP = evdev.KeyEvent.key_up
+    KEY_HOLD = evdev.KeyEvent.key_hold
+    _KEYSTATE_NAMES = {evdev.KeyEvent.key_down: "DOWN", evdev.KeyEvent.key_up: "UP", evdev.KeyEvent.key_hold: "HOLD"}
 
     def __init__(self, comm: Comm, config: Config.App):
         self.comm = comm
@@ -1992,9 +1994,20 @@ class HotKeyTask:
                 scancode = key_event.scancode
 
                 if scancode in self.config.hotkey.codes:
+                    state_name = self._KEYSTATE_NAMES.get(key_event.keystate, f"UNKNOWN({key_event.keystate})")
+                    debug(
+                        f"[HotKey] {state_name} scancode={scancode} device={device.name}"
+                        f" | state: pressed={hotkey_pressed} toggle={is_toggle_mode} active={active_hotkey}"
+                    )
+
                     if active_hotkey is not None and scancode != active_hotkey:
+                        debug(f"[HotKey] Ignored: different hotkey active ({active_hotkey})")
                         if key_event.keystate == self.KEY_UP:
                             last_release_time[scancode] = current_time
+                        continue
+
+                    if key_event.keystate == self.KEY_HOLD:
+                        debug("[HotKey] Ignored: key repeat event")
                         continue
 
                     shift_pressed = any(
@@ -2007,6 +2020,7 @@ class HotKeyTask:
                     match key_event.keystate:
                         case self.KEY_DOWN if not hotkey_pressed and not is_toggle_mode:
                             if current_time - toggle_stop_time < toggle_cooldown:
+                                debug(f"[HotKey] Ignored DOWN: toggle cooldown ({current_time - toggle_stop_time:.3f}s < {toggle_cooldown}s)")
                                 continue
                             if (
                                 self.config.hotkey.toggle_mode == ToggleMode.DOUBLE
@@ -2016,6 +2030,7 @@ class HotKeyTask:
                                 active_hotkey = scancode
                                 hotkey_pressed = True
                                 name = next(k for k, v in F_KEY_CODES.items() if v == scancode)
+                                debug(f"[HotKey] → TOGGLE START ({name.upper()}, double-tap)")
                                 if not OUTPUT_TO_STDOUT:
                                     print(f"[Toggle mode activated with {name.upper()}]")
                                 self.comm.toggle_recording(True, name.upper(), True)
@@ -2025,30 +2040,35 @@ class HotKeyTask:
                                 active_hotkey = scancode
                                 key_down_time = current_time
                                 name = next(k for k, v in F_KEY_CODES.items() if v == scancode)
+                                debug(f"[HotKey] → PTT START ({name.upper()})")
                                 self.comm.toggle_recording(True, name.upper(), False)
                             if not OUTPUT_TO_STDOUT:
                                 print(f"\n--- {datetime.now()} ---")
 
                         case self.KEY_UP if hotkey_pressed and not is_toggle_mode:
                             last_release_time[scancode] = current_time
+                            hold_duration = current_time - key_down_time
                             if (
                                 self.config.hotkey.toggle_mode == ToggleMode.SINGLE
-                                and current_time - key_down_time < self.config.hotkey.double_tap_window
+                                and hold_duration < self.config.hotkey.double_tap_window
                             ):
                                 is_toggle_mode = True
                                 hotkey_pressed = False
                                 name = next(k for k, v in F_KEY_CODES.items() if v == scancode)
+                                debug(f"[HotKey] → TOGGLE START ({name.upper()}, single-tap, held {hold_duration:.3f}s)")
                                 if not OUTPUT_TO_STDOUT:
                                     print(f"[Toggle mode activated with {name.upper()}]")
                                 self.comm.switch_to_toggle_mode(name.upper())
                             else:
                                 hotkey_pressed = False
                                 active_hotkey = None
+                                debug(f"[HotKey] → PTT STOP (held {hold_duration:.3f}s)")
                                 self.comm.toggle_recording(False, None, False)
 
                         case self.KEY_UP if is_toggle_mode:
                             last_release_time[scancode] = current_time
                             hotkey_pressed = False
+                            debug("[HotKey] UP in toggle mode (ignored, toggle continues)")
 
                         case self.KEY_DOWN if is_toggle_mode:
                             is_toggle_mode = False
@@ -2056,8 +2076,12 @@ class HotKeyTask:
                             hotkey_pressed = False
                             toggle_stop_time = current_time
                             name = next(k for k, v in F_KEY_CODES.items() if v == scancode)
+                            debug(f"[HotKey] → TOGGLE STOP ({name.upper()})")
                             print(f"[Toggle mode deactivated with {name.upper()}]")
                             self.comm.toggle_recording(False, None, False)
+
+                        case _:
+                            debug(f"[HotKey] Unmatched event: keystate={key_event.keystate} pressed={hotkey_pressed} toggle={is_toggle_mode}")
 
                 elif self.comm.is_recording and scancode in self.SHIFT_CODES:
                     match key_event.keystate:
