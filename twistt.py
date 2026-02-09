@@ -200,6 +200,10 @@ class Config:
         active: bool
         keyboard_delay_ms: int
 
+    class Indicator(NamedTuple):
+        text: str
+        enabled: bool
+
     class App(NamedTuple):
         console: ConsoleWithLogging
         hotkey: Config.HotKey
@@ -207,6 +211,7 @@ class Config:
         transcription: Config.Transcription
         post: Config.PostTreatment
         output: Config.Output
+        indicator: Config.Indicator
 
 
 class CommandLineParser:
@@ -236,6 +241,8 @@ class CommandLineParser:
         "use_typing": f"{ENV_PREFIX}USE_TYPING",
         "keyboard": f"{ENV_PREFIX}KEYBOARD",
         "keyboard_delay": f"{ENV_PREFIX}KEYBOARD_DELAY",
+        "indicator_text": f"{ENV_PREFIX}INDICATOR_TEXT",
+        "no_indicator": f"{ENV_PREFIX}INDICATOR_TEXT_DISABLED",
     }
 
     @classmethod
@@ -524,6 +531,19 @@ class CommandLineParser:
             help=f"Delay in milliseconds between keyboard actions (typing, paste, navigation keys). Default: 20ms (env: {prefix}KEYBOARD_DELAY)",
         )
         parser.add_argument(
+            "-it",
+            "--indicator-text",
+            default=default.get("INDICATOR_TEXT", cls._UNDEFINED),
+            help=f"Text shown at cursor position while recording/processing (env: {prefix}INDICATOR_TEXT)",
+        )
+        parser.add_argument(
+            "-ni",
+            "--no-indicator",
+            action="store_true",
+            default=default.get("INDICATOR_TEXT_DISABLED", cls._UNDEFINED),
+            help=f"Disable the indicator text shown at cursor position while recording/processing (env: {prefix}INDICATOR_TEXT_DISABLED)",
+        )
+        parser.add_argument(
             "--log",
             default=default.get("LOG", cls._UNDEFINED),
             help=f"Path to log file. Default: {config_dir / 'twistt.log'} (env: {prefix}LOG)",
@@ -684,6 +704,8 @@ class CommandLineParser:
             "USE_TYPING": cls.get_env_bool("USE_TYPING"),
             "KEYBOARD": cls.get_env("KEYBOARD"),
             "KEYBOARD_DELAY": int(cls.get_env("KEYBOARD_DELAY", "20")),
+            "INDICATOR_TEXT": cls.get_env("INDICATOR_TEXT", " (Twistting...)"),
+            "INDICATOR_TEXT_DISABLED": cls.get_env_bool("INDICATOR_TEXT_DISABLED"),
             "LOG": cls.get_env("LOG"),
             "CONFIG_PATH": config_path.as_posix(),
         }
@@ -916,6 +938,13 @@ class CommandLineParser:
         if not args.use_typing:
             config_table.add_row("", "[dim]Uses Ctrl+V to paste (or Ctrl+Shift+V if Shift is pressed)[/dim]")
 
+        # Indicator settings
+        indicator_enabled = not args.no_indicator
+        if indicator_enabled:
+            config_table.add_row("Indicator", f"[green]Enabled[/green] - [yellow]{args.indicator_text}[/yellow]")
+        else:
+            config_table.add_row("Indicator", "[red]Disabled[/red]")
+
         # Files section
         def format_path(path: Path) -> str:
             """Format path for display, using ~ for home directory."""
@@ -1031,6 +1060,10 @@ class CommandLineParser:
                 use_typing=args.use_typing,
                 active=output_enabled,
                 keyboard_delay_ms=args.keyboard_delay,
+            ),
+            indicator=Config.Indicator(
+                text=args.indicator_text,
+                enabled=not args.no_indicator,
             ),
         )
 
@@ -1168,7 +1201,7 @@ class CommandLineParser:
                     continue
                 overrides[env_key] = keyboard_name
                 continue
-            if dest in {"post_correct", "use_typing", "no_post"}:
+            if dest in {"post_correct", "use_typing", "no_post", "no_indicator"}:
                 overrides[env_key] = "true" if getattr(args, dest) else "false"
                 continue
             value = getattr(args, dest, None)
@@ -3423,8 +3456,10 @@ class IndicatorTask:
         SPEAKING = "speaking"
         POST_TREATMENT = "post_treatment"
 
-    def __init__(self, comm: Comm):
+    def __init__(self, comm: Comm, app_config: Config.App):
         self.comm = comm
+        self.indicator_text = app_config.indicator.text
+        self.indicator_enabled = app_config.indicator.enabled
         self.current_text: str = ""
         self.initialized = False
         self.last_state: list[IndicatorTask.State] = []
@@ -3440,7 +3475,7 @@ class IndicatorTask:
         if DEBUG_TO_STDOUT and state != self.last_state:
             debug(f"State: {', '.join([s.name.replace('_', ' ').title() for s in state]) or 'Idle'}")
             self.last_state = state
-        return " (Twistting...)" if state else ""
+        return self.indicator_text if state else ""
 
     async def _clear_indicator_active_flag_soon(self):
         await asyncio.sleep(1)
@@ -3481,6 +3516,8 @@ class IndicatorTask:
         self.initialized = True
 
     async def run(self):
+        if not self.indicator_enabled:
+            return
         try:
             while not self.comm.is_shutting_down:
                 await self._maybe_update()
@@ -3509,7 +3546,7 @@ async def main_async():
             transcription_task = (
                 OpenAITranscriptionTask if app_config.transcription.provider is BaseTranscriptionTask.Provider.OPENAI else DeepgramTranscriptionTask
             )(comm, app_config)
-            indicator_task = IndicatorTask(comm)
+            indicator_task = IndicatorTask(comm, app_config)
             if OUTPUT_TO_STDOUT:
                 terminal_display_task = TerminalDisplayTask(comm, app_config)
                 tg.create_task(terminal_display_task.run())

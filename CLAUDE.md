@@ -48,7 +48,7 @@ Configuration priority (highest to lowest):
 3. Local `.env` file in script directory
 4. Environment variables
 
-Key environment variables use `TWISTT_` prefix (e.g., `TWISTT_OPENAI_API_KEY`, `TWISTT_HOTKEY` or `TWISTT_HOTKEYS`, `TWISTT_POST_TREATMENT_PROMPT`, `TWISTT_POST_TREATMENT_PROVIDER`, `TWISTT_OUTPUT_MODE`, `TWISTT_POST_CORRECT`, `TWISTT_POST_TREATMENT_DISABLED`, `TWISTT_USE_TYPING`, `TWISTT_KEYBOARD_DELAY`, `TWISTT_SILENCE_DURATION`).
+Key environment variables use `TWISTT_` prefix (e.g., `TWISTT_OPENAI_API_KEY`, `TWISTT_HOTKEY` or `TWISTT_HOTKEYS`, `TWISTT_POST_TREATMENT_PROMPT`, `TWISTT_POST_TREATMENT_PROVIDER`, `TWISTT_OUTPUT_MODE`, `TWISTT_POST_CORRECT`, `TWISTT_POST_TREATMENT_DISABLED`, `TWISTT_USE_TYPING`, `TWISTT_KEYBOARD_DELAY`, `TWISTT_SILENCE_DURATION`, `TWISTT_INDICATOR_TEXT`, `TWISTT_INDICATOR_TEXT_DISABLED`).
 
 **Configuration files (`TWISTT_CONFIG` and `-c`/`--config`)**:
 - Environment variable: can specify multiple config files separated by `::` delimiter (e.g., `TWISTT_CONFIG="base.env::local.env"`)
@@ -84,6 +84,8 @@ Key environment variables use `TWISTT_` prefix (e.g., `TWISTT_OPENAI_API_KEY`, `
 Multiple hotkeys can be specified by separating them with commas (e.g., `TWISTT_HOTKEY=F8,F9,F10` or `--hotkey F8,F9,F10`).
 
 `TWISTT_LOG` (or `--log`) specifies the path to the log file. Default is `~/.config/twistt/twistt.log`. All transcription sessions (configuration panel and finalized transcriptions) are logged to this file.
+
+`TWISTT_INDICATOR_TEXT` (or `--indicator-text` / `-it`) customizes the text shown at the cursor position while recording/processing. Default is `" (Twistting...)"`. `TWISTT_INDICATOR_TEXT_DISABLED` (or `--no-indicator` / `-ni`) disables the indicator entirely when set to `true`.
 
 Provider-specific API keys:
 - `TWISTT_CEREBRAS_API_KEY` or `CEREBRAS_API_KEY` for Cerebras

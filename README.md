@@ -125,6 +125,10 @@ TWISTT_OUTPUT_MODE=batch  # batch (default) or full
 TWISTT_USE_TYPING=false  # Type ASCII characters via ydotool instead of copy/paste (slower)
 TWISTT_KEYBOARD_DELAY=20  # Delay in milliseconds between keyboard actions (default: 20ms)
 
+# Indicator text (shown at cursor position while recording/processing)
+TWISTT_INDICATOR_TEXT=" (Twistting...)"  # Customize the indicator text (default: " (Twistting...)")
+TWISTT_INDICATOR_TEXT_DISABLED=false  # Set to true to disable the indicator entirely
+
 # Logging
 TWISTT_LOG=/path/to/custom/twistt.log  # Optional, defaults to ~/.config/twistt/twistt.log
 
@@ -167,6 +171,8 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 | `-o, --output-mode, -no, --no-output-mode`     | `TWISTT_OUTPUT_MODE`                                | batch                         | Output mode: batch (incremental), full (complete on release), or none (disabled)                                                                                                                                        |
 | `-t, --use-typing, -nt, --no-use-typing`       | `TWISTT_USE_TYPING`                                 | false                         | Type ASCII characters directly (slower); clipboard still handles non-ASCII. Use `-t`/`--use-typing` to enable, `-nt`/`--no-use-typing` to disable                                                                       |
 | `-kd, --keyboard-delay`                        | `TWISTT_KEYBOARD_DELAY`                             | 20                            | Delay in milliseconds between keyboard actions (typing, paste, navigation keys). Increase if you experience character ordering issues                                                                                   |
+| `-it, --indicator-text`                        | `TWISTT_INDICATOR_TEXT`                             | ` (Twistting...)`             | Text shown at cursor position while recording/processing                                                                                                                                                                |
+| `-ni, --no-indicator`                          | `TWISTT_INDICATOR_TEXT_DISABLED`                    | false                         | Disable the indicator text shown at cursor position while recording/processing                                                                                                                                          |
 | `--log`                                        | `TWISTT_LOG`                                        | `~/.config/twistt/twistt.log` | Path to log file where transcription sessions are saved                                                                                                                                                                 |
 | `--check`                                      | -                                                   | -                             | Display configuration and exit without logging anything to file. Useful for verifying settings before running.                                                                                                          |
 | `--list-configs [DIR]`                         | -                                                   | -                             | List all configuration files found in `~/.config/twistt/` (or DIR if specified) with their variables and exit. API keys are masked, all values are limited to 100 characters.                                            |
@@ -506,7 +512,7 @@ Twistt supports two recording modes:
 
 The transcription appears where the cursor is located.
 
-An indicator ("(Twisting...)" text) is shown at the cursor position when recording is active, or text is being output or post-treatment is running. 
+An indicator ("(Twistting...)" text by default) is shown at the cursor position when recording is active, or text is being output or post-treatment is running. The indicator text can be customized via `TWISTT_INDICATOR_TEXT` or disabled entirely via `TWISTT_INDICATOR_TEXT_DISABLED=true`.
 
 ### Output Modes
 
