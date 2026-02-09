@@ -138,6 +138,10 @@ TWISTT_INDICATOR_TEXT_DISABLED=false  # Set to true to disable the indicator ent
 # System tray icon (shows a microphone icon in the system tray, turns red when active)
 TWISTT_TRAY_ICON_DISABLED=false  # Set to true to disable the system tray icon (enabled by default)
 
+# Audio ducking (automatically reduces system audio during recording)
+TWISTT_DUCKING_DISABLED=false  # Set to true to disable audio ducking (enabled by default)
+TWISTT_DUCKING_PERCENT=50  # How much to reduce system volume BY during recording (0-100, default: 50)
+
 # Logging
 TWISTT_LOG=/path/to/custom/twistt.log  # Optional, defaults to ~/.config/twistt/twistt.log
 
@@ -185,6 +189,8 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 | `-it, --indicator-text`                        | `TWISTT_INDICATOR_TEXT`                             | ` (Twistting...)`             | Text shown at cursor position while recording/processing                                                                                                                                                                |
 | `-ni, --no-indicator`                          | `TWISTT_INDICATOR_TEXT_DISABLED`                    | false                         | Disable the indicator text shown at cursor position while recording/processing                                                                                                                                          |
 | `-nti, --no-tray-icon`                         | `TWISTT_TRAY_ICON_DISABLED`                        | false                         | Disable the system tray icon (microphone icon that turns red when active). Requires optional packages: `pystray`, `Pillow`, `PyGObject` (see System Tray Icon section)                                                           |
+| `-nd, --no-ducking`                            | `TWISTT_DUCKING_DISABLED`                          | false                         | Disable audio ducking (automatic volume reduction of system audio during recording). Requires `pulsectl` package                                                                                                        |
+| `-dp, --ducking-percent`                       | `TWISTT_DUCKING_PERCENT`                           | 50                            | How much to reduce system volume BY during recording (0-100). 50 means reduce to 50% of original volume                                                                                                                |
 | `--log`                                        | `TWISTT_LOG`                                        | `~/.config/twistt/twistt.log` | Path to log file where transcription sessions are saved                                                                                                                                                                 |
 | `--check`                                      | -                                                   | -                             | Display configuration and exit without logging anything to file. Useful for verifying settings before running.                                                                                                          |
 | `--list-configs [DIR]`                         | -                                                   | -                             | List all configuration files found in `~/.config/twistt/` (or DIR if specified) with their variables and exit. API keys are masked, all values are limited to 100 characters.                                            |
@@ -552,6 +558,18 @@ Then just run Twistt normally — the Python packages will be installed automati
 ```bash
 uv run ./twistt.py
 ```
+
+### Audio Ducking
+
+Audio ducking automatically reduces the volume of all system audio outputs (music, videos, notifications, etc.) while recording, to prevent them from being picked up by the microphone and interfering with transcription. Volume is restored as soon as recording stops (key released or toggle off).
+
+Ducking is **enabled by default** with a 50% reduction (volume reduced to 50% of original). It uses PulseAudio/PipeWire via the `pulsectl` library, which is included as a dependency.
+
+Configuration:
+- Disable ducking: `TWISTT_DUCKING_DISABLED=true` or `--no-ducking` / `-nd`
+- Adjust reduction: `TWISTT_DUCKING_PERCENT=50` or `--ducking-percent 50` / `-dp 50` (50 means reduce to 50% of original volume)
+
+If the user manually changes the system volume during ducking, the original volume (before ducking) will be restored when recording ends.
 
 ### Output Modes
 

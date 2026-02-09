@@ -11,6 +11,7 @@ openai
 mistralai[realtime]
 janus
 rich
+pulsectl
 
 # Optional: system tray icon (requires system libraries, see README)
 # pystray

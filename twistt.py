@@ -15,6 +15,7 @@
 #     "mistralai[realtime]",
 #     "janus",
 #     "rich",
+#     "pulsectl",
 # ]
 # ///
 
@@ -161,6 +162,92 @@ def _try_import_tray_deps() -> bool:
     return _try_import_tray_deps._result
 
 
+try:
+    import pulsectl
+
+    _PULSECTL_AVAILABLE = True
+except ImportError:
+    _PULSECTL_AVAILABLE = False
+
+
+class AudioDucker:
+    """Manages audio ducking (volume reduction) during recording.
+
+    Reduces system audio sink volumes when recording starts and restores
+    them when recording stops, preventing audio interference with the
+    microphone during speech-to-text transcription.
+
+    Inspired by hyprwhspr's AudioDucker implementation.
+    """
+
+    def __init__(self, reduction_percent: int = 50):
+        """Initialize audio ducker.
+
+        Args:
+            reduction_percent: How much to reduce volume BY (0-100).
+                50 means reduce to 50% of original volume.
+        """
+        self._reduction_percent = max(0, min(100, reduction_percent))
+        self._original_volumes: dict[str, float] = {}
+        self._is_ducked = False
+
+    @staticmethod
+    def is_available() -> bool:
+        """Check if audio ducking is available (pulsectl installed)."""
+        return _PULSECTL_AVAILABLE
+
+    def duck(self) -> bool:
+        """Reduce system audio volume.
+
+        Stores original volumes for later restoration.
+        Returns True if ducking was applied, False otherwise.
+        """
+        if not _PULSECTL_AVAILABLE or self._is_ducked:
+            return self._is_ducked
+
+        try:
+            with pulsectl.Pulse("twistt-ducker") as pulse:
+                for sink in pulse.sink_list():
+                    original_vol = sum(sink.volume.values) / len(sink.volume.values)
+                    self._original_volumes[sink.name] = original_vol
+                    multiplier = (100 - self._reduction_percent) / 100.0
+                    new_vol = original_vol * multiplier
+                    pulse.volume_set_all_chans(sink, new_vol)
+
+                self._is_ducked = True
+                return True
+        except Exception:
+            self._original_volumes.clear()
+            return False
+
+    def restore(self) -> bool:
+        """Restore system audio to original volume.
+
+        Returns True if restoration was successful, False otherwise.
+        """
+        if not _PULSECTL_AVAILABLE or not self._is_ducked:
+            return not self._is_ducked
+
+        try:
+            with pulsectl.Pulse("twistt-ducker") as pulse:
+                for sink in pulse.sink_list():
+                    if sink.name in self._original_volumes:
+                        pulse.volume_set_all_chans(sink, self._original_volumes[sink.name])
+
+                self._original_volumes.clear()
+                self._is_ducked = False
+                return True
+        except Exception:
+            self._original_volumes.clear()
+            self._is_ducked = False
+            return False
+
+    @property
+    def is_ducked(self) -> bool:
+        """Check if audio is currently ducked."""
+        return self._is_ducked
+
+
 class ConsoleWithLogging:
     """Console wrapper that outputs to both stdout and a log file"""
 
@@ -300,6 +387,10 @@ class Config:
     class TrayIcon(NamedTuple):
         enabled: bool
 
+    class Ducking(NamedTuple):
+        enabled: bool
+        reduction_percent: int
+
     class App(NamedTuple):
         console: ConsoleWithLogging
         hotkey: Config.HotKey
@@ -309,6 +400,7 @@ class Config:
         output: Config.Output
         indicator: Config.Indicator
         tray_icon: Config.TrayIcon
+        ducking: Config.Ducking
 
 
 class CommandLineParser:
@@ -343,6 +435,8 @@ class CommandLineParser:
         "no_indicator": f"{ENV_PREFIX}INDICATOR_TEXT_DISABLED",
         "toggle_mode": f"{ENV_PREFIX}TOGGLE_MODE",
         "no_tray_icon": f"{ENV_PREFIX}TRAY_ICON_DISABLED",
+        "no_ducking": f"{ENV_PREFIX}DUCKING_DISABLED",
+        "ducking_percent": f"{ENV_PREFIX}DUCKING_PERCENT",
     }
 
     @classmethod
@@ -664,6 +758,20 @@ class CommandLineParser:
             help=f"Disable the system tray icon (env: {prefix}TRAY_ICON_DISABLED)",
         )
         parser.add_argument(
+            "-nd",
+            "--no-ducking",
+            action="store_true",
+            default=default.get("DUCKING_DISABLED", cls._UNDEFINED),
+            help=f"Disable audio ducking (automatic volume reduction of system audio during recording) (env: {prefix}DUCKING_DISABLED)",
+        )
+        parser.add_argument(
+            "-dp",
+            "--ducking-percent",
+            type=int,
+            default=default.get("DUCKING_PERCENT", cls._UNDEFINED),
+            help=f"Audio ducking reduction percentage, 0-100 (default: 50) (env: {prefix}DUCKING_PERCENT)",
+        )
+        parser.add_argument(
             "--log",
             default=default.get("LOG", cls._UNDEFINED),
             help=f"Path to log file. Default: {config_dir / 'twistt.log'} (env: {prefix}LOG)",
@@ -829,6 +937,8 @@ class CommandLineParser:
             "INDICATOR_TEXT": cls.get_env("INDICATOR_TEXT", " (Twistting...)"),
             "INDICATOR_TEXT_DISABLED": cls.get_env_bool("INDICATOR_TEXT_DISABLED"),
             "TRAY_ICON_DISABLED": cls.get_env_bool("TRAY_ICON_DISABLED"),
+            "DUCKING_DISABLED": cls.get_env_bool("DUCKING_DISABLED"),
+            "DUCKING_PERCENT": int(cls.get_env("DUCKING_PERCENT", "50")),
             "LOG": cls.get_env("LOG"),
             "CONFIG_PATH": config_path.as_posix(),
         }
@@ -1100,6 +1210,16 @@ class CommandLineParser:
         else:
             config_table.add_row("Tray icon", "[red]Disabled[/red]")
 
+        # Audio ducking settings
+        ducking_enabled = not args.no_ducking
+        if ducking_enabled:
+            if AudioDucker.is_available():
+                config_table.add_row("Audio ducking", f"[green]Enabled[/green] - reduce by [yellow]{args.ducking_percent}%[/yellow]")
+            else:
+                config_table.add_row("Audio ducking", "[yellow]Enabled but pulsectl not available (install pulsectl package)[/yellow]")
+        else:
+            config_table.add_row("Audio ducking", "[red]Disabled[/red]")
+
         # Files section
         def format_path(path: Path) -> str:
             """Format path for display, using ~ for home directory."""
@@ -1231,6 +1351,10 @@ class CommandLineParser:
             ),
             tray_icon=Config.TrayIcon(
                 enabled=not args.no_tray_icon,
+            ),
+            ducking=Config.Ducking(
+                enabled=not args.no_ducking,
+                reduction_percent=args.ducking_percent,
             ),
         )
 
@@ -1370,7 +1494,7 @@ class CommandLineParser:
                     # Interactive prompt: save the first device name
                     overrides[env_key] = input_devices[0].name
                 continue
-            if dest in {"post_correct", "use_typing", "no_post", "no_indicator", "no_tray_icon"}:
+            if dest in {"post_correct", "use_typing", "no_post", "no_indicator", "no_tray_icon", "no_ducking"}:
                 overrides[env_key] = "true" if getattr(args, dest) else "false"
                 continue
             value = getattr(args, dest, None)
@@ -1664,7 +1788,7 @@ class CommandLineParser:
 
 
 class Comm:
-    def __init__(self, post_enabled: bool = True, buffer_active: bool = True):
+    def __init__(self, post_enabled: bool = True, buffer_active: bool = True, ducking_config: Config.Ducking | None = None):
         self._audio_chunks = janus.Queue()
         self._is_post_enabled = post_enabled
         self._post_commands = Queue()
@@ -1681,6 +1805,9 @@ class Comm:
         self._is_buffer_active = buffer_active
         self._active_hotkey_name: str | None = None
         self._is_hotkey_toggle_mode: bool = False
+        self._audio_ducker: AudioDucker | None = None
+        if ducking_config and ducking_config.enabled and AudioDucker.is_available():
+            self._audio_ducker = AudioDucker(reduction_percent=ducking_config.reduction_percent)
 
     def queue_audio_chunks(self, data: bytes):
         with suppress(SyncQueueShutDown):
@@ -1806,6 +1933,8 @@ class Comm:
         if flag == was_recording:
             return
         if flag:
+            if self._audio_ducker:
+                self._audio_ducker.duck()
             self._recording.set()
             self._active_hotkey_name = hotkey_name
             self._is_hotkey_toggle_mode = is_toggle
@@ -1817,6 +1946,8 @@ class Comm:
                 )
             )
         else:
+            if self._audio_ducker:
+                self._audio_ducker.restore()
             self._recording.clear()
             self._active_hotkey_name = None
             self._is_hotkey_toggle_mode = False
@@ -1880,6 +2011,8 @@ class Comm:
         return self.is_recording or self.is_speech_active
 
     async def shutdown(self):
+        if self._audio_ducker:
+            self._audio_ducker.restore()
         self._shutting_down.set()
         self.queue_display_command(TerminalDisplayTask.Commands.Shutdown())
         await self.queue_post_command(PostTreatmentTask.Commands.Shutdown())
@@ -4239,6 +4372,7 @@ async def main_async():
     comm = Comm(
         post_enabled=app_config.post.start_enabled,
         buffer_active=app_config.output.active,
+        ducking_config=app_config.ducking,
     )
     try:
         async with asyncio.TaskGroup() as tg:

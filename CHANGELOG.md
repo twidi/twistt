@@ -9,6 +9,7 @@ Since this project does not use versioned releases, entries are organized by dat
 
 ### Added
 
+- Audio ducking: automatically reduces system audio volume during recording to prevent microphone interference. Uses PulseAudio/PipeWire via `pulsectl`. Enabled by default with 50% reduction. Configurable via `TWISTT_DUCKING_PERCENT` (`--ducking-percent` / `-dp`). Disable with `TWISTT_DUCKING_DISABLED` / `--no-ducking` / `-nd`
 - System tray icon displaying a microphone that changes color by state: cyan (idle), orange (recording), green (transcribing), violet (post-processing). Active states pulse to draw attention. Optional dependencies (`pystray`, `Pillow`, `PyGObject`) are auto-installed on first run via `uv pip`. Disable with `TWISTT_TRAY_ICON_DISABLED` / `--no-tray-icon` / `-nti`
 - Mistral/Voxtral real-time transcription provider (`voxtral-mini-transcribe-realtime-2602` model) with `-kmi/--mistral-api-key` CLI argument and `TWISTT_MISTRAL_API_KEY` env var
 - Configurable toggle mode: choose between single-tap and double-tap activation via `--toggle-mode` (`single`/`double`). Default remains double-tap
