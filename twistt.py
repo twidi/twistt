@@ -2113,6 +2113,7 @@ class BaseTranscriptionTask:
                     self.ws_url,
                     additional_headers=self.ws_headers,
                     max_size=None,
+                    close_timeout=1,
                 ) as ws:
                     self._ws_retry_attempts = 0
                     self._last_ws_failure_at = 0.0
@@ -2120,7 +2121,24 @@ class BaseTranscriptionTask:
 
                     sender_task = create_task(self._sender(ws))
                     receiver_task = create_task(self._receiver(ws, previous_transcriptions, current_transcription))
-                    await asyncio.gather(sender_task, receiver_task)
+                    # Wait for receiver to finish (it ends on DONE event or stop condition),
+                    # then cancel the sender immediately — no need to keep sending audio chunks
+                    try:
+                        await receiver_task
+                    finally:
+                        sender_task.cancel()
+                        with suppress(CancelledError):
+                            await sender_task
+                    # In full mode, queue the InsertSegment NOW, before the ws close handshake
+                    if self.config.output.mode.is_full and previous_transcriptions:
+                        full_text = "".join(previous_transcriptions)
+                        if self.comm.is_post_enabled:
+                            self.comm.toggle_post_treatment_active(True)
+                            await self.comm.queue_post_command(PostTreatmentTask.Commands.ProcessFullText(text=full_text, stream_output=True))
+                        else:
+                            seq = self.seq_counter
+                            self.seq_counter += 1
+                            await self.comm.queue_buffer_command(BufferTask.Commands.InsertSegment(seq_num=seq, text=full_text))
             except CancelledError:
                 break
             except Exception as exc:
@@ -2140,11 +2158,6 @@ class BaseTranscriptionTask:
                 if delay:
                     await asyncio.sleep(delay)
                 continue
-            else:
-                # in full mode, the command are created later, and because we mark the end of "speech_active" here
-                # we'll lose the indicator, so we mark the post-treatment as active right now if we have some
-                if self.config.output.mode.is_full and self.comm.is_post_enabled and previous_transcriptions:
-                    self.comm.toggle_post_treatment_active(True)
             finally:
                 self.comm.toggle_speech_active(False)
                 self.comm.empty_audio_chunks()
@@ -2154,14 +2167,9 @@ class BaseTranscriptionTask:
             if not previous_transcriptions:
                 continue
 
-            if self.config.output.mode.is_full:
-                full_text = "".join(previous_transcriptions)
-                if self.comm.is_post_enabled:
-                    await self.comm.queue_post_command(PostTreatmentTask.Commands.ProcessFullText(text=full_text, stream_output=True))
-                else:
-                    seq = self.seq_counter
-                    self.seq_counter += 1
-                    await self.comm.queue_buffer_command(BufferTask.Commands.InsertSegment(seq_num=seq, text=full_text))
+            # In batch mode, segments were already queued during transcription.
+            # In full mode, the InsertSegment was already queued inside the async with block
+            # (before the ws close handshake) to avoid the close_timeout delay.
 
     async def send_audio_chunk(self, ws, chunk: bytes):
         pass
