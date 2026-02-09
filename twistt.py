@@ -12,6 +12,7 @@
 #     "platformdirs",
 #     "python-ydotool",
 #     "openai",
+#     "mistralai[realtime]",
 #     "janus",
 #     "rich",
 # ]
@@ -187,7 +188,7 @@ class Config:
     class Transcription(NamedTuple):
         provider: BaseTranscriptionTask.Provider
         api_key: str
-        model: OpenAITranscriptionTask.Model | DeepgramTranscriptionTask.Model
+        model: OpenAITranscriptionTask.Model | DeepgramTranscriptionTask.Model | MistralTranscriptionTask.Model
         language: str | None
         silence_duration_ms: int
 
@@ -234,6 +235,7 @@ class CommandLineParser:
         "microphone": f"{ENV_PREFIX}MICROPHONE",
         "openai_api_key": f"{ENV_PREFIX}OPENAI_API_KEY",
         "deepgram_api_key": f"{ENV_PREFIX}DEEPGRAM_API_KEY",
+        "mistral_api_key": f"{ENV_PREFIX}MISTRAL_API_KEY",
         "ydotool_socket": f"{ENV_PREFIX}YDOTOOL_SOCKET",
         "post_prompt": f"{ENV_PREFIX}POST_TREATMENT_PROMPT",
         "post_model": f"{ENV_PREFIX}POST_TREATMENT_MODEL",
@@ -378,8 +380,8 @@ class CommandLineParser:
             "-m",
             "--model",
             default=default.get("MODEL", cls._UNDEFINED),
-            choices=[m.value for m in OpenAITranscriptionTask.Model] + [m.value for m in DeepgramTranscriptionTask.Model],
-            help=f"OpenAI or Deepgram model to use for transcription (env: {prefix}MODEL)",
+            choices=[m.value for m in OpenAITranscriptionTask.Model] + [m.value for m in DeepgramTranscriptionTask.Model] + [m.value for m in MistralTranscriptionTask.Model],
+            help=f"OpenAI, Deepgram, or Mistral model to use for transcription (env: {prefix}MODEL)",
         )
         parser.add_argument(
             "-l",
@@ -420,6 +422,12 @@ class CommandLineParser:
             "--deepgram-api-key",
             default=default.get("DEEPGRAM_API_KEY", cls._UNDEFINED),
             help=f"Deepgram API key (env: {prefix}DEEPGRAM_API_KEY or DEEPGRAM_API_KEY)",
+        )
+        parser.add_argument(
+            "-kmi",
+            "--mistral-api-key",
+            default=default.get("MISTRAL_API_KEY", cls._UNDEFINED),
+            help=f"Mistral API key (env: {prefix}MISTRAL_API_KEY or MISTRAL_API_KEY)",
         )
         parser.add_argument(
             "-ys",
@@ -689,7 +697,7 @@ class CommandLineParser:
   """
 
         parser = argparse.ArgumentParser(
-            description="Push to talk transcription via OpenAI",
+            description="Push to talk transcription via OpenAI, Deepgram, or Mistral",
             epilog=epilog,
             formatter_class=argparse.RawDescriptionHelpFormatter,
         )
@@ -705,6 +713,7 @@ class CommandLineParser:
             "MICROPHONE": cls.get_env("MICROPHONE"),
             "OPENAI_API_KEY": cls.get_env("OPENAI_API_KEY", prefix_optional=True),
             "DEEPGRAM_API_KEY": cls.get_env("DEEPGRAM_API_KEY", prefix_optional=True),
+            "MISTRAL_API_KEY": cls.get_env("MISTRAL_API_KEY", prefix_optional=True),
             "YDOTOOL_SOCKET": cls.get_env("YDOTOOL_SOCKET", prefix_optional=True),
             "POST_TREATMENT_PROMPT": cls.get_env("POST_TREATMENT_PROMPT", ""),
             "POST_TREATMENT_MODEL": cls.get_env("POST_TREATMENT_MODEL", "gpt-4o-mini"),
@@ -734,8 +743,12 @@ class CommandLineParser:
             transcription_model = OpenAITranscriptionTask.Model(args.model)
             provider = BaseTranscriptionTask.Provider.OPENAI
         except ValueError:
-            transcription_model = DeepgramTranscriptionTask.Model(args.model)
-            provider = BaseTranscriptionTask.Provider.DEEPGRAM
+            try:
+                transcription_model = DeepgramTranscriptionTask.Model(args.model)
+                provider = BaseTranscriptionTask.Provider.DEEPGRAM
+            except ValueError:
+                transcription_model = MistralTranscriptionTask.Model(args.model)
+                provider = BaseTranscriptionTask.Provider.MISTRAL
 
         if provider is BaseTranscriptionTask.Provider.OPENAI and not args.openai_api_key:
             errprint(
@@ -748,6 +761,13 @@ class CommandLineParser:
             errprint(
                 f'ERROR: Deepgram API key is not defined (for" {transcription_model.value}" transcription model)\n'
                 f"Please set DEEPGRAM_API_KEY or {prefix}DEEPGRAM_API_KEY environment variable or pass it via --deepgram-api-key argument"
+            )
+            return None
+
+        if provider is BaseTranscriptionTask.Provider.MISTRAL and not args.mistral_api_key:
+            errprint(
+                f'ERROR: Mistral API key is not defined (for "{transcription_model.value}" transcription model)\n'
+                f"Please set MISTRAL_API_KEY or {prefix}MISTRAL_API_KEY environment variable or pass it via --mistral-api-key argument"
             )
             return None
 
@@ -1068,7 +1088,11 @@ class CommandLineParser:
             ),
             transcription=Config.Transcription(
                 provider=provider,
-                api_key=args.openai_api_key if provider is BaseTranscriptionTask.Provider.OPENAI else args.deepgram_api_key,
+                api_key=args.openai_api_key
+                if provider is BaseTranscriptionTask.Provider.OPENAI
+                else args.mistral_api_key
+                if provider is BaseTranscriptionTask.Provider.MISTRAL
+                else args.deepgram_api_key,
                 model=transcription_model,
                 language=args.language,
                 silence_duration_ms=int(args.silence_duration),
@@ -2113,11 +2137,13 @@ class CaptureTask:
         self._loop = asyncio.get_running_loop()
 
     async def run(self):
-        sample_rate = (
-            OpenAITranscriptionTask.SAMPLE_RATE
-            if self.config.transcription.provider is BaseTranscriptionTask.Provider.OPENAI
-            else DeepgramTranscriptionTask.SAMPLE_RATE
-        )
+        provider = self.config.transcription.provider
+        if provider is BaseTranscriptionTask.Provider.OPENAI:
+            sample_rate = OpenAITranscriptionTask.SAMPLE_RATE
+        elif provider is BaseTranscriptionTask.Provider.MISTRAL:
+            sample_rate = MistralTranscriptionTask.SAMPLE_RATE
+        else:
+            sample_rate = DeepgramTranscriptionTask.SAMPLE_RATE
         stream = sd.RawInputStream(
             samplerate=sample_rate,
             blocksize=int(sample_rate * 40 / 1000),
@@ -2173,6 +2199,7 @@ class BaseTranscriptionTask:
     class Provider(Enum):
         OPENAI = "openai"
         DEEPGRAM = "deepgram"
+        MISTRAL = "mistral"
 
     def __init__(self, comm: Comm, config: Config.App):
         self.comm = comm
@@ -2220,36 +2247,7 @@ class BaseTranscriptionTask:
             previous_transcriptions: list[str] = []
             current_transcription: list[str] = []
             try:
-                async with websockets.connect(
-                    self.ws_url,
-                    additional_headers=self.ws_headers,
-                    max_size=None,
-                    close_timeout=1,
-                ) as ws:
-                    self._ws_retry_attempts = 0
-                    self._last_ws_failure_at = 0.0
-                    await self.on_connected(ws)
-
-                    sender_task = create_task(self._sender(ws))
-                    receiver_task = create_task(self._receiver(ws, previous_transcriptions, current_transcription))
-                    # Wait for receiver to finish (it ends on DONE event or stop condition),
-                    # then cancel the sender immediately — no need to keep sending audio chunks
-                    try:
-                        await receiver_task
-                    finally:
-                        sender_task.cancel()
-                        with suppress(CancelledError):
-                            await sender_task
-                    # In full mode, queue the InsertSegment NOW, before the ws close handshake
-                    if self.config.output.mode.is_full and previous_transcriptions:
-                        full_text = "".join(previous_transcriptions)
-                        if self.comm.is_post_enabled:
-                            self.comm.toggle_post_treatment_active(True)
-                            await self.comm.queue_post_command(PostTreatmentTask.Commands.ProcessFullText(text=full_text, stream_output=True))
-                        else:
-                            seq = self.seq_counter
-                            self.seq_counter += 1
-                            await self.comm.queue_buffer_command(BufferTask.Commands.InsertSegment(seq_num=seq, text=full_text))
+                await self._run_session(previous_transcriptions, current_transcription)
             except CancelledError:
                 break
             except Exception as exc:
@@ -2262,7 +2260,7 @@ class BaseTranscriptionTask:
                 max_attempts = self.WS_MAX_RETRY_ATTEMPTS
                 errprint(f"Error in transcription task (attempt {attempt}/{max_attempts}): {exc}")
                 if attempt >= max_attempts:
-                    errprint("ERROR: Reached maximum consecutive websocket retries; stopping transcription.")
+                    errprint("ERROR: Reached maximum consecutive retries; stopping transcription.")
                     self.comm.toggle_recording(False, None, False)
                     continue
                 delay = self._ws_retry_delay(attempt)
@@ -2279,8 +2277,45 @@ class BaseTranscriptionTask:
                 continue
 
             # In batch mode, segments were already queued during transcription.
-            # In full mode, the InsertSegment was already queued inside the async with block
+            # In full mode, the InsertSegment was already queued inside _run_session
             # (before the ws close handshake) to avoid the close_timeout delay.
+
+    async def _queue_full_mode_result(self, previous_transcriptions: list[str]):
+        """Queue the full transcription result for full output mode."""
+        if self.config.output.mode.is_full and previous_transcriptions:
+            full_text = "".join(previous_transcriptions)
+            if self.comm.is_post_enabled:
+                self.comm.toggle_post_treatment_active(True)
+                await self.comm.queue_post_command(PostTreatmentTask.Commands.ProcessFullText(text=full_text, stream_output=True))
+            else:
+                seq = self.seq_counter
+                self.seq_counter += 1
+                await self.comm.queue_buffer_command(BufferTask.Commands.InsertSegment(seq_num=seq, text=full_text))
+
+    async def _run_session(self, previous_transcriptions: list[str], current_transcription: list[str]):
+        """Run a single transcription session. Override for custom connection handling."""
+        async with websockets.connect(
+            self.ws_url,
+            additional_headers=self.ws_headers,
+            max_size=None,
+            close_timeout=1,
+        ) as ws:
+            self._ws_retry_attempts = 0
+            self._last_ws_failure_at = 0.0
+            await self.on_connected(ws)
+
+            sender_task = create_task(self._sender(ws))
+            receiver_task = create_task(self._receiver(ws, previous_transcriptions, current_transcription))
+            # Wait for receiver to finish (it ends on DONE event or stop condition),
+            # then cancel the sender immediately — no need to keep sending audio chunks
+            try:
+                await receiver_task
+            finally:
+                sender_task.cancel()
+                with suppress(CancelledError):
+                    await sender_task
+            # In full mode, queue the InsertSegment NOW, before the ws close handshake
+            await self._queue_full_mode_result(previous_transcriptions)
 
     async def send_audio_chunk(self, ws, chunk: bytes):
         pass
@@ -2734,6 +2769,234 @@ class DeepgramTranscriptionTask(BaseTranscriptionTask):
                     return False
 
         return True
+
+
+class MistralTranscriptionTask(BaseTranscriptionTask):
+    SAMPLE_RATE = 16_000
+
+    class Model(Enum):
+        VOXTRAL_MINI_TRANSCRIBE_REALTIME = "voxtral-mini-transcribe-realtime-2602"
+
+    STOP_TIMEOUT_SECONDS = 2.0
+
+    def __init__(self, comm: Comm, config: Config.App):
+        super().__init__(comm, config)
+        self._recording_stopped_at: float | None = None
+
+    def _reset_stop_state(self):
+        self._recording_stopped_at = None
+
+    async def _handle_event(
+        self, event, previous_transcriptions, current_transcription,
+        SessionCreated, SessionUpdated, Language, TextDelta,
+        SegmentDelta, Done, Error, Unknown,
+    ) -> bool:
+        """Handle a single Mistral event. Returns False to stop the event loop."""
+        if isinstance(event, SessionCreated):
+            debug("MISTRAL EVENT: session created")
+            return True
+
+        if isinstance(event, SessionUpdated):
+            debug("MISTRAL EVENT: session updated")
+            return True
+
+        if isinstance(event, Language):
+            debug(f"MISTRAL EVENT: language detected: {event.audio_language}")
+            return True
+
+        if isinstance(event, TextDelta):
+            debug(f"MISTRAL EVENT: text delta: {event.text!r}")
+            if not self.comm.is_speech_active:
+                self._reset_stop_state()
+                await self._handle_start_of_speech()
+            await self._handle_new_delta(event.text, current_transcription)
+            return True
+
+        if isinstance(event, SegmentDelta):
+            debug(f"MISTRAL EVENT: segment delta: {event.text!r} (start={event.start}, end={event.end})")
+            self._reset_stop_state()
+            await self._handle_done_segment(
+                event.text,
+                previous_transcriptions,
+                current_transcription,
+            )
+            return self.comm.is_recording
+
+        if isinstance(event, Done):
+            debug(f"MISTRAL EVENT: transcription done: {event.text!r}")
+            if current_transcription:
+                await self._handle_done_segment(
+                    event.text or None,
+                    previous_transcriptions,
+                    current_transcription,
+                )
+            return False
+
+        if isinstance(event, Error):
+            errprint(f"Mistral transcription error: {event.error}")
+            return False
+
+        if isinstance(event, Unknown):
+            debug(f"MISTRAL EVENT: unknown: {event}")
+
+        return True
+
+    async def _audio_stream(self) -> AsyncIterator[bytes]:
+        """Async iterator that yields audio chunks from the comm queue.
+
+        Stops yielding when recording stops and the queue is drained.
+        Unlike the base class sender which checks is_transcribing (recording
+        OR speech_active), we check is_recording only. Since Mistral has no
+        VAD, speech_active stays True until we finalize the segment ourselves,
+        but we need the sender to stop and send end_audio() as soon as the
+        user releases the hotkey so the receiver can start the stop timeout.
+        """
+        while True:
+            if self.comm.is_shutting_down:
+                break
+            try:
+                queue_empty = not self.comm.has_audio_chunks
+            except RuntimeError:
+                break
+            if not self.comm.is_recording and queue_empty:
+                await asyncio.sleep(self.QUEUE_IDLE_SLEEP)
+                if not self.comm.is_recording:
+                    break
+                continue
+            try:
+                chunk = await self.comm.wait_for_audio_chunk(self.CHUNK_TIMEOUT)
+            except TimeoutError:
+                if not self.comm.is_recording and not self.comm.has_audio_chunks:
+                    break
+                continue
+            except RuntimeError:
+                break
+            yield chunk
+
+    async def _run_session(self, previous_transcriptions: list[str], current_transcription: list[str]):
+        from mistralai import Mistral
+        from mistralai.extra.realtime import UnknownRealtimeEvent
+        from mistralai.extra.realtime.connection import parse_realtime_event
+        from mistralai.models import (
+            AudioFormat,
+            RealtimeTranscriptionError,
+            RealtimeTranscriptionSessionCreated,
+            RealtimeTranscriptionSessionUpdated,
+            TranscriptionStreamDone,
+            TranscriptionStreamLanguage,
+            TranscriptionStreamSegmentDelta,
+            TranscriptionStreamTextDelta,
+        )
+
+        if not hasattr(self, "_rt"):
+            client = Mistral(api_key=self.config.transcription.api_key)
+            self._rt = client.audio.realtime
+            self._audio_format = AudioFormat(encoding="pcm_s16le", sample_rate=self.SAMPLE_RATE)
+
+        connection = await self._rt.connect(
+            model=self.config.transcription.model.value,
+            audio_format=self._audio_format,
+        )
+        self._reset_stop_state()
+        self._ws_retry_attempts = 0
+        self._last_ws_failure_at = 0.0
+
+        async def _send_audio():
+            try:
+                async for chunk in self._audio_stream():
+                    if connection.is_closed:
+                        break
+                    await connection.send_audio(chunk)
+                if not connection.is_closed:
+                    await connection.end_audio()
+                    self._recording_stopped_at = time.perf_counter()
+            except CancelledError:
+                pass
+            except Exception:
+                pass
+
+        sender_task = create_task(_send_audio())
+
+        try:
+            # We read events by receiving raw websocket messages with
+            # a timeout, then parsing them ourselves. We cannot use
+            # the SDK's `connection.events()` async generator with
+            # `wait_for` because cancelling its `__anext__` triggers
+            # CancelledError inside the generator, which calls
+            # `connection.close()` and kills the websocket.
+            # We also cannot use a plain `async for` because Mistral
+            # has no VAD — no segment/done events arrive until
+            # end_audio() is sent, so we'd block forever.
+
+            # Drain the initial_events first (session.created, session.updated)
+            while connection._initial_events:
+                event = connection._initial_events.popleft()
+                connection._apply_session_updates(event)
+                await self._handle_event(
+                    event, previous_transcriptions, current_transcription,
+                    RealtimeTranscriptionSessionCreated, RealtimeTranscriptionSessionUpdated,
+                    TranscriptionStreamLanguage, TranscriptionStreamTextDelta,
+                    TranscriptionStreamSegmentDelta, TranscriptionStreamDone,
+                    RealtimeTranscriptionError, UnknownRealtimeEvent,
+                )
+
+            # Now read from the raw websocket with timeouts
+            ws = connection._websocket
+            while True:
+                if self.comm.is_shutting_down:
+                    break
+
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=self.CHUNK_TIMEOUT)
+                except TimeoutError:
+                    # No message within timeout — check if we should stop
+                    if self._recording_stopped_at is not None:
+                        delay = time.perf_counter() - self._recording_stopped_at
+                        if delay > self.STOP_TIMEOUT_SECONDS:
+                            debug("MISTRAL: stop timeout reached, finalizing")
+                            if current_transcription:
+                                await self._handle_done_segment(
+                                    None,
+                                    previous_transcriptions,
+                                    current_transcription,
+                                )
+                            break
+                    continue
+                except websockets.ConnectionClosed:
+                    debug("MISTRAL: connection closed by server")
+                    if current_transcription:
+                        await self._handle_done_segment(
+                            None,
+                            previous_transcriptions,
+                            current_transcription,
+                        )
+                    break
+
+                text = raw.decode("utf-8", errors="replace") if isinstance(raw, (bytes, bytearray)) else raw
+                try:
+                    data = json.loads(text)
+                except Exception:
+                    continue
+                event = parse_realtime_event(data)
+                connection._apply_session_updates(event)
+
+                should_continue = await self._handle_event(
+                    event, previous_transcriptions, current_transcription,
+                    RealtimeTranscriptionSessionCreated, RealtimeTranscriptionSessionUpdated,
+                    TranscriptionStreamLanguage, TranscriptionStreamTextDelta,
+                    TranscriptionStreamSegmentDelta, TranscriptionStreamDone,
+                    RealtimeTranscriptionError, UnknownRealtimeEvent,
+                )
+                if not should_continue:
+                    break
+
+        finally:
+            sender_task.cancel()
+            with suppress(CancelledError):
+                await sender_task
+            await connection.close()
+
+            await self._queue_full_mode_result(previous_transcriptions)
 
 
 class PostTreatmentTask:
@@ -3662,9 +3925,14 @@ async def main_async():
             capture_task = CaptureTask(comm, app_config)
             output_task = OutputTask(comm, app_config)
             buffer_task = BufferTask(comm, app_config)
-            transcription_task = (
-                OpenAITranscriptionTask if app_config.transcription.provider is BaseTranscriptionTask.Provider.OPENAI else DeepgramTranscriptionTask
-            )(comm, app_config)
+            transcription_provider = app_config.transcription.provider
+            if transcription_provider is BaseTranscriptionTask.Provider.OPENAI:
+                transcription_cls = OpenAITranscriptionTask
+            elif transcription_provider is BaseTranscriptionTask.Provider.MISTRAL:
+                transcription_cls = MistralTranscriptionTask
+            else:
+                transcription_cls = DeepgramTranscriptionTask
+            transcription_task = transcription_cls(comm, app_config)
             indicator_task = IndicatorTask(comm, app_config)
             if OUTPUT_TO_STDOUT:
                 terminal_display_task = TerminalDisplayTask(comm, app_config)

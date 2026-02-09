@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Twistt is a Linux push-to-talk transcription tool that uses OpenAI's real-time API for speech-to-text conversion. The entire application is contained in a single Python script (`twistt.py`) that can be run with uv.
+Twistt is a Linux push-to-talk transcription tool that uses OpenAI, Deepgram, or Mistral real-time APIs for speech-to-text conversion. The entire application is contained in a single Python script (`twistt.py`) that can be run with uv.
 
 ## Development Setup and Commands
 
@@ -23,18 +23,19 @@ python twistt.py --help
 The project uses inline script dependencies (PEP 723) specified in `twistt.py`. Dependencies are also listed in `requirements.txt` for pip users:
 - numpy, sounddevice (audio capture)
 - soundcard (microphone discovery)
-- websockets (OpenAI real-time API)
+- websockets (OpenAI/Deepgram real-time API)
 - pyperclipfix (clipboard operations)
 - evdev (input device event monitoring)
 - python-dotenv, platformdirs (configuration)
 - python-ydotool (keyboard simulation for paste)
 - openai (OpenAI SDK for post-treatment feature)
+- mistralai[realtime] (Mistral real-time transcription API)
 
 ## Architecture
 
 The application is a single-file Python script with the following key components:
 
-1. **AudioTranscriber class**: Core logic for WebSocket connection to OpenAI, audio streaming, and transcription handling
+1. **Transcription task classes**: Provider-specific classes (OpenAI, Deepgram, Mistral) inheriting from `BaseTranscriptionTask` for WebSocket-based real-time transcription
 2. **Input device monitoring**: Uses evdev to detect F-key presses for push-to-talk across all input devices (keyboards, mice with remapped buttons, macropads, etc.)
 3. **Audio capture**: Uses sounddevice to record from microphone in real-time (Pulse source pinned via soundcard)
 4. **Auto-paste/typing**: Uses python-ydotool to paste text or optionally type ASCII characters directly
@@ -88,6 +89,7 @@ Multiple hotkeys can be specified by separating them with commas (e.g., `TWISTT_
 `TWISTT_INDICATOR_TEXT` (or `--indicator-text` / `-it`) customizes the text shown at the cursor position while recording/processing. Default is `" (Twistting...)"`. `TWISTT_INDICATOR_TEXT_DISABLED` (or `--no-indicator` / `-ni`) disables the indicator entirely when set to `true`.
 
 Provider-specific API keys:
+- `TWISTT_MISTRAL_API_KEY` or `MISTRAL_API_KEY` for Mistral transcription
 - `TWISTT_CEREBRAS_API_KEY` or `CEREBRAS_API_KEY` for Cerebras
 - `TWISTT_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` for OpenRouter
 
@@ -109,6 +111,7 @@ No formal test suite exists. Testing is manual:
 4. Test post-treatment with different prompts, models, and providers
 5. Verify post-treatment maintains transcription order
 6. Test provider switching (OpenAI, Cerebras, OpenRouter) for post-treatment
+9. Test Mistral transcription provider (no server-side VAD, client-side timeout for finalization)
 7. Test output modes (batch vs full vs none) with and without post-treatment
 8. Test toggle mode activation/deactivation with same hotkey when multiple hotkeys are configured
 - never care about retro-compatibility, it's a personal project

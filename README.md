@@ -1,6 +1,6 @@
 # Twistt - Push-to-Talk Transcription Tool
 
-A Linux speech-to-text transcription tool using OpenAI or Deepgram for STT with push-to-talk functionality.
+A Linux speech-to-text transcription tool using OpenAI, Deepgram, or Mistral for STT with push-to-talk functionality.
 
 ## Features
 
@@ -10,7 +10,7 @@ A Linux speech-to-text transcription tool using OpenAI or Deepgram for STT with 
 - **Auto-output**: Automatically outputs transcribed text at cursor position
 - **Multi-language support**: Transcribe in any language supported by the provider
 - **Configurable audio gain**: Amplify microphone input if needed
-- **Multiple model support**: Choose between `gpt-4o-transcribe` and `gpt-4o-mini-transcribe`
+- **Multiple model support**: Choose between `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, Deepgram Nova, or Mistral Voxtral models
 - **Post-treatment**: Optional AI-powered correction of transcribed text for improved accuracy
 
 ## Requirements
@@ -18,7 +18,7 @@ A Linux speech-to-text transcription tool using OpenAI or Deepgram for STT with 
 - Linux (tested on X11 and Wayland)
 - Python 3.11+
 - `ydotool` for simulating keyboard input (by pasting or typing + pasting)
-- OpenAI or Deepgram API key for transcription (depending on provider)
+- OpenAI, Deepgram, or Mistral API key for transcription (depending on provider)
 - OpenAI, Cerebras, or OpenRouter API key for post-treatment (if used)
 - Microphone access
 
@@ -108,10 +108,15 @@ TWISTT_DEEPGRAM_API_KEY=dg_...
 # or
 DEEPGRAM_API_KEY=dg_...
 
+# Mistral API key (required if model from Mistral)
+TWISTT_MISTRAL_API_KEY=...
+# or
+MISTRAL_API_KEY=...
+
 # Optional settings
 TWISTT_HOTKEY=F9           # Single hotkey
 TWISTT_HOTKEYS=F8,F9,F10   # Multiple hotkeys (comma-separated)
-TWISTT_MODEL=gpt-4o-transcribe   # For OpenAI; for Deepgram use e.g. nova-2-general
+TWISTT_MODEL=gpt-4o-transcribe   # For OpenAI; for Deepgram use e.g. nova-2-general; for Mistral use voxtral-mini-transcribe-realtime-2602
 TWISTT_LANGUAGE=en  # Leave empty or omit for auto-detect
 TWISTT_SILENCE_DURATION=500  # Milliseconds of silence before ending the current segment
 TWISTT_GAIN=1.0
@@ -155,13 +160,14 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 | `-kb, --keyboard`                              | `TWISTT_KEYBOARD`                                   | -                             | Filter text for selecting input device(s) for hotkey detection (keyboards, mice with remapped buttons, etc.)<br/>Pass without a value to force interactive selection and ignore env defaults                             |
 | `-dtw, --double-tap-window`                    | `TWISTT_DOUBLE_TAP_WINDOW`                          | 0.5                           | Time window in seconds for double-tap detection (and single-tap threshold)                                                                                                                                              |
 | `-tm, --toggle-mode`                           | `TWISTT_TOGGLE_MODE`                                | double                        | Toggle activation mode: `single` (one tap) or `double` (double-tap)                                                                                                                                                    |
-| `-m, --model`                                  | `TWISTT_MODEL`                                      | gpt-4o-transcribe             | Transcription model (for OpenAI or Deepgram)                                                                                                                                                                            |
+| `-m, --model`                                  | `TWISTT_MODEL`                                      | gpt-4o-transcribe             | Transcription model (for OpenAI, Deepgram, or Mistral)                                                                                                                                                                  |
 | `-l, --language`                               | `TWISTT_LANGUAGE`                                   | Auto-detect                   | Transcription language (ISO 639-1)                                                                                                                                                                                      |
 | `-sd, --silence-duration`                      | `TWISTT_SILENCE_DURATION`                           | 500                           | Silence duration in milliseconds before the transcription service ends the current segment                                                                                                                              |
 | `-g, --gain`                                   | `TWISTT_GAIN`                                       | 1.0                           | Microphone amplification                                                                                                                                                                                                |
 | `-mic, --microphone`                           | `TWISTT_MICROPHONE`                                 | Default input                 | Text filter or ID to select the microphone<br/>Pass without a value to force interactive selection and ignore env defaults                                                                                              |
 | `-koa, --openai-api-key`                       | `TWISTT_OPENAI_API_KEY` or `OPENAI_API_KEY`         | -                             | OpenAI API key                                                                                                                                                                                                          |
 | `-kdg, --deepgram-api-key`                     | `TWISTT_DEEPGRAM_API_KEY` or `DEEPGRAM_API_KEY`     | -                             | Deepgram API key                                                                                                                                                                                                        |
+| `-kmi, --mistral-api-key`                      | `TWISTT_MISTRAL_API_KEY` or `MISTRAL_API_KEY`       | -                             | Mistral API key                                                                                                                                                                                                         |
 | `-ys, --ydotool-socket`                        | `TWISTT_YDOTOOL_SOCKET` or `YDOTOOL_SOCKET`         | Auto-detect                   | Path to ydotool socket                                                                                                                                                                                                  |
 | `-p, --post-prompt`                            | `TWISTT_POST_TREATMENT_PROMPT`                      | -                             | Post-treatment prompt (text/file). Can be specified multiple times. Within a value, use `::` to separate multiple prompts. Prefix any `-p` value with `::` to include env/config variable. Example: `-p :: -p file.txt` |
 | `-pm, --post-model`                            | `TWISTT_POST_TREATMENT_MODEL`                       | gpt-4o-mini                   | Model for post-treatment                                                                                                                                                                                                |
@@ -455,7 +461,10 @@ TWISTT_POST_TREATMENT_PROMPT="base.txt"
 ./twistt.py --use-typing
 
 # Use Deepgram as provider
-TWISTT_PROVIDER=deepgram TWISTT_DEEPGRAM_API_KEY=dg_xxx ./twistt.py --model nova-2-general --language fr
+TWISTT_DEEPGRAM_API_KEY=dg_xxx ./twistt.py --model nova-2-general --language fr
+
+# Use Mistral/Voxtral as provider
+TWISTT_MISTRAL_API_KEY=xxx ./twistt.py --model voxtral-mini-transcribe-realtime-2602
 
 # Save your preferred options for next time
 ./twistt.py --language fr --gain 2.0 --microphone "Elgato Wave 3" --save-config
@@ -562,8 +571,9 @@ Post-treatment uses AI to improve transcription accuracy by correcting errors, f
 
 You can choose between different AI providers for transcription:
 
-- **OpenAI**: Uses OpenAI's GPT transcribe models (`gpt-4o-transcribe` (default) `gpt-4o-mini-transcribe`). Better to not use `--use-typing`.
-- **Deepgram**: Uses Deepgram's Nova models (`nova-2`, `nova-3`). Really real time but more expensive. Great with `--use-typing`
+- **OpenAI**: Uses OpenAI's GPT transcribe models (`gpt-4o-transcribe` (default), `gpt-4o-mini-transcribe`). Better to not use `--use-typing`.
+- **Deepgram**: Uses Deepgram's Nova models (`nova-2`, `nova-3`). Really real time but more expensive. Great with `--use-typing`.
+- **Mistral**: Uses Mistral's Voxtral model (`voxtral-mini-transcribe-realtime-2602`). No server-side VAD (silence detection is handled client-side).
 
 #### Post-Treatment
 
@@ -657,7 +667,7 @@ Leave the language parameter empty to use auto-detection.
 
 ## Security Notes
 
-- The API key is sent only to OpenAI's servers
+- API keys are sent only to their respective provider's servers (OpenAI, Deepgram, or Mistral)
 - Audio is processed in real-time and not stored locally
 - Transcriptions are only kept in memory during the session
 
