@@ -135,6 +135,9 @@ TWISTT_KEYBOARD_DELAY=20  # Delay in milliseconds between keyboard actions (defa
 TWISTT_INDICATOR_TEXT=" (Twistting...)"  # Customize the indicator text (default: " (Twistting...)")
 TWISTT_INDICATOR_TEXT_DISABLED=false  # Set to true to disable the indicator entirely
 
+# System tray icon (shows a microphone icon in the system tray, turns red when active)
+TWISTT_TRAY_ICON_DISABLED=false  # Set to true to disable the system tray icon (enabled by default)
+
 # Logging
 TWISTT_LOG=/path/to/custom/twistt.log  # Optional, defaults to ~/.config/twistt/twistt.log
 
@@ -181,6 +184,7 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 | `-kd, --keyboard-delay`                        | `TWISTT_KEYBOARD_DELAY`                             | 20                            | Delay in milliseconds between keyboard actions (typing, paste, navigation keys). Increase if you experience character ordering issues                                                                                   |
 | `-it, --indicator-text`                        | `TWISTT_INDICATOR_TEXT`                             | ` (Twistting...)`             | Text shown at cursor position while recording/processing                                                                                                                                                                |
 | `-ni, --no-indicator`                          | `TWISTT_INDICATOR_TEXT_DISABLED`                    | false                         | Disable the indicator text shown at cursor position while recording/processing                                                                                                                                          |
+| `-nti, --no-tray-icon`                         | `TWISTT_TRAY_ICON_DISABLED`                        | false                         | Disable the system tray icon (microphone icon that turns red when active). Requires optional packages: `pystray`, `Pillow`, `PyGObject` (see System Tray Icon section)                                                           |
 | `--log`                                        | `TWISTT_LOG`                                        | `~/.config/twistt/twistt.log` | Path to log file where transcription sessions are saved                                                                                                                                                                 |
 | `--check`                                      | -                                                   | -                             | Display configuration and exit without logging anything to file. Useful for verifying settings before running.                                                                                                          |
 | `--list-configs [DIR]`                         | -                                                   | -                             | List all configuration files found in `~/.config/twistt/` (or DIR if specified) with their variables and exit. API keys are masked, all values are limited to 100 characters.                                            |
@@ -529,6 +533,25 @@ Once in toggle mode:
 The transcription appears where the cursor is located.
 
 An indicator ("(Twistting...)" text by default) is shown at the cursor position when recording is active, or text is being output or post-treatment is running. The indicator text can be customized via `TWISTT_INDICATOR_TEXT` or disabled entirely via `TWISTT_INDICATOR_TEXT_DISABLED=true`.
+
+### System Tray Icon
+
+A system tray icon (microphone) is displayed when Twistt is running. It stays grey when idle and turns red when recording, transcribing, or post-processing. The tray icon is enabled by default and can be disabled via `TWISTT_TRAY_ICON_DISABLED=true` or `--no-tray-icon`.
+
+The tray icon requires optional Python packages (`pystray`, `Pillow`, `PyGObject`) which in turn need system libraries to build. Twistt **auto-installs** these packages on first run (via `uv pip`) into `~/.local/share/twistt/optional-deps/`. This requires `uv` to be available on the system (which is the case when running with `uv run`). If the system libraries are missing, the install fails silently and the tray icon is skipped without affecting the rest of the application.
+
+To enable the tray icon, install the required system libraries before running Twistt:
+
+```bash
+# Debian/Ubuntu
+sudo apt install libgirepository1.0-dev libcairo2-dev pkg-config python3-dev gir1.2-ayatanaappindicator3-0.1
+```
+
+Then just run Twistt normally — the Python packages will be installed automatically on first launch:
+
+```bash
+uv run ./twistt.py
+```
 
 ### Output Modes
 

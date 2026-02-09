@@ -11,3 +11,8 @@ openai
 mistralai[realtime]
 janus
 rich
+
+# Optional: system tray icon (requires system libraries, see README)
+# pystray
+# Pillow
+# PyGObject

@@ -28,6 +28,7 @@ import json
 import os
 import string
 import sys
+import threading
 import time
 import urllib.parse
 from asyncio import CancelledError, Event, PriorityQueue, Queue, create_task
@@ -51,7 +52,7 @@ from dotenv import dotenv_values, load_dotenv
 from evdev import InputDevice, categorize, ecodes
 from janus import SyncQueueShutDown
 from openai import AsyncOpenAI
-from platformdirs import user_config_dir
+from platformdirs import user_config_dir, user_data_dir
 from pydotool import (
     DOWN,
     KEY_BACKSPACE,
@@ -73,6 +74,91 @@ from rich.console import Console, Group
 from rich.live import Live
 from rich.rule import Rule
 from rich.text import Text
+
+def _try_import_tray_deps() -> bool:
+    """Try to import tray icon dependencies, auto-installing them if needed.
+
+    On first run, if the packages are not available, this function attempts to
+    install them via ``uv pip install --target`` into a persistent directory
+    under ``~/.local/share/twistt/optional-deps/``.  If the installation fails
+    (e.g. missing system libraries for PyGObject), it returns False and the
+    application continues without the tray icon.
+
+    Results are cached: subsequent calls return immediately without retrying.
+    """
+    if hasattr(_try_import_tray_deps, "_result"):
+        return _try_import_tray_deps._result
+
+    def _do_import() -> bool:
+        _TRAY_PACKAGES = ["pystray", "Pillow", "PyGObject"]
+        _target_dir = os.path.join(user_data_dir("twistt"), "optional-deps")
+
+        # Ensure the target dir is on sys.path so previously-installed packages
+        # are found on subsequent runs.
+        if _target_dir not in sys.path:
+            sys.path.insert(0, _target_dir)
+
+        try:
+            import pystray  # noqa: F811
+            from PIL import Image, ImageDraw  # noqa: F811
+
+            globals()["pystray"] = pystray
+            globals()["Image"] = Image
+            globals()["ImageDraw"] = ImageDraw
+            return True
+        except ImportError:
+            pass
+
+        # Attempt auto-install
+        import subprocess
+
+        os.makedirs(_target_dir, exist_ok=True)
+        print(
+            f"[tray-icon] Installing optional dependencies ({', '.join(_TRAY_PACKAGES)})...",
+            file=sys.stderr,
+        )
+        try:
+            result = subprocess.run(
+                ["uv", "pip", "install", "--target", _target_dir] + _TRAY_PACKAGES,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if result.returncode != 0:
+                print(
+                    f"[tray-icon] Could not install optional dependencies: {result.stderr.strip()}",
+                    file=sys.stderr,
+                )
+                return False
+        except FileNotFoundError:
+            print("[tray-icon] 'uv' command not found, cannot auto-install optional dependencies.", file=sys.stderr)
+            return False
+        except subprocess.TimeoutExpired:
+            print("[tray-icon] Timed out installing optional dependencies.", file=sys.stderr)
+            return False
+
+        # Retry import after install
+        import importlib
+
+        importlib.invalidate_caches()
+        try:
+            import pystray
+            from PIL import Image, ImageDraw
+
+            globals()["pystray"] = pystray
+            globals()["Image"] = Image
+            globals()["ImageDraw"] = ImageDraw
+            print("[tray-icon] Optional dependencies installed successfully.", file=sys.stderr)
+            return True
+        except ImportError as exc:
+            print(
+                f"[tray-icon] Installed packages but import still failed: {exc}",
+                file=sys.stderr,
+            )
+            return False
+
+    _try_import_tray_deps._result = _do_import()
+    return _try_import_tray_deps._result
 
 
 class ConsoleWithLogging:
@@ -211,6 +297,9 @@ class Config:
         text: str
         enabled: bool
 
+    class TrayIcon(NamedTuple):
+        enabled: bool
+
     class App(NamedTuple):
         console: ConsoleWithLogging
         hotkey: Config.HotKey
@@ -219,6 +308,7 @@ class Config:
         post: Config.PostTreatment
         output: Config.Output
         indicator: Config.Indicator
+        tray_icon: Config.TrayIcon
 
 
 class CommandLineParser:
@@ -252,6 +342,7 @@ class CommandLineParser:
         "indicator_text": f"{ENV_PREFIX}INDICATOR_TEXT",
         "no_indicator": f"{ENV_PREFIX}INDICATOR_TEXT_DISABLED",
         "toggle_mode": f"{ENV_PREFIX}TOGGLE_MODE",
+        "no_tray_icon": f"{ENV_PREFIX}TRAY_ICON_DISABLED",
     }
 
     @classmethod
@@ -566,6 +657,13 @@ class CommandLineParser:
             help=f"Disable the indicator text shown at cursor position while recording/processing (env: {prefix}INDICATOR_TEXT_DISABLED)",
         )
         parser.add_argument(
+            "-nti",
+            "--no-tray-icon",
+            action="store_true",
+            default=default.get("TRAY_ICON_DISABLED", cls._UNDEFINED),
+            help=f"Disable the system tray icon (env: {prefix}TRAY_ICON_DISABLED)",
+        )
+        parser.add_argument(
             "--log",
             default=default.get("LOG", cls._UNDEFINED),
             help=f"Path to log file. Default: {config_dir / 'twistt.log'} (env: {prefix}LOG)",
@@ -730,6 +828,7 @@ class CommandLineParser:
             "KEYBOARD_DELAY": int(cls.get_env("KEYBOARD_DELAY", "20")),
             "INDICATOR_TEXT": cls.get_env("INDICATOR_TEXT", " (Twistting...)"),
             "INDICATOR_TEXT_DISABLED": cls.get_env_bool("INDICATOR_TEXT_DISABLED"),
+            "TRAY_ICON_DISABLED": cls.get_env_bool("TRAY_ICON_DISABLED"),
             "LOG": cls.get_env("LOG"),
             "CONFIG_PATH": config_path.as_posix(),
         }
@@ -991,6 +1090,16 @@ class CommandLineParser:
         else:
             config_table.add_row("Indicator", "[red]Disabled[/red]")
 
+        # Tray icon settings
+        tray_icon_enabled = not args.no_tray_icon
+        if tray_icon_enabled:
+            if _try_import_tray_deps():
+                config_table.add_row("Tray icon", "[green]Enabled[/green]")
+            else:
+                config_table.add_row("Tray icon", "[yellow]Enabled but dependencies not available (install system libraries, see README)[/yellow]")
+        else:
+            config_table.add_row("Tray icon", "[red]Disabled[/red]")
+
         # Files section
         def format_path(path: Path) -> str:
             """Format path for display, using ~ for home directory."""
@@ -1119,6 +1228,9 @@ class CommandLineParser:
             indicator=Config.Indicator(
                 text=args.indicator_text,
                 enabled=not args.no_indicator,
+            ),
+            tray_icon=Config.TrayIcon(
+                enabled=not args.no_tray_icon,
             ),
         )
 
@@ -1258,7 +1370,7 @@ class CommandLineParser:
                     # Interactive prompt: save the first device name
                     overrides[env_key] = input_devices[0].name
                 continue
-            if dest in {"post_correct", "use_typing", "no_post", "no_indicator"}:
+            if dest in {"post_correct", "use_typing", "no_post", "no_indicator", "no_tray_icon"}:
                 overrides[env_key] = "true" if getattr(args, dest) else "false"
                 continue
             value = getattr(args, dest, None)
@@ -3910,6 +4022,215 @@ class IndicatorTask:
             self.comm.toggle_indicator_active(False)
 
 
+class TrayIconTask:
+    """System tray icon showing a microphone that turns red when active.
+
+    Uses pystray with a workaround for AppIndicator-based backends: icons
+    are saved as named PNG files in a temporary directory, and the underlying
+    AppIndicator (when present) is configured with ``set_icon_theme_path``
+    so that ``set_icon`` receives a plain icon *name* instead of a raw path.
+    This is necessary because AppIndicator's ``set_icon`` expects a theme
+    icon name, not a file path — without this, icons render as colored
+    squares on KDE Plasma and some GNOME setups.
+
+    Every error is caught so that a failure never crashes the main
+    application.
+    """
+
+    UPDATE_INTERVAL = 0.3
+    ICON_SIZE = 64
+
+    # Icon states — ordered by display priority (highest priority last).
+    # Each state has a name (for AppIndicator theme lookup), a color, and a tooltip.
+    # "pulse" is an optional second color: the icon alternates between "color"
+    # and "pulse" every tick to create a pulsing effect.
+    STATES = {
+        "idle":           {"name": "twistt-idle",           "color": "#40B8C8", "tooltip": "Twistt — idle"},
+        "recording":      {"name": "twistt-recording",      "color": "#E05030", "tooltip": "Twistt — recording",
+                           "pulse": "twistt-recording-dim",      "pulse_color": "#802818"},
+        "speech_active":  {"name": "twistt-speech-active",  "color": "#30C050", "tooltip": "Twistt — transcribing",
+                           "pulse": "twistt-speech-active-dim",  "pulse_color": "#1A7030"},
+        "post_treatment": {"name": "twistt-post-treatment", "color": "#B040D0", "tooltip": "Twistt — post-processing",
+                           "pulse": "twistt-post-treatment-dim", "pulse_color": "#602070"},
+    }
+
+    def __init__(self, comm: Comm):
+        self.comm = comm
+        self._icon: pystray.Icon | None = None
+        self._current_state: str = "idle"
+        self._pulse_tick: bool = False  # alternates every loop tick for pulsing states
+        self._icon_dir: str | None = None
+        # Pre-build PIL images for each state (+ pulse variants)
+        self._images: dict[str, Image.Image] = {}
+        for state, info in self.STATES.items():
+            self._images[info["name"]] = self._build_microphone_image(info["color"])
+            if "pulse" in info:
+                self._images[info["pulse"]] = self._build_microphone_image(info["pulse_color"])
+
+    # ── icon drawing ────────────────────────────────────────────────
+
+    @classmethod
+    def _build_microphone_image(cls, color: str) -> Image.Image:
+        """Draw a microphone icon programmatically with Pillow (RGBA with transparency)."""
+        sz = cls.ICON_SIZE
+        img = Image.new("RGBA", (sz, sz), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+
+        # Microphone head (capsule = top ellipse + rect + bottom ellipse)
+        mic_w = sz * 0.38
+        mic_h = sz * 0.48
+        mic_x = (sz - mic_w) / 2
+        mic_y = sz * 0.04
+        radius = mic_w / 2
+        draw.ellipse([mic_x, mic_y, mic_x + mic_w, mic_y + mic_w], fill=color)
+        draw.rectangle([mic_x, mic_y + radius, mic_x + mic_w, mic_y + mic_h - radius], fill=color)
+        draw.ellipse([mic_x, mic_y + mic_h - mic_w, mic_x + mic_w, mic_y + mic_h], fill=color)
+
+        # Stand arc (U-shape)
+        line_w = max(2, int(sz * 0.06))
+        arc_margin = sz * 0.20
+        arc_top = mic_y + mic_h - sz * 0.06
+        arc_bottom = arc_top + sz * 0.30
+        draw.arc([arc_margin, arc_top, sz - arc_margin, arc_bottom], start=0, end=180, fill=color, width=line_w)
+
+        # Vertical stem
+        stem_x = sz / 2
+        stem_top = (arc_top + arc_bottom) / 2
+        stem_bottom = sz * 0.88
+        draw.line([(stem_x, stem_top), (stem_x, stem_bottom)], fill=color, width=line_w)
+
+        # Base
+        base_w = sz * 0.32
+        draw.line([(stem_x - base_w / 2, stem_bottom), (stem_x + base_w / 2, stem_bottom)], fill=color, width=line_w)
+
+        return img
+
+    def _save_icons_to_temp_dir(self):
+        """Save all icon PNGs into a temp directory for AppIndicator theme lookup."""
+        import tempfile
+
+        self._icon_dir = tempfile.mkdtemp(prefix="twistt_icons_")
+        for name, img in self._images.items():
+            img.save(os.path.join(self._icon_dir, f"{name}.png"), "PNG")
+
+    def _configure_appindicator_theme_path(self):
+        """If pystray uses the AppIndicator backend, set the icon theme path
+        so that set_icon() resolves our named PNGs correctly."""
+        indicator = getattr(self._icon, "_appindicator", None)
+        if indicator is not None and self._icon_dir is not None:
+            idle_info = self.STATES["idle"]
+            indicator.set_icon_theme_path(self._icon_dir)
+            indicator.set_icon_full(idle_info["name"], idle_info["tooltip"])
+
+    # ── state polling ───────────────────────────────────────────────
+
+    def _resolve_state(self) -> str:
+        """Return the current icon state name based on priority.
+
+        Priority (highest wins): post_treatment > speech_active > recording > idle.
+        """
+        if self.comm.is_post_treatment_active:
+            return "post_treatment"
+        if self.comm.is_speech_active:
+            return "speech_active"
+        if self.comm.is_recording:
+            return "recording"
+        return "idle"
+
+    def _update_icon_state(self):
+        state = self._resolve_state()
+        info = self.STATES[state]
+        has_pulse = "pulse" in info
+
+        # For pulsing states, alternate every tick even if the state hasn't changed.
+        if has_pulse:
+            self._pulse_tick = not self._pulse_tick
+        else:
+            self._pulse_tick = False
+
+        # Determine which icon name to show this tick.
+        if has_pulse and self._pulse_tick:
+            icon_name = info["pulse"]
+        else:
+            icon_name = info["name"]
+
+        if state == self._current_state and not has_pulse:
+            return
+        self._current_state = state
+
+        indicator = getattr(self._icon, "_appindicator", None)
+        if indicator is not None:
+            indicator.set_icon_full(icon_name, info["tooltip"])
+        else:
+            self._icon.icon = self._images[icon_name]
+
+    # ── lifecycle ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _suppress_glib_warnings():
+        """Install a GLib log handler to silence known noisy warnings.
+
+        Must be called before pystray initialises the AppIndicator backend.
+        """
+        try:
+            from gi.repository import GLib
+
+            GLib.log_set_handler(
+                "libayatana-appindicator",
+                GLib.LogLevelFlags.LEVEL_WARNING
+                | GLib.LogLevelFlags.LEVEL_MESSAGE
+                | GLib.LogLevelFlags.LEVEL_INFO
+                | GLib.LogLevelFlags.LEVEL_DEBUG,
+                lambda *_args: None,
+            )
+        except Exception:
+            pass
+
+    def _run_pystray(self):
+        """Entry point for the pystray thread (blocking)."""
+        with suppress(Exception):
+            self._icon.run()
+
+    async def run(self):
+        """Async entry point — called from the TaskGroup.
+
+        All exceptions are caught and logged so that a tray-icon failure
+        never brings down the rest of the application.
+        """
+        try:
+            self._suppress_glib_warnings()
+            self._save_icons_to_temp_dir()
+
+            idle_info = self.STATES["idle"]
+            self._icon = pystray.Icon(
+                name="twistt",
+                icon=self._images[idle_info["name"]],
+                title=idle_info["tooltip"],
+            )
+
+            thread = threading.Thread(target=self._run_pystray, daemon=True)
+            thread.start()
+
+            # Give pystray time to initialise its backend and create _appindicator
+            await asyncio.sleep(0.5)
+            self._configure_appindicator_theme_path()
+
+            try:
+                while not self.comm.is_shutting_down:
+                    self._update_icon_state()
+                    await asyncio.sleep(self.UPDATE_INTERVAL)
+            except CancelledError:
+                pass
+            finally:
+                if self._icon is not None:
+                    with suppress(Exception):
+                        self._icon.stop()
+                thread.join(timeout=2)
+
+        except Exception as exc:
+            errprint(f"[tray-icon] Failed to run system tray icon: {exc}")
+
+
 async def main_async():
     app_config = CommandLineParser.parse()
     if app_config is None:
@@ -3944,6 +4265,13 @@ async def main_async():
             tg.create_task(buffer_task.run())
             tg.create_task(transcription_task.run())
             tg.create_task(indicator_task.run())
+
+            if app_config.tray_icon.enabled:
+                if _try_import_tray_deps():
+                    tray_icon_task = TrayIconTask(comm)
+                    tg.create_task(tray_icon_task.run())
+                else:
+                    errprint("[tray-icon] System tray icon enabled but dependencies not available. Install system libraries (see README) and restart.")
 
             if app_config.post.configured:
                 post_task = PostTreatmentTask(comm, app_config)

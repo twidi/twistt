@@ -9,6 +9,7 @@ Since this project does not use versioned releases, entries are organized by dat
 
 ### Added
 
+- System tray icon displaying a microphone that changes color by state: cyan (idle), orange (recording), green (transcribing), violet (post-processing). Active states pulse to draw attention. Optional dependencies (`pystray`, `Pillow`, `PyGObject`) are auto-installed on first run via `uv pip`. Disable with `TWISTT_TRAY_ICON_DISABLED` / `--no-tray-icon` / `-nti`
 - Mistral/Voxtral real-time transcription provider (`voxtral-mini-transcribe-realtime-2602` model) with `-kmi/--mistral-api-key` CLI argument and `TWISTT_MISTRAL_API_KEY` env var
 - Configurable toggle mode: choose between single-tap and double-tap activation via `--toggle-mode` (`single`/`double`). Default remains double-tap
 - Configurable indicator text via `TWISTT_INDICATOR_TEXT` (`--indicator-text` / `-it`) and option to disable it via `TWISTT_INDICATOR_TEXT_DISABLED` (`--no-indicator` / `-ni`)
