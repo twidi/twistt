@@ -8,5 +8,6 @@ python-dotenv
 platformdirs
 python-ydotool
 openai
+mistralai[realtime]
 janus
 rich
