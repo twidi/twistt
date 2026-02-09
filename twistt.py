@@ -174,7 +174,7 @@ class OutputMode(Enum):
 
 class Config:
     class HotKey(NamedTuple):
-        device: InputDevice
+        devices: list[InputDevice]
         codes: list[int]
         double_tap_window: float
         toggle_mode: ToggleMode
@@ -535,7 +535,7 @@ class CommandLineParser:
             nargs="?",
             default=default.get("KEYBOARD", cls._UNDEFINED),
             const=cls._PROMPT_FOR_KEYBOARD,
-            help=f"Text filter for selecting the keyboard input device; pass without a value to pick interactively (env: {prefix}KEYBOARD)",
+            help=f"Text filter for selecting the input device(s); pass without a value to pick interactively (env: {prefix}KEYBOARD)",
         )
         parser.add_argument(
             "-kd",
@@ -867,9 +867,13 @@ class CommandLineParser:
             force_keyboard_prompt = args.keyboard is cls._PROMPT_FOR_KEYBOARD
             keyboard_value = args.keyboard if not force_keyboard_prompt and isinstance(args.keyboard, str) else None
             keyboard_filter = keyboard_value.strip() if keyboard_value else None
-            keyboard = cls._find_keyboard(filter_text=keyboard_filter, force_prompt=force_keyboard_prompt)
+            input_devices = cls._find_input_devices(
+                hotkey_codes=hotkey_codes,
+                filter_text=keyboard_filter,
+                force_prompt=force_keyboard_prompt,
+            )
         except Exception as exc:
-            errprint(f"ERROR: Unable to find keyboard: {exc}")
+            errprint(f"ERROR: Unable to find input devices: {exc}")
             return None
 
         try:
@@ -922,7 +926,11 @@ class CommandLineParser:
             config_table.add_row("", "[dim]Tap: toggle mode | Hold: push-to-talk[/dim]")
         else:
             config_table.add_row("", "[dim]Hold: push-to-talk | Double-tap: toggle mode[/dim]")
-        config_table.add_row("Keyboard", f"[yellow]{keyboard.name}[/yellow]")
+        devices_display = ", ".join(device.name for device in input_devices)
+        config_table.add_row(
+            "Input device" + ("s" if len(input_devices) > 1 else ""),
+            f"[yellow]{devices_display}[/yellow]",
+        )
         mic_display_name = microphone.name or microphone.id or "microphone"
         config_table.add_row("Microphone", f"[yellow]{mic_display_name}[/yellow]")
         if args.gain != 1.0:
@@ -1040,7 +1048,7 @@ class CommandLineParser:
             cls.save_config(
                 args=args,
                 provided_args=provided_args,
-                keyboard=keyboard,
+                input_devices=input_devices,
                 microphone=microphone,
                 config_path=save_config_path,
             )
@@ -1048,7 +1056,7 @@ class CommandLineParser:
         return Config.App(
             console=console,
             hotkey=Config.HotKey(
-                device=keyboard,
+                devices=input_devices,
                 codes=hotkey_codes,
                 double_tap_window=args.double_tap_window,
                 toggle_mode=ToggleMode(args.toggle_mode),
@@ -1177,14 +1185,14 @@ class CommandLineParser:
         cls,
         args: argparse.Namespace,
         provided_args: set[str],
-        keyboard: InputDevice,
+        input_devices: list[InputDevice],
         microphone: sc.Microphone,
         config_path: Path | None = None,
     ) -> None:
         overrides = cls._prepare_config_overrides(
             args=args,
             provided_args=provided_args,
-            keyboard=keyboard,
+            input_devices=input_devices,
             microphone=microphone,
         )
         if not overrides:
@@ -1205,7 +1213,7 @@ class CommandLineParser:
         cls,
         args: argparse.Namespace,
         provided_args: set[str],
-        keyboard: InputDevice,
+        input_devices: list[InputDevice],
         microphone: sc.Microphone,
     ) -> dict[str, str]:
         overrides: dict[str, str] = {}
@@ -1219,10 +1227,12 @@ class CommandLineParser:
                 overrides[env_key] = mic_name
                 continue
             if dest == "keyboard":
-                keyboard_name = getattr(keyboard, "name", None)
-                if not keyboard_name:
-                    continue
-                overrides[env_key] = keyboard_name
+                # If a text filter was provided, save it as-is for reuse
+                if isinstance(args.keyboard, str):
+                    overrides[env_key] = args.keyboard
+                elif input_devices:
+                    # Interactive prompt: save the first device name
+                    overrides[env_key] = input_devices[0].name
                 continue
             if dest in {"post_correct", "use_typing", "no_post", "no_indicator"}:
                 overrides[env_key] = "true" if getattr(args, dest) else "false"
@@ -1419,9 +1429,13 @@ class CommandLineParser:
         return codes
 
     @staticmethod
-    def _find_keyboard(filter_text: str | None = None, force_prompt: bool = False) -> InputDevice:
+    def _find_input_devices(
+        hotkey_codes: list[int],
+        filter_text: str | None = None,
+        force_prompt: bool = False,
+    ) -> list[InputDevice]:
         devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
-        physical_keyboards = []
+        eligible_devices = []
         filter_value = filter_text.strip().lower() if filter_text else None
 
         def matches_filter(device: InputDevice) -> bool:
@@ -1429,49 +1443,37 @@ class CommandLineParser:
                 return True
             return filter_value in device.name.lower() or filter_value in device.path.lower()
 
+        hotkey_codes_set = set(hotkey_codes)
+
         for device in devices:
             capabilities = device.capabilities(verbose=False)
             if ecodes.EV_KEY not in capabilities:
                 continue
-            keys = capabilities[ecodes.EV_KEY]
+            keys = set(capabilities[ecodes.EV_KEY])
             name_lower = device.name.lower()
             if any(virt in name_lower for virt in ["virtual", "dummy", "uinput", "ydotool"]):
                 continue
-            if any(k in [ecodes.BTN_LEFT, ecodes.BTN_RIGHT, ecodes.BTN_MIDDLE] for k in keys):
+            if not hotkey_codes_set.intersection(keys):
                 continue
-            if ecodes.EV_REL in capabilities:
-                continue
-            if ecodes.KEY_A not in keys or ecodes.KEY_Z not in keys:
-                continue
-            if ecodes.KEY_SPACE not in keys and ecodes.KEY_ENTER not in keys:
-                continue
-            if ecodes.KEY_F1 not in keys or ecodes.KEY_F12 not in keys:
-                continue
-            physical_keyboards.append(device)
+            eligible_devices.append(device)
 
-        filtered_physical_keyboards = [device for device in physical_keyboards if matches_filter(device)]
-        filtered_devices = [device for device in devices if matches_filter(device)] if filter_value else devices
+        candidates = [device for device in eligible_devices if matches_filter(device)]
 
-        if filter_value and not filtered_devices:
-            raise RuntimeError(f'No input devices matched filter "{filter_text}"')
+        if not candidates:
+            if filter_value:
+                raise RuntimeError(f'No input devices matched filter "{filter_text}" for the configured hotkey(s)')
+            raise RuntimeError("No input devices found that support the configured hotkey(s)")
 
-        candidate_physical = filtered_physical_keyboards if filter_value else physical_keyboards
-        if len(candidate_physical) == 1 and not force_prompt:
-            return candidate_physical[0]
-        if candidate_physical:
-            heading = "\nMultiple physical keyboards found:" if len(candidate_physical) > 1 and not force_prompt else "\nSelect your keyboard:"
-            print(heading)
-            for idx, device in enumerate(candidate_physical):
+        if force_prompt:
+            print("\nAvailable input devices:")
+            for idx, device in enumerate(candidates):
                 print(f"  {idx}: {device.path} - {device.name}")
-            selection = int(input("Select your keyboard: "))
-            return candidate_physical[selection]
-        print("\nNo physical keyboard detected automatically.")
-        devices_to_list = filtered_devices
-        print("Available devices:")
-        for idx, device in enumerate(devices_to_list):
-            print(f"  {idx}: {device.path} - {device.name}")
-        selection = int(input("Select your keyboard manually: "))
-        return devices_to_list[selection]
+            selection = input("Select device (number, or 'all' for all devices): ").strip()
+            if selection.lower() == "all":
+                return candidates
+            return [candidates[int(selection)]]
+
+        return candidates
 
     @staticmethod
     def _find_microphone(filter_text: str | None = None, force_prompt: bool = False) -> sc.Microphone:
@@ -1928,6 +1930,38 @@ class HotKeyTask:
     def __init__(self, comm: Comm, config: Config.App):
         self.comm = comm
         self.config = config
+        self._event_queue: asyncio.Queue[tuple[InputDevice, evdev.InputEvent] | None] = asyncio.Queue()
+        self._active_devices: list[InputDevice] = list(config.hotkey.devices)
+
+    async def _read_device(self, device: InputDevice):
+        """Read events from a single device and put them on the shared queue."""
+        received_event = False
+        try:
+            async for event in device.async_read_loop():
+                received_event = True
+                await self._event_queue.put((device, event))
+                if self.comm.is_shutting_down:
+                    break
+        except OSError as exc:
+            if not received_event:
+                errprint(f"Error reading input device {device.name} ({device.path}): {exc}")
+            else:
+                print(f"\nInput device disconnected: {device.name} ({device.path})")
+            if device in self._active_devices:
+                self._active_devices.remove(device)
+            with suppress(Exception):
+                device.close()
+            if not self._active_devices:
+                await self._event_queue.put(None)
+        except CancelledError:
+            pass
+
+    def _close_all_devices(self):
+        """Close all input devices gracefully."""
+        for device in self._active_devices:
+            with suppress(Exception):
+                device.close()
+        self._active_devices.clear()
 
     async def run(self):
         hotkey_pressed = False
@@ -1938,106 +1972,114 @@ class HotKeyTask:
         toggle_cooldown = 0.5
         key_down_time = 0.0
 
-        received_event = False
-        while True:
-            try:
-                async for event in self.config.hotkey.device.async_read_loop():
-                    received_event = True
-                    if self.comm.is_shutting_down:
-                        break
-                    if event.type != ecodes.EV_KEY:
+        reader_tasks = []
+        for device in self._active_devices:
+            reader_tasks.append(asyncio.create_task(self._read_device(device)))
+
+        try:
+            while True:
+                item = await self._event_queue.get()
+                if item is None:
+                    break
+                device, event = item
+
+                if self.comm.is_shutting_down:
+                    break
+                if event.type != ecodes.EV_KEY:
+                    continue
+                key_event = categorize(event)
+                current_time = time.perf_counter()
+                scancode = key_event.scancode
+
+                if scancode in self.config.hotkey.codes:
+                    if active_hotkey is not None and scancode != active_hotkey:
+                        if key_event.keystate == self.KEY_UP:
+                            last_release_time[scancode] = current_time
                         continue
-                    key_event = categorize(event)
-                    current_time = time.perf_counter()
-                    scancode = key_event.scancode
 
-                    if scancode in self.config.hotkey.codes:
-                        if active_hotkey is not None and scancode != active_hotkey:
-                            if key_event.keystate == self.KEY_UP:
-                                last_release_time[scancode] = current_time
-                            continue
+                    shift_pressed = any(
+                        code in dev.active_keys()
+                        for dev in self._active_devices
+                        for code in self.SHIFT_CODES
+                    )
+                    self.comm.toggle_shift_pressed(shift_pressed)
 
-                        shift_pressed = any(code in self.config.hotkey.device.active_keys() for code in self.SHIFT_CODES)
-                        self.comm.toggle_shift_pressed(shift_pressed)
-
-                        match key_event.keystate:
-                            case self.KEY_DOWN if not hotkey_pressed and not is_toggle_mode:
-                                if current_time - toggle_stop_time < toggle_cooldown:
-                                    continue
-                                if (
-                                    self.config.hotkey.toggle_mode == ToggleMode.DOUBLE
-                                    and current_time - last_release_time[scancode] < self.config.hotkey.double_tap_window
-                                ):
-                                    is_toggle_mode = True
-                                    active_hotkey = scancode
-                                    hotkey_pressed = True
-                                    name = next(k for k, v in F_KEY_CODES.items() if v == scancode)
-                                    if not OUTPUT_TO_STDOUT:
-                                        print(f"[Toggle mode activated with {name.upper()}]")
-                                    self.comm.toggle_recording(True, name.upper(), True)
-                                else:
-                                    is_toggle_mode = False
-                                    hotkey_pressed = True
-                                    active_hotkey = scancode
-                                    key_down_time = current_time
-                                    name = next(k for k, v in F_KEY_CODES.items() if v == scancode)
-                                    self.comm.toggle_recording(True, name.upper(), False)
-                                if not OUTPUT_TO_STDOUT:
-                                    print(f"\n--- {datetime.now()} ---")
-
-                            case self.KEY_UP if hotkey_pressed and not is_toggle_mode:
-                                last_release_time[scancode] = current_time
-                                if (
-                                    self.config.hotkey.toggle_mode == ToggleMode.SINGLE
-                                    and current_time - key_down_time < self.config.hotkey.double_tap_window
-                                ):
-                                    is_toggle_mode = True
-                                    hotkey_pressed = False
-                                    name = next(k for k, v in F_KEY_CODES.items() if v == scancode)
-                                    if not OUTPUT_TO_STDOUT:
-                                        print(f"[Toggle mode activated with {name.upper()}]")
-                                    self.comm.switch_to_toggle_mode(name.upper())
-                                else:
-                                    hotkey_pressed = False
-                                    active_hotkey = None
-                                    self.comm.toggle_recording(False, None, False)
-
-                            case self.KEY_UP if is_toggle_mode:
-                                last_release_time[scancode] = current_time
-                                hotkey_pressed = False
-
-                            case self.KEY_DOWN if is_toggle_mode:
-                                is_toggle_mode = False
-                                active_hotkey = None
-                                hotkey_pressed = False
-                                toggle_stop_time = current_time
+                    match key_event.keystate:
+                        case self.KEY_DOWN if not hotkey_pressed and not is_toggle_mode:
+                            if current_time - toggle_stop_time < toggle_cooldown:
+                                continue
+                            if (
+                                self.config.hotkey.toggle_mode == ToggleMode.DOUBLE
+                                and current_time - last_release_time[scancode] < self.config.hotkey.double_tap_window
+                            ):
+                                is_toggle_mode = True
+                                active_hotkey = scancode
+                                hotkey_pressed = True
                                 name = next(k for k, v in F_KEY_CODES.items() if v == scancode)
-                                print(f"[Toggle mode deactivated with {name.upper()}]")
+                                if not OUTPUT_TO_STDOUT:
+                                    print(f"[Toggle mode activated with {name.upper()}]")
+                                self.comm.toggle_recording(True, name.upper(), True)
+                            else:
+                                is_toggle_mode = False
+                                hotkey_pressed = True
+                                active_hotkey = scancode
+                                key_down_time = current_time
+                                name = next(k for k, v in F_KEY_CODES.items() if v == scancode)
+                                self.comm.toggle_recording(True, name.upper(), False)
+                            if not OUTPUT_TO_STDOUT:
+                                print(f"\n--- {datetime.now()} ---")
+
+                        case self.KEY_UP if hotkey_pressed and not is_toggle_mode:
+                            last_release_time[scancode] = current_time
+                            if (
+                                self.config.hotkey.toggle_mode == ToggleMode.SINGLE
+                                and current_time - key_down_time < self.config.hotkey.double_tap_window
+                            ):
+                                is_toggle_mode = True
+                                hotkey_pressed = False
+                                name = next(k for k, v in F_KEY_CODES.items() if v == scancode)
+                                if not OUTPUT_TO_STDOUT:
+                                    print(f"[Toggle mode activated with {name.upper()}]")
+                                self.comm.switch_to_toggle_mode(name.upper())
+                            else:
+                                hotkey_pressed = False
+                                active_hotkey = None
                                 self.comm.toggle_recording(False, None, False)
 
-                    elif self.comm.is_recording and scancode in self.SHIFT_CODES:
-                        match key_event.keystate:
-                            case self.KEY_DOWN:
-                                self.comm.toggle_shift_pressed(True)
-                            case self.KEY_UP:
-                                self.comm.toggle_shift_pressed(False)
+                        case self.KEY_UP if is_toggle_mode:
+                            last_release_time[scancode] = current_time
+                            hotkey_pressed = False
 
-                    elif self.comm.is_recording and scancode in self.ALT_CODES:
-                        match key_event.keystate:
-                            case self.KEY_DOWN:
-                                self.comm.toggle_alt_pressed(True)
-                            case self.KEY_UP:
-                                self.comm.toggle_alt_pressed(False)
+                        case self.KEY_DOWN if is_toggle_mode:
+                            is_toggle_mode = False
+                            active_hotkey = None
+                            hotkey_pressed = False
+                            toggle_stop_time = current_time
+                            name = next(k for k, v in F_KEY_CODES.items() if v == scancode)
+                            print(f"[Toggle mode deactivated with {name.upper()}]")
+                            self.comm.toggle_recording(False, None, False)
 
-            except Exception as exc:
-                if not received_event:
-                    errprint(f"Error while listening for hotkey events: {exc}")
-                raise
-            except CancelledError:
-                break
+                elif self.comm.is_recording and scancode in self.SHIFT_CODES:
+                    match key_event.keystate:
+                        case self.KEY_DOWN:
+                            self.comm.toggle_shift_pressed(True)
+                        case self.KEY_UP:
+                            self.comm.toggle_shift_pressed(False)
 
-        with suppress(Exception):
-            self.config.hotkey.device.close()
+                elif self.comm.is_recording and scancode in self.ALT_CODES:
+                    match key_event.keystate:
+                        case self.KEY_DOWN:
+                            self.comm.toggle_alt_pressed(True)
+                        case self.KEY_UP:
+                            self.comm.toggle_alt_pressed(False)
+
+        except CancelledError:
+            pass
+        finally:
+            for task in reader_tasks:
+                task.cancel()
+            await asyncio.gather(*reader_tasks, return_exceptions=True)
+            self._close_all_devices()
 
 
 class CaptureTask:
@@ -3622,8 +3664,9 @@ async def main_async():
 
     finally:
         await comm.shutdown()
-        with suppress(Exception):
-            app_config.hotkey.device.close()
+        for device in app_config.hotkey.devices:
+            with suppress(Exception):
+                device.close()
 
 
 def main():

@@ -13,7 +13,7 @@ This document collects potential enhancements, with a focus on working reliably 
 ## Input & Hotkeys
 
 - More flexible hotkeys: allow `capslock`, `scrolllock`, `rightalt` for `--hotkey` (optional, documented). Still evdev‑based, so remains global.
-- USB pedals: `--input-event /dev/input/eventX` to listen to a specific device (foot pedal = perfect PTT).
+- USB pedals: foot pedals now work out of the box since all input devices capable of emitting the hotkey are automatically detected. Use `--keyboard "pedal name"` to restrict to a specific device if needed.
 - Temporary “mode” modifier: holding `Alt` while dictating toggles “Ctrl+Shift+V paste” or “no paste”, depending on config.
 
 ## Output & Pasting

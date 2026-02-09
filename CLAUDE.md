@@ -25,7 +25,7 @@ The project uses inline script dependencies (PEP 723) specified in `twistt.py`. 
 - soundcard (microphone discovery)
 - websockets (OpenAI real-time API)
 - pyperclipfix (clipboard operations)
-- evdev (keyboard event monitoring)
+- evdev (input device event monitoring)
 - python-dotenv, platformdirs (configuration)
 - python-ydotool (keyboard simulation for paste)
 - openai (OpenAI SDK for post-treatment feature)
@@ -35,7 +35,7 @@ The project uses inline script dependencies (PEP 723) specified in `twistt.py`. 
 The application is a single-file Python script with the following key components:
 
 1. **AudioTranscriber class**: Core logic for WebSocket connection to OpenAI, audio streaming, and transcription handling
-2. **Keyboard monitoring**: Uses evdev to detect F-key presses for push-to-talk
+2. **Input device monitoring**: Uses evdev to detect F-key presses for push-to-talk across all input devices (keyboards, mice with remapped buttons, macropads, etc.)
 3. **Audio capture**: Uses sounddevice to record from microphone in real-time (Pulse source pinned via soundcard)
 4. **Auto-paste/typing**: Uses python-ydotool to paste text or optionally type ASCII characters directly
 5. **Post-treatment**: Optional AI-powered correction using various providers (OpenAI, Cerebras, OpenRouter) to improve transcription accuracy

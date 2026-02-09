@@ -152,7 +152,7 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 | Option                                         | Environment Variable                                | Default                       | Description                                                                                                                                                                                                             |
 |------------------------------------------------|-----------------------------------------------------|-------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `-k, --hotkey`                                 | `TWISTT_HOTKEY` or `TWISTT_HOTKEYS`                 | F9                            | Push-to-talk key(s) (F1-F12), comma-separated for multiple                                                                                                                                                              |
-| `-kb, --keyboard`                              | `TWISTT_KEYBOARD`                                   | -                             | Filter text for automatically selecting the keyboard input device<br/>Pass without a value to force interactive selection and ignore env defaults                                                                       |
+| `-kb, --keyboard`                              | `TWISTT_KEYBOARD`                                   | -                             | Filter text for selecting input device(s) for hotkey detection (keyboards, mice with remapped buttons, etc.)<br/>Pass without a value to force interactive selection and ignore env defaults                             |
 | `-dtw, --double-tap-window`                    | `TWISTT_DOUBLE_TAP_WINDOW`                          | 0.5                           | Time window in seconds for double-tap detection (and single-tap threshold)                                                                                                                                              |
 | `-tm, --toggle-mode`                           | `TWISTT_TOGGLE_MODE`                                | double                        | Toggle activation mode: `single` (one tap) or `double` (double-tap)                                                                                                                                                    |
 | `-m, --model`                                  | `TWISTT_MODEL`                                      | gpt-4o-transcribe             | Transcription model (for OpenAI or Deepgram)                                                                                                                                                                            |
@@ -548,9 +548,9 @@ Twistt supports three output modes that control when text is processed and outpu
   - Adapting text style (formal, informal, technical)
   - Language-specific corrections
 
-## Keyboard Detection
+## Input Device Detection
 
-The script automatically detects your physical keyboard. If multiple keyboards are found, you'll be prompted to select one. Virtual keyboards are automatically filtered out. Set `--keyboard "partial name"` or `TWISTT_KEYBOARD=partial name` to pre-filter devices and auto-select when only one match remains. Pass `--keyboard` with no value to always display the selection menu and ignore any configured default.
+The script automatically detects all input devices capable of emitting the configured hotkey (keyboards, mice with remapped buttons, macropads, etc.). All matching devices are monitored simultaneously, so a hotkey press is detected regardless of which device it comes from. Virtual input devices (ydotool, uinput, etc.) are automatically filtered out. Set `--keyboard "partial name"` or `TWISTT_KEYBOARD=partial name` to restrict to devices matching the filter. Pass `--keyboard` with no value to display an interactive selection menu.
 
 ## Post-Treatment (Optional)
 
