@@ -10,6 +10,7 @@ Since this project does not use versioned releases, entries are organized by dat
 ### Added
 
 - Live transcription OSD overlay for Wayland/Hyprland: a glass-morphism on-screen display showing a 60-bar spectrum analyzer with absolute dB scaling, a color-coded vertical dB level meter, real-time transcript text with fade-out scrolling, and pulsing state indicators. Runs as a separate daemon process (`twistt_osd.py`) under system Python with `gtk4-layer-shell` via `LD_PRELOAD`. Communicates via Unix socket IPC. Configurable size via `TWISTT_OSD_WIDTH`/`TWISTT_OSD_HEIGHT` (`--osd-width`/`--osd-height`). Disable with `TWISTT_OSD_DISABLED` / `--no-osd` / `-nosd`. Gracefully skipped when system dependencies are missing
+- OSD monitor and position configuration: force OSD to a specific monitor via `TWISTT_OSD_MONITOR` (`--osd-monitor`, index 0/1/2...) and set position as percentage via `TWISTT_OSD_X`/`TWISTT_OSD_Y` (`--osd-x`/`--osd-y`, 0-100, center of window). Position requires a forced monitor to compute pixel offsets from the monitor geometry. Without `--osd-monitor`, the compositor chooses the screen (typically follows mouse) and the OSD is centered at the top
 
 ### Fixed
 

@@ -147,6 +147,9 @@ TWISTT_DUCKING_PERCENT=50  # How much to reduce system volume BY during recordin
 TWISTT_OSD_DISABLED=false  # Set to true to disable the live transcription OSD overlay
 TWISTT_OSD_WIDTH=550  # OSD overlay width in pixels (default: 550)
 TWISTT_OSD_HEIGHT=220  # OSD overlay height in pixels (default: 220)
+TWISTT_OSD_MONITOR=    # Monitor index (0, 1, 2...). Unset = follows mouse
+TWISTT_OSD_X=50  # Horizontal position in % (0-100), center of window (default: 50). Requires OSD_MONITOR
+TWISTT_OSD_Y=3  # Vertical position in % (0-100), center of window (default: 3). Requires OSD_MONITOR
 
 # Logging
 TWISTT_LOG=/path/to/custom/twistt.log  # Optional, defaults to ~/.config/twistt/twistt.log
@@ -200,6 +203,9 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 | `-nosd, --no-osd`                              | `TWISTT_OSD_DISABLED`                              | false                         | Disable the live transcription OSD overlay (requires Wayland + gtk4-layer-shell)                                                                                                                                        |
 | `--osd-width`                                  | `TWISTT_OSD_WIDTH`                                 | 550                           | OSD overlay width in pixels                                                                                                                                                                                             |
 | `--osd-height`                                 | `TWISTT_OSD_HEIGHT`                                | 220                           | OSD overlay height in pixels                                                                                                                                                                                            |
+| `--osd-monitor`                                | `TWISTT_OSD_MONITOR`                               | *(unset)*                     | Monitor index (0, 1, 2...). Unset = compositor default (follows mouse)                                                                                                                                                  |
+| `--osd-x`                                      | `TWISTT_OSD_X`                                     | 50                            | OSD horizontal position in % (0-100), center of window. Requires `--osd-monitor`                                                                                                                                        |
+| `--osd-y`                                      | `TWISTT_OSD_Y`                                     | 3                             | OSD vertical position in % (0-100), center of window. Requires `--osd-monitor`                                                                                                                                          |
 | `--log`                                        | `TWISTT_LOG`                                        | `~/.config/twistt/twistt.log` | Path to log file where transcription sessions are saved                                                                                                                                                                 |
 | `--check`                                      | -                                                   | -                             | Display configuration and exit without logging anything to file. Useful for verifying settings before running.                                                                                                          |
 | `--list-configs [DIR]`                         | -                                                   | -                             | List all configuration files found in `~/.config/twistt/` (or DIR if specified) with their variables and exit. API keys are masked, all values are limited to 100 characters.                                            |
@@ -651,6 +657,8 @@ The OSD uses `gtk4-layer-shell` via `LD_PRELOAD` to create a Wayland layer surfa
 **Configuration:**
 - Disable: `TWISTT_OSD_DISABLED=true` or `--no-osd` / `-nosd`
 - Custom size: `TWISTT_OSD_WIDTH=550` / `TWISTT_OSD_HEIGHT=220` (or `--osd-width` / `--osd-height`)
+- Force monitor: `--osd-monitor 1` (index 0, 1, 2...). Without this, the compositor chooses (typically follows mouse)
+- Custom position: `--osd-x 33 --osd-y 5` (percentage 0-100, center of window). Requires `--osd-monitor` to know which screen geometry to use. The window is clamped to stay within the monitor bounds
 
 If the required system dependencies are not installed, the OSD is silently skipped and the rest of the application works normally. Use `--check` to verify OSD availability.
 

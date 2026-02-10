@@ -750,10 +750,13 @@ class OSDRenderer:
 class OSDWindow(Gtk.Window):
     """GTK4 layer-shell overlay window for the transcription OSD."""
 
-    def __init__(self, width: int = 550, height: int = 220):
+    def __init__(self, width: int = 550, height: int = 220, pos_x: int = 50, pos_y: int = 3, monitor: int | None = None):
         super().__init__()
         self._width = width
         self._height = height
+        self._pos_x = max(0, min(100, pos_x))
+        self._pos_y = max(0, min(100, pos_y))
+        self._monitor_index = monitor
         self._renderer = OSDRenderer()
         self._audio_level = 0.0
         self._audio_samples: np.ndarray | None = None
@@ -770,17 +773,62 @@ class OSDWindow(Gtk.Window):
         Gtk4LayerShell.set_namespace(self, "twistt-osd")
         Gtk4LayerShell.set_layer(self, Gtk4LayerShell.Layer.OVERLAY)
 
-        # Anchor: top center
-        Gtk4LayerShell.set_anchor(self, Gtk4LayerShell.Edge.TOP, True)
-        Gtk4LayerShell.set_anchor(self, Gtk4LayerShell.Edge.BOTTOM, False)
-        Gtk4LayerShell.set_anchor(self, Gtk4LayerShell.Edge.LEFT, False)
-        Gtk4LayerShell.set_anchor(self, Gtk4LayerShell.Edge.RIGHT, False)
+        if self._monitor_index is not None:
+            # Forced monitor: anchor TOP+LEFT with computed pixel margins
+            display = Gdk.Display.get_default()
+            if display:
+                monitors = display.get_monitors()
+                if 0 <= self._monitor_index < monitors.get_n_items():
+                    target = monitors.get_item(self._monitor_index)
+                    Gtk4LayerShell.set_monitor(self, target)
 
-        Gtk4LayerShell.set_margin(self, Gtk4LayerShell.Edge.TOP, 40)
+                    Gtk4LayerShell.set_anchor(self, Gtk4LayerShell.Edge.TOP, True)
+                    Gtk4LayerShell.set_anchor(self, Gtk4LayerShell.Edge.LEFT, True)
+                    Gtk4LayerShell.set_anchor(self, Gtk4LayerShell.Edge.BOTTOM, False)
+                    Gtk4LayerShell.set_anchor(self, Gtk4LayerShell.Edge.RIGHT, False)
+
+                    margin_left, margin_top = self._compute_margins(target)
+                    Gtk4LayerShell.set_margin(self, Gtk4LayerShell.Edge.TOP, margin_top)
+                    Gtk4LayerShell.set_margin(self, Gtk4LayerShell.Edge.LEFT, margin_left)
+        else:
+            # No forced monitor: let compositor choose (follows mouse).
+            # Anchor top-center, fixed 40px margin (original behavior).
+            # --osd-x/--osd-y are ignored in this mode.
+            Gtk4LayerShell.set_anchor(self, Gtk4LayerShell.Edge.TOP, True)
+            Gtk4LayerShell.set_anchor(self, Gtk4LayerShell.Edge.BOTTOM, False)
+            Gtk4LayerShell.set_anchor(self, Gtk4LayerShell.Edge.LEFT, False)
+            Gtk4LayerShell.set_anchor(self, Gtk4LayerShell.Edge.RIGHT, False)
+            Gtk4LayerShell.set_margin(self, Gtk4LayerShell.Edge.TOP, 40)
+
         Gtk4LayerShell.set_exclusive_zone(self, -1)
         Gtk4LayerShell.set_keyboard_mode(
             self, Gtk4LayerShell.KeyboardMode.NONE
         )
+
+    def _compute_margins(self, monitor: Gdk.Monitor) -> tuple[int, int]:
+        """Compute pixel margins from percentage position.
+
+        The percentage represents where the center of the OSD window
+        should be placed on the monitor. The result is clamped so the
+        window never goes off-screen.
+        """
+        geom = monitor.get_geometry()
+        monitor_width = geom.width
+        monitor_height = geom.height
+
+        # Center of window at pos_x% / pos_y% of monitor
+        center_x = int(monitor_width * self._pos_x / 100)
+        center_y = int(monitor_height * self._pos_y / 100)
+
+        # Convert to top-left corner offset
+        margin_left = center_x - self._width // 2
+        margin_top = center_y - self._height // 2
+
+        # Clamp so the window stays within the monitor
+        margin_left = max(0, min(margin_left, monitor_width - self._width))
+        margin_top = max(0, min(margin_top, monitor_height - self._height))
+
+        return margin_left, margin_top
 
     def _setup_window(self):
         self.set_decorated(False)
@@ -840,7 +888,7 @@ class TranscriptionOSD:
     for spectrum visualization, and renders with Cairo at 60fps.
     """
 
-    def __init__(self, width: int = 550, height: int = 220, daemon: bool = False):
+    def __init__(self, width: int = 550, height: int = 220, pos_x: int = 50, pos_y: int = 3, monitor: int | None = None, daemon: bool = False):
         self.main_loop: GLib.MainLoop | None = None
         self.window: OSDWindow | None = None
         self.audio_monitor: AudioMonitor | None = None
@@ -848,6 +896,9 @@ class TranscriptionOSD:
         self.visible = False
         self._width = width
         self._height = height
+        self._pos_x = pos_x
+        self._pos_y = pos_y
+        self._monitor = monitor
         self._should_stop = False
 
         # Timers
@@ -876,7 +927,7 @@ class TranscriptionOSD:
         Gtk.init()
         _load_css()
 
-        self.window = OSDWindow(self._width, self._height)
+        self.window = OSDWindow(self._width, self._height, self._pos_x, self._pos_y, self._monitor)
 
         self._start_socket_server()
         self._initial_visibility()
@@ -1202,6 +1253,24 @@ def main():
         default=220,
         help="Window height in pixels (default: 220)",
     )
+    parser.add_argument(
+        "--pos-x",
+        type=int,
+        default=50,
+        help="Horizontal position in %% (0-100), center of window (default: 50)",
+    )
+    parser.add_argument(
+        "--pos-y",
+        type=int,
+        default=3,
+        help="Vertical position in %% (0-100), center of window (default: 3)",
+    )
+    parser.add_argument(
+        "--monitor",
+        type=int,
+        default=None,
+        help="Monitor index (0, 1, 2...). Unset = compositor default / follows mouse",
+    )
     args = parser.parse_args()
 
     # PID file
@@ -1217,6 +1286,9 @@ def main():
     _app = TranscriptionOSD(
         width=args.width,
         height=args.height,
+        pos_x=args.pos_x,
+        pos_y=args.pos_y,
+        monitor=args.monitor,
         daemon=args.daemon,
     )
 

@@ -412,6 +412,9 @@ class Config:
         enabled: bool
         width: int
         height: int
+        x: int  # horizontal position in % (0-100), center of window
+        y: int  # vertical position in % (0-100), center of window
+        monitor: int | None  # monitor index (0, 1, 2...) or None for default
 
     class App(NamedTuple):
         console: ConsoleWithLogging
@@ -463,6 +466,9 @@ class CommandLineParser:
         "no_osd": f"{ENV_PREFIX}OSD_DISABLED",
         "osd_width": f"{ENV_PREFIX}OSD_WIDTH",
         "osd_height": f"{ENV_PREFIX}OSD_HEIGHT",
+        "osd_x": f"{ENV_PREFIX}OSD_X",
+        "osd_y": f"{ENV_PREFIX}OSD_Y",
+        "osd_monitor": f"{ENV_PREFIX}OSD_MONITOR",
     }
 
     @classmethod
@@ -817,6 +823,24 @@ class CommandLineParser:
             help=f"OSD overlay height in pixels (default: 220) (env: {prefix}OSD_HEIGHT)",
         )
         parser.add_argument(
+            "--osd-x",
+            type=int,
+            default=default.get("OSD_X", 50),
+            help=f"OSD horizontal position in %% (0-100), center of window (default: 50) (env: {prefix}OSD_X)",
+        )
+        parser.add_argument(
+            "--osd-y",
+            type=int,
+            default=default.get("OSD_Y", 3),
+            help=f"OSD vertical position in %% (0-100), center of window (default: 3) (env: {prefix}OSD_Y)",
+        )
+        parser.add_argument(
+            "--osd-monitor",
+            type=int,
+            default=default.get("OSD_MONITOR", None),
+            help=f"OSD monitor index (0, 1, 2...). Unset = follows mouse (env: {prefix}OSD_MONITOR)",
+        )
+        parser.add_argument(
             "--log",
             default=default.get("LOG", cls._UNDEFINED),
             help=f"Path to log file. Default: {config_dir / 'twistt.log'} (env: {prefix}LOG)",
@@ -987,6 +1011,9 @@ class CommandLineParser:
             "OSD_DISABLED": cls.get_env_bool("OSD_DISABLED"),
             "OSD_WIDTH": int(cls.get_env("OSD_WIDTH", "550")),
             "OSD_HEIGHT": int(cls.get_env("OSD_HEIGHT", "220")),
+            "OSD_X": int(cls.get_env("OSD_X", "50")),
+            "OSD_Y": int(cls.get_env("OSD_Y", "3")),
+            "OSD_MONITOR": int(cls.get_env("OSD_MONITOR")) if cls.get_env("OSD_MONITOR") else None,
             "LOG": cls.get_env("LOG"),
             "CONFIG_PATH": config_path.as_posix(),
         }
@@ -1272,7 +1299,15 @@ class CommandLineParser:
         osd_enabled = not args.no_osd
         if osd_enabled:
             if OsdRunner.is_available():
-                config_table.add_row("OSD overlay", f"[green]Enabled[/green] - [yellow]{args.osd_width}x{args.osd_height}[/yellow]")
+                monitor_info = f"monitor {args.osd_monitor}" if args.osd_monitor is not None else "follows mouse"
+                if args.osd_monitor is not None:
+                    config_table.add_row("OSD overlay", f"[green]Enabled[/green] - [yellow]{args.osd_width}x{args.osd_height}[/yellow] at [yellow]{args.osd_x}%x{args.osd_y}%[/yellow] ({monitor_info})")
+                else:
+                    pos_info = ""
+                    if args.osd_x != 50 or args.osd_y != 3:
+                        errprint("WARNING: --osd-x/--osd-y are ignored without --osd-monitor (cannot compute position without a known monitor)")
+                        pos_info = " [red](--osd-x/--osd-y ignored)[/red]"
+                    config_table.add_row("OSD overlay", f"[green]Enabled[/green] - [yellow]{args.osd_width}x{args.osd_height}[/yellow] ({monitor_info}){pos_info}")
             else:
                 config_table.add_row("OSD overlay", f"[yellow]Enabled but dependencies not available ({OsdRunner.get_unavailable_reason()})[/yellow]")
         else:
@@ -1418,6 +1453,9 @@ class CommandLineParser:
                 enabled=not args.no_osd,
                 width=args.osd_width,
                 height=args.osd_height,
+                x=args.osd_x,
+                y=args.osd_y,
+                monitor=args.osd_monitor,
             ),
         )
 
@@ -4505,12 +4543,15 @@ class OsdRunner:
     SOCKET_PATH = Path(user_data_dir("twistt")) / "osd.sock"
     _OSD_SCRIPT = Path(__file__).resolve().parent / "twistt_osd.py"
 
-    def __init__(self, width: int = 550, height: int = 220):
+    def __init__(self, width: int = 550, height: int = 220, x: int = 50, y: int = 3, monitor: int | None = None):
         self._process: subprocess.Popen | None = None
         self._socket: socket.socket | None = None
         self._orphaned_daemon_pid: int | None = None
         self._width = width
         self._height = height
+        self._x = x
+        self._y = y
+        self._monitor = monitor
 
     # Cache for dependency check (class-level)
     _deps_available: bool | None = None
@@ -4649,13 +4690,18 @@ class OsdRunner:
             errprint("[osd] Warning: gtk4-layer-shell library not found, overlay may not work")
 
         try:
+            cmd = [
+                "/usr/bin/python3", str(self._OSD_SCRIPT),
+                "--daemon",
+                "--width", str(self._width),
+                "--height", str(self._height),
+                "--pos-x", str(self._x),
+                "--pos-y", str(self._y),
+            ]
+            if self._monitor is not None:
+                cmd.extend(["--monitor", str(self._monitor)])
             self._process = subprocess.Popen(
-                [
-                    "/usr/bin/python3", str(self._OSD_SCRIPT),
-                    "--daemon",
-                    "--width", str(self._width),
-                    "--height", str(self._height),
-                ],
+                cmd,
                 env=env,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -4789,7 +4835,13 @@ class OsdTask:
                 errprint(f"[osd] OSD overlay not available: {OsdRunner.get_unavailable_reason()}")
                 return
 
-            self._runner = OsdRunner(width=self.config.width, height=self.config.height)
+            self._runner = OsdRunner(
+                width=self.config.width,
+                height=self.config.height,
+                x=self.config.x,
+                y=self.config.y,
+                monitor=self.config.monitor,
+            )
             if not self._runner._ensure_daemon():
                 errprint("[osd] Failed to start OSD daemon")
                 return
