@@ -56,6 +56,19 @@ import websockets
 from dotenv import dotenv_values, load_dotenv
 from evdev import InputDevice, categorize, ecodes
 from janus import SyncQueueShutDown
+from mistralai import Mistral
+from mistralai.extra.realtime import UnknownRealtimeEvent
+from mistralai.extra.realtime.connection import parse_realtime_event
+from mistralai.models import (
+    AudioFormat,
+    RealtimeTranscriptionError,
+    RealtimeTranscriptionSessionCreated,
+    RealtimeTranscriptionSessionUpdated,
+    TranscriptionStreamDone,
+    TranscriptionStreamLanguage,
+    TranscriptionStreamSegmentDelta,
+    TranscriptionStreamTextDelta,
+)
 from openai import AsyncOpenAI
 from platformdirs import user_config_dir, user_data_dir
 from pydotool import (
@@ -3185,20 +3198,6 @@ class MistralTranscriptionTask(BaseTranscriptionTask):
             yield chunk
 
     async def _run_session(self, previous_transcriptions: list[str], current_transcription: list[str]):
-        from mistralai import Mistral
-        from mistralai.extra.realtime import UnknownRealtimeEvent
-        from mistralai.extra.realtime.connection import parse_realtime_event
-        from mistralai.models import (
-            AudioFormat,
-            RealtimeTranscriptionError,
-            RealtimeTranscriptionSessionCreated,
-            RealtimeTranscriptionSessionUpdated,
-            TranscriptionStreamDone,
-            TranscriptionStreamLanguage,
-            TranscriptionStreamSegmentDelta,
-            TranscriptionStreamTextDelta,
-        )
-
         if not hasattr(self, "_rt"):
             client = Mistral(api_key=self.config.transcription.api_key)
             self._rt = client.audio.realtime
