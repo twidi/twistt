@@ -45,7 +45,7 @@ PlasmoidItem {
         if (!appRunning)
             return "Not running"
         switch (currentState) {
-            case "recording":      return "Recording..."
+            case "recording":      return "Listening..."
             case "speech_active":  return "Transcribing..."
             case "post_treatment": return "Post-processing..."
             default:               return "Idle"
@@ -265,7 +265,7 @@ PlasmoidItem {
                     if (!root.appRunning)
                         return "Application not running"
                     switch (root.currentState) {
-                        case "recording":      return "Recording..."
+                        case "recording":      return "Listening..."
                         case "speech_active":  return "Transcribing..."
                         case "post_treatment": return "Post-processing..."
                         default:               return "Idle — waiting for input"

@@ -4117,7 +4117,7 @@ class TerminalDisplayTask:
 
     def _speech_state_label(self, *, final: bool) -> str:
         if self.is_recording and not final:
-            return "Recording"
+            return "Listening"
         if self.is_speaking and not final:
             return "Speaking"
         if self.speech_text:
@@ -4243,7 +4243,7 @@ class TrayIconTask:
     # and "pulse" every tick to create a pulsing effect.
     STATES = {
         "idle":           {"name": "twistt-idle",           "color": "#40B8C8", "tooltip": "Twistt — idle"},
-        "recording":      {"name": "twistt-recording",      "color": "#E05030", "tooltip": "Twistt — recording",
+        "recording":      {"name": "twistt-recording",      "color": "#E05030", "tooltip": "Twistt — listening",
                            "pulse": "twistt-recording-dim",      "pulse_color": "#802818"},
         "speech_active":  {"name": "twistt-speech-active",  "color": "#30C050", "tooltip": "Twistt — transcribing",
                            "pulse": "twistt-speech-active-dim",  "pulse_color": "#1A7030"},

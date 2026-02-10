@@ -691,7 +691,7 @@ class OSDRenderer:
         # Build list of active states (multiple can be active simultaneously)
         active_states: list[tuple[tuple[float, float, float], str]] = []
         if is_recording:
-            active_states.append(((1.0, 0.25, 0.30), "Recording"))
+            active_states.append(((1.0, 0.25, 0.30), "Listening"))
         if is_speaking:
             active_states.append(((0.20, 0.90, 0.40), "Transcribing"))
         if is_post_active:
