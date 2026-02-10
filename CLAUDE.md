@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Twistt is a Linux push-to-talk transcription tool that uses OpenAI, Deepgram, or Mistral real-time APIs for speech-to-text conversion. The entire application is contained in a single Python script (`twistt.py`) that can be run with uv.
+Twistt is a Linux push-to-talk transcription tool that uses OpenAI, Deepgram, or Mistral real-time APIs for speech-to-text conversion. The main application is contained in a single Python script (`twistt.py`) that can be run with uv. The OSD overlay daemon is in `twistt_osd.py` (runs under system Python with GTK4/gtk4-layer-shell).
 
 ## Development Setup and Commands
 
@@ -33,13 +33,14 @@ The project uses inline script dependencies (PEP 723) specified in `twistt.py`. 
 
 ## Architecture
 
-The application is a single-file Python script with the following key components:
+The application has the following key components:
 
 1. **Transcription task classes**: Provider-specific classes (OpenAI, Deepgram, Mistral) inheriting from `BaseTranscriptionTask` for WebSocket-based real-time transcription
 2. **Input device monitoring**: Uses evdev to detect F-key presses for push-to-talk across all input devices (keyboards, mice with remapped buttons, macropads, etc.)
 3. **Audio capture**: Uses sounddevice to record from microphone in real-time (Pulse source pinned via soundcard)
 4. **Auto-paste/typing**: Uses python-ydotool to paste text or optionally type ASCII characters directly
 5. **Post-treatment**: Optional AI-powered correction using various providers (OpenAI, Cerebras, OpenRouter) to improve transcription accuracy
+6. **OSD overlay** (`twistt_osd.py`): Separate daemon process for live visualization. Uses GTK4 + gtk4-layer-shell (Wayland layer surface) + Cairo/PangoCairo rendering. Runs under system Python (`/usr/bin/python3`) because Gtk4LayerShell typelib is system-only. Communicates via Unix socket IPC (length-prefixed JSON messages) and Unix signals (SIGUSR1/SIGUSR2 for show/hide)
 
 ## Configuration
 
@@ -49,7 +50,7 @@ Configuration priority (highest to lowest):
 3. Local `.env` file in script directory
 4. Environment variables
 
-Key environment variables use `TWISTT_` prefix (e.g., `TWISTT_OPENAI_API_KEY`, `TWISTT_HOTKEY` or `TWISTT_HOTKEYS`, `TWISTT_POST_TREATMENT_PROMPT`, `TWISTT_POST_TREATMENT_PROVIDER`, `TWISTT_OUTPUT_MODE`, `TWISTT_POST_CORRECT`, `TWISTT_POST_TREATMENT_DISABLED`, `TWISTT_USE_TYPING`, `TWISTT_KEYBOARD_DELAY`, `TWISTT_SILENCE_DURATION`, `TWISTT_INDICATOR_TEXT`, `TWISTT_INDICATOR_TEXT_DISABLED`, `TWISTT_TRAY_ICON_DISABLED`, `TWISTT_DUCKING_DISABLED`, `TWISTT_DUCKING_PERCENT`).
+Key environment variables use `TWISTT_` prefix (e.g., `TWISTT_OPENAI_API_KEY`, `TWISTT_HOTKEY` or `TWISTT_HOTKEYS`, `TWISTT_POST_TREATMENT_PROMPT`, `TWISTT_POST_TREATMENT_PROVIDER`, `TWISTT_OUTPUT_MODE`, `TWISTT_POST_CORRECT`, `TWISTT_POST_TREATMENT_DISABLED`, `TWISTT_USE_TYPING`, `TWISTT_KEYBOARD_DELAY`, `TWISTT_SILENCE_DURATION`, `TWISTT_INDICATOR_TEXT`, `TWISTT_INDICATOR_TEXT_DISABLED`, `TWISTT_TRAY_ICON_DISABLED`, `TWISTT_DUCKING_DISABLED`, `TWISTT_DUCKING_PERCENT`, `TWISTT_OSD_DISABLED`, `TWISTT_OSD_WIDTH`, `TWISTT_OSD_HEIGHT`).
 
 **Configuration files (`TWISTT_CONFIG` and `-c`/`--config`)**:
 - Environment variable: can specify multiple config files separated by `::` delimiter (e.g., `TWISTT_CONFIG="base.env::local.env"`)

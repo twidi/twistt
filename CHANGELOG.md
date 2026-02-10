@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Since this project does not use versioned releases, entries are organized by date.
 
+## 2026-02-10
+
+### Added
+
+- Live transcription OSD overlay for Wayland/Hyprland: a glass-morphism on-screen display showing a 60-bar spectrum analyzer with absolute dB scaling, a color-coded vertical dB level meter, real-time transcript text with fade-out scrolling, and pulsing state indicators. Runs as a separate daemon process (`twistt_osd.py`) under system Python with `gtk4-layer-shell` via `LD_PRELOAD`. Communicates via Unix socket IPC. Configurable size via `TWISTT_OSD_WIDTH`/`TWISTT_OSD_HEIGHT` (`--osd-width`/`--osd-height`). Disable with `TWISTT_OSD_DISABLED` / `--no-osd` / `-nosd`. Gracefully skipped when system dependencies are missing
+
+### Fixed
+
+- evdev `ReadIterator` `InvalidStateError` on shutdown: devices are now closed before cancelling reader tasks to avoid race condition with evdev's internal Future handling
+
 ## 2026-02-09
 
 ### Added

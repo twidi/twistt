@@ -2,9 +2,10 @@
 
 ## Project Structure & Module Organization
 - `twistt.py`: Main Python CLI script (single-file app).
+- `twistt_osd.py`: OSD overlay daemon (runs under system Python with GTK4/gtk4-layer-shell). Spawned as a subprocess by `twistt.py`.
 - `requirements.txt`: Runtime dependencies for `pip` users.
 - `.env` (local) and `~/.config/twistt/config.env`: Optional configuration files loaded at runtime.
-- Do not split into multiple files. Keep all logic in `twistt.py`. Only split if a maintainer explicitly requests it.
+- Do not split into multiple files beyond the current structure. Keep main logic in `twistt.py` and OSD logic in `twistt_osd.py`. Only split further if a maintainer explicitly requests it.
 
 ## Build, Test, and Development Commands
 - With uv (recommended): `./twistt.py --help` runs with deps resolved automatically.

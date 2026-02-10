@@ -27,7 +27,11 @@ import base64
 import difflib
 import json
 import os
+import signal
+import socket
 import string
+import struct
+import subprocess
 import sys
 import threading
 import time
@@ -391,6 +395,11 @@ class Config:
         enabled: bool
         reduction_percent: int
 
+    class Osd(NamedTuple):
+        enabled: bool
+        width: int
+        height: int
+
     class App(NamedTuple):
         console: ConsoleWithLogging
         hotkey: Config.HotKey
@@ -401,6 +410,7 @@ class Config:
         indicator: Config.Indicator
         tray_icon: Config.TrayIcon
         ducking: Config.Ducking
+        osd: Config.Osd
 
 
 class CommandLineParser:
@@ -437,6 +447,9 @@ class CommandLineParser:
         "no_tray_icon": f"{ENV_PREFIX}TRAY_ICON_DISABLED",
         "no_ducking": f"{ENV_PREFIX}DUCKING_DISABLED",
         "ducking_percent": f"{ENV_PREFIX}DUCKING_PERCENT",
+        "no_osd": f"{ENV_PREFIX}OSD_DISABLED",
+        "osd_width": f"{ENV_PREFIX}OSD_WIDTH",
+        "osd_height": f"{ENV_PREFIX}OSD_HEIGHT",
     }
 
     @classmethod
@@ -772,6 +785,25 @@ class CommandLineParser:
             help=f"Audio ducking reduction percentage, 0-100 (default: 50) (env: {prefix}DUCKING_PERCENT)",
         )
         parser.add_argument(
+            "-nosd",
+            "--no-osd",
+            action="store_true",
+            default=default.get("OSD_DISABLED", cls._UNDEFINED),
+            help=f"Disable the live transcription OSD overlay (env: {prefix}OSD_DISABLED)",
+        )
+        parser.add_argument(
+            "--osd-width",
+            type=int,
+            default=default.get("OSD_WIDTH", 550),
+            help=f"OSD overlay width in pixels (default: 550) (env: {prefix}OSD_WIDTH)",
+        )
+        parser.add_argument(
+            "--osd-height",
+            type=int,
+            default=default.get("OSD_HEIGHT", 220),
+            help=f"OSD overlay height in pixels (default: 220) (env: {prefix}OSD_HEIGHT)",
+        )
+        parser.add_argument(
             "--log",
             default=default.get("LOG", cls._UNDEFINED),
             help=f"Path to log file. Default: {config_dir / 'twistt.log'} (env: {prefix}LOG)",
@@ -939,6 +971,9 @@ class CommandLineParser:
             "TRAY_ICON_DISABLED": cls.get_env_bool("TRAY_ICON_DISABLED"),
             "DUCKING_DISABLED": cls.get_env_bool("DUCKING_DISABLED"),
             "DUCKING_PERCENT": int(cls.get_env("DUCKING_PERCENT", "50")),
+            "OSD_DISABLED": cls.get_env_bool("OSD_DISABLED"),
+            "OSD_WIDTH": int(cls.get_env("OSD_WIDTH", "550")),
+            "OSD_HEIGHT": int(cls.get_env("OSD_HEIGHT", "220")),
             "LOG": cls.get_env("LOG"),
             "CONFIG_PATH": config_path.as_posix(),
         }
@@ -1220,6 +1255,16 @@ class CommandLineParser:
         else:
             config_table.add_row("Audio ducking", "[red]Disabled[/red]")
 
+        # OSD overlay settings
+        osd_enabled = not args.no_osd
+        if osd_enabled:
+            if OsdRunner.is_available():
+                config_table.add_row("OSD overlay", f"[green]Enabled[/green] - [yellow]{args.osd_width}x{args.osd_height}[/yellow]")
+            else:
+                config_table.add_row("OSD overlay", f"[yellow]Enabled but dependencies not available ({OsdRunner.get_unavailable_reason()})[/yellow]")
+        else:
+            config_table.add_row("OSD overlay", "[red]Disabled[/red]")
+
         # Files section
         def format_path(path: Path) -> str:
             """Format path for display, using ~ for home directory."""
@@ -1355,6 +1400,11 @@ class CommandLineParser:
             ducking=Config.Ducking(
                 enabled=not args.no_ducking,
                 reduction_percent=args.ducking_percent,
+            ),
+            osd=Config.Osd(
+                enabled=not args.no_osd,
+                width=args.osd_width,
+                height=args.osd_height,
             ),
         )
 
@@ -1494,7 +1544,7 @@ class CommandLineParser:
                     # Interactive prompt: save the first device name
                     overrides[env_key] = input_devices[0].name
                 continue
-            if dest in {"post_correct", "use_typing", "no_post", "no_indicator", "no_tray_icon", "no_ducking"}:
+            if dest in {"post_correct", "use_typing", "no_post", "no_indicator", "no_tray_icon", "no_ducking", "no_osd"}:
                 overrides[env_key] = "true" if getattr(args, dest) else "false"
                 continue
             value = getattr(args, dest, None)
@@ -1795,6 +1845,7 @@ class Comm:
         self._buffer_commands = PriorityQueue()
         self._keyboard_commands = Queue()
         self._display_commands: Queue[TerminalDisplayTask.Commands.Command] = Queue()
+        self._osd_commands: Queue[TerminalDisplayTask.Commands.Command] | None = None
         self._is_shift_pressed = False
         self._recording = Event()
         self._is_speech_active = False
@@ -1906,13 +1957,25 @@ class Comm:
             self.toggle_post_enabled()
 
     def queue_display_command(self, cmd: TerminalDisplayTask.Commands.Command) -> None:
-        if not OUTPUT_TO_STDOUT:
-            return
-        with suppress(RuntimeError):
-            self._display_commands.put_nowait(cmd)
+        if OUTPUT_TO_STDOUT:
+            with suppress(RuntimeError):
+                self._display_commands.put_nowait(cmd)
+        if self._osd_commands is not None:
+            with suppress(RuntimeError):
+                self._osd_commands.put_nowait(cmd)
 
     async def dequeue_display_command(self) -> TerminalDisplayTask.Commands.Command:
         return await self._display_commands.get()
+
+    def enable_osd_queue(self):
+        if self._osd_commands is None:
+            self._osd_commands = Queue()
+
+    async def dequeue_osd_command(self) -> TerminalDisplayTask.Commands.Command | None:
+        if self._osd_commands is None:
+            await asyncio.sleep(999999)
+            return None
+        return await self._osd_commands.get()
 
     def _send_speech_state_command(self):
         self.queue_display_command(
@@ -2369,10 +2432,15 @@ class HotKeyTask:
         except CancelledError:
             pass
         finally:
-            for task in reader_tasks:
-                task.cancel()
-            await asyncio.gather(*reader_tasks, return_exceptions=True)
+            # Close devices first to unblock async_read_loop gracefully
+            # (avoids evdev ReadIterator InvalidStateError on CancelledError)
             self._close_all_devices()
+            # Give reader tasks a moment to finish via OSError from closed devices
+            done, pending = await asyncio.wait(reader_tasks, timeout=0.5) if reader_tasks else (set(), set())
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
 
 
 class CaptureTask:
@@ -2634,8 +2702,6 @@ class BaseTranscriptionTask:
         return (self._display_previous_text + "".join(current_transcription)).strip(" ")
 
     def _send_speech_display(self, text: str, final: bool):
-        if not OUTPUT_TO_STDOUT:
-            return
         self.comm.queue_display_command(TerminalDisplayTask.Commands.UpdateSpeechText(text=text, final=final))
 
     async def _upsert_buffer_segment(self, text: str) -> int:
@@ -3388,8 +3454,6 @@ ${current_text}
         self._post_display_text = (final_piece + " ") if final_piece else ""
 
     def _send_post_display(self, text: str, final: bool):
-        if not OUTPUT_TO_STDOUT:
-            return
         self.comm.queue_display_command(TerminalDisplayTask.Commands.UpdatePostText(text=text, final=final))
 
     async def _post_process(
@@ -4427,6 +4491,385 @@ class PlasmaWidgetStateTask:
             errprint(f"[plasma-state] Failed to write Plasma widget state: {exc}")
 
 
+class OsdRunner:
+    """Daemon-based runner for the live transcription OSD overlay.
+
+    Spawns the OSD daemon (``twistt_osd.py``) as a subprocess with
+    ``LD_PRELOAD`` for gtk4-layer-shell, then communicates via Unix
+    signals (show/hide) and a Unix socket (text data).
+
+    All public methods are wrapped in try/except so that OSD failures
+    never crash the main application.
+    """
+
+    PID_FILE = Path(user_data_dir("twistt")) / "osd.pid"
+    SOCKET_PATH = Path(user_data_dir("twistt")) / "osd.sock"
+    _OSD_SCRIPT = Path(__file__).resolve().parent / "twistt_osd.py"
+
+    def __init__(self, width: int = 550, height: int = 220):
+        self._process: subprocess.Popen | None = None
+        self._socket: socket.socket | None = None
+        self._orphaned_daemon_pid: int | None = None
+        self._width = width
+        self._height = height
+
+    # Cache for dependency check (class-level)
+    _deps_available: bool | None = None
+    _deps_unavailable_reason: str = ""
+
+    @classmethod
+    def _check_deps(cls) -> None:
+        """Check if the system Python has the required GTK4 dependencies.
+
+        The OSD daemon runs under /usr/bin/python3 (system Python), not the
+        uv-managed interpreter, so we probe the system Python via subprocess
+        instead of importing gi in the current process.
+        """
+        if cls._deps_available is not None:
+            return  # Already checked
+
+        # First, check that /usr/bin/python3 exists
+        python = "/usr/bin/python3"
+        if not Path(python).exists():
+            cls._deps_available = False
+            cls._deps_unavailable_reason = "system Python (/usr/bin/python3) not found"
+            return
+
+        # Probe the system Python for gi + GTK4 + Gtk4LayerShell
+        check_script = (
+            "import gi; "
+            "gi.require_version('Gtk', '4.0'); "
+            "gi.require_version('Gtk4LayerShell', '1.0'); "
+            "print('ok')"
+        )
+        try:
+            result = subprocess.run(
+                [python, "-c", check_script],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and "ok" in result.stdout:
+                cls._deps_available = True
+                cls._deps_unavailable_reason = ""
+                return
+        except Exception:
+            cls._deps_available = False
+            cls._deps_unavailable_reason = "failed to probe system Python for GTK4 deps"
+            return
+
+        # If we get here, the combined check failed.  Try to give a more
+        # specific reason by probing each dependency individually.
+        stderr = result.stderr.strip() if result else ""
+        for label, snippet in (
+            ("GTK4 bindings not installed", "import gi; gi.require_version('Gtk', '4.0')"),
+            ("gtk4-layer-shell not installed", "import gi; gi.require_version('Gtk4LayerShell', '1.0')"),
+        ):
+            try:
+                r = subprocess.run(
+                    [python, "-c", snippet],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if r.returncode != 0:
+                    cls._deps_available = False
+                    cls._deps_unavailable_reason = label
+                    return
+            except Exception:
+                pass
+
+        # Fallback reason
+        cls._deps_available = False
+        cls._deps_unavailable_reason = stderr or "unknown GTK4 dependency issue"
+
+    @classmethod
+    def is_available(cls) -> bool:
+        cls._check_deps()
+        return cls._deps_available or False
+
+    @classmethod
+    def get_unavailable_reason(cls) -> str:
+        cls._check_deps()
+        return cls._deps_unavailable_reason
+
+    @staticmethod
+    def _find_gtk4_layer_shell_library() -> tuple[str | None, str | None]:
+        try:
+            result = subprocess.run(
+                ["/sbin/ldconfig", "-p"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    if "gtk4-layer-shell" in line and "=>" in line:
+                        lib_path = line.split("=>")[-1].strip()
+                        if lib_path and os.path.exists(lib_path):
+                            if os.path.islink(lib_path):
+                                lib_path = os.path.realpath(lib_path)
+                            return lib_path, "ldconfig"
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+
+        for path in [
+            "/usr/lib/x86_64-linux-gnu/libgtk4-layer-shell.so",
+            "/usr/lib/libgtk4-layer-shell.so",
+            "/usr/lib64/libgtk4-layer-shell.so",
+        ]:
+            for suffix in ["", ".0"]:
+                full_path = path + suffix
+                if os.path.exists(full_path):
+                    if os.path.islink(full_path):
+                        full_path = os.path.realpath(full_path)
+                    return full_path, "fallback"
+
+        return None, None
+
+    def _ensure_daemon(self) -> bool:
+        if self._process is not None and self._process.poll() is None:
+            return True
+
+        # Check PID file for orphaned daemon
+        if self.PID_FILE.exists():
+            try:
+                pid = int(self.PID_FILE.read_text().strip())
+                os.kill(pid, 0)
+                errprint(f"[osd] Found orphaned daemon (PID {pid}), reusing it")
+                self._process = subprocess.Popen(
+                    ["true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                self._orphaned_daemon_pid = pid
+                return True
+            except (ValueError, ProcessLookupError, PermissionError):
+                errprint("[osd] Cleaning up stale PID file")
+                with suppress(Exception):
+                    self.PID_FILE.unlink()
+
+        env = os.environ.copy()
+        lib_path, method = self._find_gtk4_layer_shell_library()
+        if lib_path:
+            env["LD_PRELOAD"] = lib_path
+            errprint(f"[osd] Found gtk4-layer-shell via {method}: {lib_path}")
+        else:
+            errprint("[osd] Warning: gtk4-layer-shell library not found, overlay may not work")
+
+        try:
+            self._process = subprocess.Popen(
+                [
+                    "/usr/bin/python3", str(self._OSD_SCRIPT),
+                    "--daemon",
+                    "--width", str(self._width),
+                    "--height", str(self._height),
+                ],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            self._orphaned_daemon_pid = None
+            errprint(f"[osd] Daemon started (PID {self._process.pid})")
+            return True
+        except Exception as e:
+            errprint(f"[osd] Failed to start daemon: {e}")
+            self._process = None
+            return False
+
+    def _get_pid(self) -> int | None:
+        if self._orphaned_daemon_pid is not None:
+            return self._orphaned_daemon_pid
+        if self._process is not None:
+            return self._process.pid
+        return None
+
+    def show(self) -> bool:
+        try:
+            if not self._ensure_daemon():
+                return False
+            pid = self._get_pid()
+            if pid:
+                os.kill(pid, signal.SIGUSR1)
+                return True
+        except (ProcessLookupError, OSError) as e:
+            errprint(f"[osd] Failed to show: {e}")
+            self._process = None
+            self._orphaned_daemon_pid = None
+        except Exception as e:
+            errprint(f"[osd] Failed to show: {e}")
+        return False
+
+    def hide(self):
+        try:
+            pid = self._get_pid()
+            if pid:
+                os.kill(pid, signal.SIGUSR2)
+        except (ProcessLookupError, OSError):
+            self._process = None
+            self._orphaned_daemon_pid = None
+        except Exception:
+            pass
+
+    def _connect_socket(self) -> bool:
+        if self._socket is not None:
+            return True
+
+        for attempt in range(10):
+            try:
+                sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                sock.connect(str(self.SOCKET_PATH))
+                sock.setblocking(True)
+                self._socket = sock
+                return True
+            except (ConnectionRefusedError, FileNotFoundError, OSError):
+                time.sleep(0.2)
+
+        errprint("[osd] Failed to connect to OSD socket after retries")
+        return False
+
+    def send_message(self, msg: dict):
+        try:
+            if not self._connect_socket():
+                return
+            payload = json.dumps(msg, default=str).encode("utf-8")
+            data = struct.pack("!I", len(payload)) + payload
+            self._socket.sendall(data)
+        except (BrokenPipeError, ConnectionResetError, OSError) as e:
+            # Connection lost, close and retry next time
+            errprint(f"[osd] Socket error, will reconnect: {e}")
+            if self._socket:
+                with suppress(Exception):
+                    self._socket.close()
+                self._socket = None
+        except Exception as e:
+            errprint(f"[osd] Failed to send message: {e}")
+            if self._socket:
+                with suppress(Exception):
+                    self._socket.close()
+                self._socket = None
+
+    def stop(self):
+        try:
+            if self._socket:
+                with suppress(Exception):
+                    self._socket.close()
+                self._socket = None
+
+            pid = self._get_pid()
+            if pid:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    if self._orphaned_daemon_pid is None and self._process:
+                        self._process.wait(timeout=1.0)
+                    else:
+                        time.sleep(0.5)
+                except subprocess.TimeoutExpired:
+                    if pid:
+                        os.kill(pid, signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
+        except Exception:
+            pass
+        finally:
+            self._process = None
+            self._orphaned_daemon_pid = None
+            with suppress(Exception):
+                self.PID_FILE.unlink(missing_ok=True)
+
+
+class OsdTask:
+    """Manages the live transcription OSD overlay daemon.
+
+    Consumes display commands from the OSD queue in :class:`Comm`,
+    translates them to IPC messages, and sends them to the OSD daemon.
+    All errors are caught so the OSD never crashes the main app.
+    """
+
+    def __init__(self, comm: Comm, osd_config: Config.Osd):
+        self.comm = comm
+        self.config = osd_config
+        self._runner: OsdRunner | None = None
+
+    async def run(self):
+        try:
+            if not OsdRunner.is_available():
+                errprint(f"[osd] OSD overlay not available: {OsdRunner.get_unavailable_reason()}")
+                return
+
+            self._runner = OsdRunner(width=self.config.width, height=self.config.height)
+            if not self._runner._ensure_daemon():
+                errprint("[osd] Failed to start OSD daemon")
+                return
+
+            # Give daemon time to start socket server
+            await asyncio.sleep(0.5)
+
+            self.comm.enable_osd_queue()
+
+            try:
+                await self._process_commands()
+            except CancelledError:
+                pass
+            finally:
+                if self._runner:
+                    self._runner.send_message({"type": "shutdown"})
+                    self._runner.hide()
+                    self._runner.stop()
+
+        except Exception as exc:
+            errprint(f"[osd] OSD overlay error: {exc}")
+
+    async def _process_commands(self):
+        while not self.comm.is_shutting_down:
+            cmd = await self.comm.dequeue_osd_command()
+            if cmd is None:
+                continue
+
+            try:
+                match cmd:
+                    case TerminalDisplayTask.Commands.SessionStart(timestamp=ts):
+                        self._runner.send_message({
+                            "type": "session_start",
+                            "timestamp": ts.isoformat() if ts else None,
+                        })
+                        self._runner.show()
+
+                    case TerminalDisplayTask.Commands.UpdateSpeechState(recording=rec, speaking=sp):
+                        self._runner.send_message({
+                            "type": "speech_state",
+                            "recording": rec,
+                            "speaking": sp,
+                        })
+
+                    case TerminalDisplayTask.Commands.UpdateSpeechText(text=text, final=final):
+                        self._runner.send_message({
+                            "type": "speech_text",
+                            "text": text,
+                            "final": final,
+                        })
+
+                    case TerminalDisplayTask.Commands.UpdatePostState(active=active):
+                        self._runner.send_message({
+                            "type": "post_state",
+                            "active": active,
+                        })
+
+                    case TerminalDisplayTask.Commands.UpdatePostText(text=text, final=final):
+                        self._runner.send_message({
+                            "type": "post_text",
+                            "text": text,
+                            "final": final,
+                        })
+
+                    case TerminalDisplayTask.Commands.UpdatePostEnabled(active=active):
+                        self._runner.send_message({
+                            "type": "post_enabled",
+                            "active": active,
+                        })
+
+                    case TerminalDisplayTask.Commands.Shutdown():
+                        self._runner.send_message({"type": "shutdown"})
+                        self._runner.hide()
+                        break
+
+            except Exception as e:
+                errprint(f"[osd] Error processing command: {e}")
+
+
 async def main_async():
     app_config = CommandLineParser.parse()
     if app_config is None:
@@ -4478,6 +4921,13 @@ async def main_async():
             if app_config.post.configured:
                 post_task = PostTreatmentTask(comm, app_config)
                 tg.create_task(post_task.run())
+
+            if app_config.osd.enabled:
+                if OsdRunner.is_available():
+                    osd_task = OsdTask(comm, app_config.osd)
+                    tg.create_task(osd_task.run())
+                else:
+                    errprint(f"[osd] OSD overlay enabled but dependencies not available: {OsdRunner.get_unavailable_reason()}")
 
     except* (KeyboardInterrupt, CancelledError):
         print("\nExit.")

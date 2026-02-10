@@ -12,6 +12,7 @@ A Linux speech-to-text transcription tool using OpenAI, Deepgram, or Mistral for
 - **Configurable audio gain**: Amplify microphone input if needed
 - **Multiple model support**: Choose between `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, Deepgram Nova, or Mistral Voxtral models
 - **Post-treatment**: Optional AI-powered correction of transcribed text for improved accuracy
+- **OSD overlay**: Live on-screen display with spectrum analyzer, dB meter, and real-time transcript (Wayland)
 
 ## Requirements
 
@@ -142,6 +143,11 @@ TWISTT_TRAY_ICON_DISABLED=false  # Set to true to disable the system tray icon (
 TWISTT_DUCKING_DISABLED=false  # Set to true to disable audio ducking (enabled by default)
 TWISTT_DUCKING_PERCENT=50  # How much to reduce system volume BY during recording (0-100, default: 50)
 
+# OSD overlay (Wayland only, requires gtk4-layer-shell)
+TWISTT_OSD_DISABLED=false  # Set to true to disable the live transcription OSD overlay
+TWISTT_OSD_WIDTH=550  # OSD overlay width in pixels (default: 550)
+TWISTT_OSD_HEIGHT=220  # OSD overlay height in pixels (default: 220)
+
 # Logging
 TWISTT_LOG=/path/to/custom/twistt.log  # Optional, defaults to ~/.config/twistt/twistt.log
 
@@ -191,6 +197,9 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 | `-nti, --no-tray-icon`                         | `TWISTT_TRAY_ICON_DISABLED`                        | false                         | Disable the system tray icon (microphone icon that turns red when active). Requires optional packages: `pystray`, `Pillow`, `PyGObject` (see System Tray Icon section)                                                           |
 | `-nd, --no-ducking`                            | `TWISTT_DUCKING_DISABLED`                          | false                         | Disable audio ducking (automatic volume reduction of system audio during recording). Requires `pulsectl` package                                                                                                        |
 | `-dp, --ducking-percent`                       | `TWISTT_DUCKING_PERCENT`                           | 50                            | How much to reduce system volume BY during recording (0-100). 50 means reduce to 50% of original volume                                                                                                                |
+| `-nosd, --no-osd`                              | `TWISTT_OSD_DISABLED`                              | false                         | Disable the live transcription OSD overlay (requires Wayland + gtk4-layer-shell)                                                                                                                                        |
+| `--osd-width`                                  | `TWISTT_OSD_WIDTH`                                 | 550                           | OSD overlay width in pixels                                                                                                                                                                                             |
+| `--osd-height`                                 | `TWISTT_OSD_HEIGHT`                                | 220                           | OSD overlay height in pixels                                                                                                                                                                                            |
 | `--log`                                        | `TWISTT_LOG`                                        | `~/.config/twistt/twistt.log` | Path to log file where transcription sessions are saved                                                                                                                                                                 |
 | `--check`                                      | -                                                   | -                             | Display configuration and exit without logging anything to file. Useful for verifying settings before running.                                                                                                          |
 | `--list-configs [DIR]`                         | -                                                   | -                             | List all configuration files found in `~/.config/twistt/` (or DIR if specified) with their variables and exit. API keys are masked, all values are limited to 100 characters.                                            |
@@ -607,6 +616,43 @@ Configuration:
 - Adjust reduction: `TWISTT_DUCKING_PERCENT=50` or `--ducking-percent 50` / `-dp 50` (50 means reduce to 50% of original volume)
 
 If the user manually changes the system volume during ducking, the original volume (before ducking) will be restored when recording ends.
+
+### OSD Overlay (Wayland)
+
+Twistt includes an optional on-screen display (OSD) overlay that shows a live visualization while recording:
+
+- **Spectrum analyzer**: 60-bar mirrored FFT spectrum with absolute dB scaling, glow halos, and peak-hold indicators
+- **dB level meter**: Vertical color-coded level indicator (green → cyan → yellow → red) with numeric dB readout
+- **Live transcript**: Real-time speech text with fade-out scrolling, blinking cursor, and section labels
+- **Post-treatment display**: Shows post-processed text in a separate section when enabled
+- **State indicators**: Pulsing labels showing current state (Recording, Transcribing, Post-processing)
+- **Glass-morphism UI**: Semi-transparent dark background with gradient borders
+
+The OSD is enabled by default and runs as a separate daemon process under the system Python (`/usr/bin/python3`), communicating with the main application via Unix socket IPC.
+
+**System dependencies (Wayland/Hyprland only):**
+
+```bash
+# Debian/Ubuntu
+sudo apt install libgtk4-layer-shell-dev gir1.2-gtk4layershell-1.0
+
+# Arch Linux
+sudo pacman -S gtk4-layer-shell
+
+# The OSD also requires system Python packages:
+# - PyGObject (gi) with GTK 4.0 bindings
+# - These are typically available as system packages:
+sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-4.0  # Debian/Ubuntu
+sudo pacman -S python-gobject gtk4                             # Arch
+```
+
+The OSD uses `gtk4-layer-shell` via `LD_PRELOAD` to create a Wayland layer surface (always-on-top, no focus, transparent). It requires system Python because `Gtk4LayerShell` typelib files are system-only (not available on PyPI).
+
+**Configuration:**
+- Disable: `TWISTT_OSD_DISABLED=true` or `--no-osd` / `-nosd`
+- Custom size: `TWISTT_OSD_WIDTH=550` / `TWISTT_OSD_HEIGHT=220` (or `--osd-width` / `--osd-height`)
+
+If the required system dependencies are not installed, the OSD is silently skipped and the rest of the application works normally. Use `--check` to verify OSD availability.
 
 ### Output Modes
 
