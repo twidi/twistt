@@ -363,6 +363,12 @@ class OutputMode(Enum):
         return self is OutputMode.FULL
 
 
+class PromptSource(NamedTuple):
+    """A single prompt part: either literal text or a file to re-read each time."""
+    file_path: Path | None  # if set, re-read this file before each LLM call
+    text: str  # literal text, or initial/fallback content when file_path is set
+
+
 class Config:
     class HotKey(NamedTuple):
         devices: list[InputDevice]
@@ -386,6 +392,7 @@ class Config:
         configured: bool
         start_enabled: bool
         prompt: str | None
+        prompt_sources: tuple[PromptSource, ...]
         provider: PostTreatmentTask.Provider
         model: str
         api_key: str | None
@@ -538,21 +545,22 @@ class CommandLineParser:
             return (prompt_value, None)
 
     @classmethod
-    def _resolve_prompts(cls, prompts_str: str, config_dir: Path) -> tuple[str, list[Path], int]:
+    def _resolve_prompts(cls, prompts_str: str, config_dir: Path) -> tuple[str, list[Path], int, list[PromptSource]]:
         """
         Resolve multiple prompts separated by '::' delimiter.
 
         Returns:
-            (concatenated_content, list_of_files, total_prompt_count)
+            (concatenated_content, list_of_files, total_prompt_count, list_of_sources)
         """
         if not prompts_str:
-            return ("", [], 0)
+            return ("", [], 0, [])
 
         # Split by :: delimiter
         prompt_parts = prompts_str.split("::")
 
         contents = []
         files = []
+        sources = []
 
         for part in prompt_parts:
             part = part.strip()
@@ -562,15 +570,16 @@ class CommandLineParser:
             content, file_path = cls._resolve_prompt_part(part, config_dir)
             if not content:
                 # Error already printed in _resolve_prompt_part
-                return ("", [], 0)
+                return ("", [], 0, [])
 
             contents.append(content)
+            sources.append(PromptSource(file_path=file_path, text=content))
             if file_path:
                 files.append(file_path)
 
         # Join all contents with double newlines
         final_content = "\n\n".join(contents)
-        return (final_content, files, len(contents))
+        return (final_content, files, len(contents), sources)
 
     @classmethod
     def _create_arguments(cls, parser: argparse.ArgumentParser, default: dict[str, str | bool | None]):
@@ -1066,6 +1075,7 @@ class CommandLineParser:
 
         post_prompt = None
         post_prompt_files = []  # Track all files loaded
+        post_prompt_sources: list[PromptSource] = []  # Track all sources in order
         post_prompt_total_count = 0  # Total number of prompts (files + text)
         post_treatment_configured = False
 
@@ -1073,8 +1083,9 @@ class CommandLineParser:
         env_prompts_str = cls.get_env("POST_TREATMENT_PROMPT", "")
         env_prompt_content = ""
         env_prompt_count = 0
+        env_sources: list[PromptSource] = []
         if env_prompts_str:
-            env_prompt_content, env_files, env_prompt_count = cls._resolve_prompts(env_prompts_str, config_dir)
+            env_prompt_content, env_files, env_prompt_count, env_sources = cls._resolve_prompts(env_prompts_str, config_dir)
             if not env_prompt_content and env_prompts_str:
                 # Error occurred during resolution
                 return None
@@ -1095,6 +1106,7 @@ class CommandLineParser:
             if include_env:
                 all_contents.append(env_prompt_content)
                 post_prompt_files.extend(env_files)
+                post_prompt_sources.extend(env_sources)
                 post_prompt_total_count += env_prompt_count
 
             # Process each -p value in order
@@ -1107,12 +1119,13 @@ class CommandLineParser:
                     continue
 
                 # Resolve this prompt part (may contain :: separator for multiple prompts)
-                cli_prompt_content, cli_files, cli_prompt_count = cls._resolve_prompts(p_clean, config_dir)
+                cli_prompt_content, cli_files, cli_prompt_count, cli_sources = cls._resolve_prompts(p_clean, config_dir)
                 if not cli_prompt_content:
                     return None
 
                 all_contents.append(cli_prompt_content)
                 post_prompt_files.extend(cli_files)
+                post_prompt_sources.extend(cli_sources)
                 post_prompt_total_count += cli_prompt_count
 
             # Combine all contents
@@ -1123,6 +1136,7 @@ class CommandLineParser:
             # No -p provided, but env var is set
             post_prompt = env_prompt_content
             post_prompt_files.extend(env_files)
+            post_prompt_sources.extend(env_sources)
             post_prompt_total_count = env_prompt_count
             post_treatment_configured = True
 
@@ -1423,6 +1437,7 @@ class CommandLineParser:
                 configured=post_treatment_configured,
                 start_enabled=post_treatment_enabled,
                 prompt=post_prompt,
+                prompt_sources=tuple(post_prompt_sources),
                 provider=post_provider,
                 model=args.post_model,
                 api_key=args.openai_api_key
@@ -3492,6 +3507,24 @@ ${current_text}
     def _send_post_display(self, text: str, final: bool):
         self.comm.queue_display_command(TerminalDisplayTask.Commands.UpdatePostText(text=text, final=final))
 
+    def _resolve_prompt(self) -> str:
+        """Re-read file-based prompt sources and combine all sources in order."""
+        parts = []
+        for source in self.config.post.prompt_sources:
+            if source.file_path is not None:
+                try:
+                    content = source.file_path.read_text(encoding="utf-8").strip()
+                    if content:
+                        parts.append(content)
+                        continue
+                except Exception as exc:
+                    errprint(f"WARNING: Unable to re-read prompt file {source.file_path}: {exc}")
+                # Fallback to originally loaded content
+                parts.append(source.text)
+            else:
+                parts.append(source.text)
+        return "\n\n".join(parts)
+
     async def _post_process(
         self,
         text: str,
@@ -3500,7 +3533,7 @@ ${current_text}
     ) -> AsyncIterator[str | None]:
         system_message = self._render_template(
             self.SYSTEM_TEMPLATE,
-            {"user_prompt": self.config.post.prompt},
+            {"user_prompt": self._resolve_prompt()},
         )
         if self.config.output.mode.is_full:
             previous_context = "No previous transcription"
