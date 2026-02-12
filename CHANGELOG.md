@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Since this project does not use versioned releases, entries are organized by date.
 
+## 2026-02-12
+
+### Fixed
+
+- Post-treatment not displaying in full output mode: the session was finalized before post-treatment had a chance to start, so the result was never shown in the console or OSD
+
+### Changed
+
+- OSD session end logic centralized: the main app now tells the OSD when a session is complete instead of the OSD duplicating the session completion logic internally
+
 ## 2026-02-10
 
 ### Added
