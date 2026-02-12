@@ -3930,10 +3930,13 @@ class TerminalDisplayTask:
         class UpdatePostEnabled(NamedTuple):
             active: bool
 
+        class SessionEnd(NamedTuple):
+            pass
+
         class Shutdown(NamedTuple):
             pass
 
-        Command = SessionStart | UpdateSpeechState | UpdateSpeechText | UpdatePostState | UpdatePostText | UpdatePostEnabled | Shutdown
+        Command = SessionStart | UpdateSpeechState | UpdateSpeechText | UpdatePostState | UpdatePostText | UpdatePostEnabled | SessionEnd | Shutdown
 
     def __init__(self, comm: Comm, config: Config.App):
         self.comm = comm
@@ -4024,6 +4027,9 @@ class TerminalDisplayTask:
             case self.Commands.UpdatePostEnabled():
                 pass  # automatically handled by the refresh calling _post_state_label
 
+            case self.Commands.SessionEnd():
+                pass  # consumed by OsdTask only
+
             case self.Commands.Shutdown():
                 self._finalize_session(force=True)
                 return False
@@ -4089,6 +4095,7 @@ class TerminalDisplayTask:
             self.post_text = ""
             self.post_done = not self.post_enabled
             self.is_post_active = False
+            self.comm.queue_display_command(self.Commands.SessionEnd())
             return
         section = self._build_section(final=True)
         # Extract components: top_rule, content, bottom_rule
@@ -4107,6 +4114,7 @@ class TerminalDisplayTask:
         self.post_text = ""
         self.post_done = not self.post_enabled
         self.is_post_active = False
+        self.comm.queue_display_command(self.Commands.SessionEnd())
 
     def _build_section(self, *, final: bool) -> Group:
         ts = self.current_timestamp or datetime.now()
@@ -4829,10 +4837,9 @@ class OsdTask:
     All errors are caught so the OSD never crashes the main app.
     """
 
-    def __init__(self, comm: Comm, osd_config: Config.Osd, output_mode_full: bool = False):
+    def __init__(self, comm: Comm, osd_config: Config.Osd):
         self.comm = comm
         self.config = osd_config
-        self.output_mode_full = output_mode_full
         self._runner: OsdRunner | None = None
 
     async def run(self):
@@ -4882,7 +4889,6 @@ class OsdTask:
                         self._runner.send_message({
                             "type": "session_start",
                             "timestamp": ts.isoformat() if ts else None,
-                            "output_mode_full": self.output_mode_full,
                         })
                         self._runner.show()
 
@@ -4918,6 +4924,9 @@ class OsdTask:
                             "type": "post_enabled",
                             "active": active,
                         })
+
+                    case TerminalDisplayTask.Commands.SessionEnd():
+                        self._runner.send_message({"type": "session_end"})
 
                     case TerminalDisplayTask.Commands.Shutdown():
                         self._runner.send_message({"type": "shutdown"})
@@ -4982,7 +4991,7 @@ async def main_async():
 
             if app_config.osd.enabled:
                 if OsdRunner.is_available():
-                    osd_task = OsdTask(comm, app_config.osd, output_mode_full=app_config.output.mode.is_full)
+                    osd_task = OsdTask(comm, app_config.osd)
                     tg.create_task(osd_task.run())
                 else:
                     errprint(f"[osd] OSD overlay enabled but dependencies not available: {OsdRunner.get_unavailable_reason()}")

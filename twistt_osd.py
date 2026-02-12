@@ -1053,41 +1053,35 @@ class TranscriptionOSD:
                 "is_speaking": False,
                 "is_post_active": False,
                 "session_active": True,
-                "output_mode_full": msg.get("output_mode_full", False),
             })
             self._show()
 
         elif msg_type == "speech_state":
             self._text_state["is_recording"] = msg.get("recording", False)
             self._text_state["is_speaking"] = msg.get("speaking", False)
-            # Check if session ended
             if (
                 not msg.get("recording", False)
                 and not msg.get("speaking", False)
                 and self._text_state.get("session_active", False)
             ):
                 self._text_state["speech_final"] = True
-                self._maybe_end_session()
 
         elif msg_type == "speech_text":
             self._text_state["speech_text"] = msg.get("text", "")
             self._text_state["speech_final"] = msg.get("final", False)
-            if msg.get("final", False):
-                self._maybe_end_session()
 
         elif msg_type == "post_state":
             self._text_state["is_post_active"] = msg.get("active", False)
-            if not msg.get("active", False):
-                self._maybe_end_session()
 
         elif msg_type == "post_text":
             self._text_state["post_text"] = msg.get("text", "")
             self._text_state["post_final"] = msg.get("final", False)
-            if msg.get("final", False):
-                self._maybe_end_session()
 
         elif msg_type == "post_enabled":
             self._text_state["post_enabled"] = msg.get("active", True)
+
+        elif msg_type == "session_end":
+            GLib.timeout_add(2000, self._session_end_hide)
 
         elif msg_type == "shutdown":
             self._hide()
@@ -1096,29 +1090,6 @@ class TranscriptionOSD:
         # Queue redraw
         if self.window and self.visible:
             self.window.drawing_area.queue_draw()
-
-    def _maybe_end_session(self):
-        """Check if the session is complete and schedule hide."""
-        st = self._text_state
-        if not st.get("session_active"):
-            return
-        speech_done = st.get("speech_final", False) and not st.get("is_recording") and not st.get("is_speaking")
-        if not speech_done:
-            return
-        post_enabled = st.get("post_enabled", True)
-        if post_enabled:
-            if st.get("post_final", False):
-                pass  # post-treatment is done
-            elif st.get("output_mode_full", False):
-                # In full mode, post-treatment only starts after key release,
-                # so (not active and no text) means "not started yet", not "finished".
-                return
-            elif not st.get("is_post_active") and not st.get("post_text"):
-                pass  # no post-treatment was triggered
-            else:
-                return
-        # Session complete - hide after delay
-        GLib.timeout_add(2000, self._session_end_hide)
 
     def _session_end_hide(self):
         """Hide the OSD after session end delay."""
