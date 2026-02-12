@@ -11,6 +11,10 @@ Since this project does not use versioned releases, entries are organized by dat
 
 - Post-treatment not displaying in full output mode: the session was finalized before post-treatment had a chance to start, so the result was never shown in the console or OSD
 
+### Added
+
+- Hot-reload of post-treatment prompt files: file-based prompts are re-read from disk before each LLM call, so edits take effect without restarting the program. Falls back to the originally loaded content if a file becomes unreadable
+
 ### Changed
 
 - OSD session end logic centralized: the main app now tells the OSD when a session is complete instead of the OSD duplicating the session completion logic internally
