@@ -1053,6 +1053,7 @@ class TranscriptionOSD:
                 "is_speaking": False,
                 "is_post_active": False,
                 "session_active": True,
+                "output_mode_full": msg.get("output_mode_full", False),
             })
             self._show()
 
@@ -1106,8 +1107,15 @@ class TranscriptionOSD:
             return
         post_enabled = st.get("post_enabled", True)
         if post_enabled:
-            post_done = st.get("post_final", False) or (not st.get("is_post_active") and not st.get("post_text"))
-            if not post_done:
+            if st.get("post_final", False):
+                pass  # post-treatment is done
+            elif st.get("output_mode_full", False):
+                # In full mode, post-treatment only starts after key release,
+                # so (not active and no text) means "not started yet", not "finished".
+                return
+            elif not st.get("is_post_active") and not st.get("post_text"):
+                pass  # no post-treatment was triggered
+            else:
                 return
         # Session complete - hide after delay
         GLib.timeout_add(2000, self._session_end_hide)

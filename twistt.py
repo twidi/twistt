@@ -2847,10 +2847,9 @@ class BaseTranscriptionTask:
             else:
                 await self._upsert_buffer_segment(final_text)
         else:
-            # in full mode, the command are created later, and because we mark the end of "speech_active" here
-            # we'll lose the indicator, so we mark the post-treatment as active right now if we have some
-            if self.comm.is_post_enabled and final_text:
-                self.comm.toggle_post_treatment_active(True)
+            # in full mode, post-treatment runs only after the key is released
+            # (via _queue_full_mode_result), so we don't activate the indicator here
+            pass
 
         previous_transcriptions.append(final_text)
         self._display_previous_text = "".join(previous_transcriptions)
@@ -4069,7 +4068,13 @@ class TerminalDisplayTask:
             return False
         if not self.post_enabled:
             return True
-        return self.post_done or (not self.is_post_active and self.post_text == "")
+        if self.post_done:
+            return True
+        # In full mode, post-treatment only starts after the key is released,
+        # so (not active and no text) doesn't mean "finished" — it means "not started yet".
+        if self.config.output.mode.is_full:
+            return False
+        return not self.is_post_active and self.post_text == ""
 
     def _finalize_session(self, force: bool = False):
         if not self.session_active and not force:
@@ -4824,9 +4829,10 @@ class OsdTask:
     All errors are caught so the OSD never crashes the main app.
     """
 
-    def __init__(self, comm: Comm, osd_config: Config.Osd):
+    def __init__(self, comm: Comm, osd_config: Config.Osd, output_mode_full: bool = False):
         self.comm = comm
         self.config = osd_config
+        self.output_mode_full = output_mode_full
         self._runner: OsdRunner | None = None
 
     async def run(self):
@@ -4876,6 +4882,7 @@ class OsdTask:
                         self._runner.send_message({
                             "type": "session_start",
                             "timestamp": ts.isoformat() if ts else None,
+                            "output_mode_full": self.output_mode_full,
                         })
                         self._runner.show()
 
@@ -4975,7 +4982,7 @@ async def main_async():
 
             if app_config.osd.enabled:
                 if OsdRunner.is_available():
-                    osd_task = OsdTask(comm, app_config.osd)
+                    osd_task = OsdTask(comm, app_config.osd, output_mode_full=app_config.output.mode.is_full)
                     tg.create_task(osd_task.run())
                 else:
                     errprint(f"[osd] OSD overlay enabled but dependencies not available: {OsdRunner.get_unavailable_reason()}")
