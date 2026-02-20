@@ -9,8 +9,12 @@ Since this project does not use versioned releases, entries are organized by dat
 
 ### Fixed
 
-- Empty sessions (hotkey toggled without speaking) left the OSD overlay stuck on "Processing" indefinitely: the display task considered a session without speech text as never finished, so `SessionEnd` was never sent to the OSD. Empty sessions are now finalized immediately with a silent cleanup (no terminal output), and the OSD hides instantly instead of waiting the usual 2-second delay
+- Empty sessions (hotkey toggled without speaking) left the OSD overlay stuck on "Processing" indefinitely: the display task considered a session without speech text as never finished, so `SessionEnd` was never sent to the OSD. Empty sessions are now finalized immediately with a silent cleanup (no terminal output)
 - Post-treatment now skips the LLM API call when the input text is empty or whitespace-only, avoiding unnecessary requests
+
+### Changed
+
+- OSD overlay now hides immediately when a session ends, instead of lingering for 2 seconds
 
 ## 2026-02-12
 
