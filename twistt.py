@@ -2136,6 +2136,12 @@ class Comm:
         return create_task(self._shutting_down.wait())
 
     @property
+    def is_session_active(self):
+        """True while any part of the pipeline is still working
+        (transcription, post-treatment, or keyboard output)."""
+        return self.is_recording or self.is_speech_active or self.is_post_treatment_active or self.is_keyboard_busy
+
+    @property
     def is_transcribing(self):
         return self.is_recording or self.is_speech_active
 
@@ -2419,6 +2425,11 @@ class HotKeyTask:
                         case self.KEY_DOWN if not hotkey_pressed and not is_toggle_mode:
                             if current_time - toggle_stop_time < toggle_cooldown:
                                 debug(f"[HotKey] Ignored DOWN: toggle cooldown ({current_time - toggle_stop_time:.3f}s < {toggle_cooldown}s)")
+                                continue
+                            if self.comm.is_session_active:
+                                debug("[HotKey] Ignored DOWN: previous session still processing")
+                                if not OUTPUT_TO_STDOUT:
+                                    print("[Ignored: previous session still processing]")
                                 continue
                             if (
                                 self.config.hotkey.toggle_mode == ToggleMode.DOUBLE

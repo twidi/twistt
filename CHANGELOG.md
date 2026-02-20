@@ -11,6 +11,7 @@ Since this project does not use versioned releases, entries are organized by dat
 
 - Empty sessions (hotkey toggled without speaking) left the OSD overlay stuck on "Processing" indefinitely: the display task considered a session without speech text as never finished, so `SessionEnd` was never sent to the OSD. Empty sessions are now finalized immediately with a silent cleanup (no terminal output)
 - Post-treatment now skips the LLM API call when the input text is empty or whitespace-only, avoiding unnecessary requests
+- Hotkey could be re-activated while the previous session was still processing (post-treatment or keyboard output in progress), causing overlapping sessions and mixed pipeline commands. The hotkey is now ignored until the full pipeline (transcription, post-treatment, paste) has completed, with a console message `[Ignored: previous session still processing]`
 
 ### Changed
 
