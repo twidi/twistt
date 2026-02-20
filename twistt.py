@@ -1910,8 +1910,8 @@ class Comm:
         self._post_commands = Queue()
         self._buffer_commands = PriorityQueue()
         self._keyboard_commands = Queue()
-        self._display_commands: Queue[TerminalDisplayTask.Commands.Command] = Queue()
-        self._osd_commands: Queue[TerminalDisplayTask.Commands.Command] | None = None
+        self._display_commands: Queue[BaseDisplayTask.Commands.Command] = Queue()
+        self._osd_commands: Queue[BaseDisplayTask.Commands.Command] | None = None
         self._is_shift_pressed = False
         self._recording = Event()
         self._is_speech_active = False
@@ -1940,7 +1940,7 @@ class Comm:
 
     def toggle_post_enabled(self, flag: bool | None = None):
         self._is_post_enabled = (not self._is_post_enabled) if flag is None else flag
-        self.queue_display_command(TerminalDisplayTask.Commands.UpdatePostEnabled(self._is_post_enabled))
+        self.queue_display_command(BaseDisplayTask.Commands.UpdatePostEnabled(self._is_post_enabled))
 
     @property
     def has_audio_chunks(self):
@@ -2022,7 +2022,7 @@ class Comm:
         if flag:
             self.toggle_post_enabled()
 
-    def queue_display_command(self, cmd: TerminalDisplayTask.Commands.Command) -> None:
+    def queue_display_command(self, cmd: BaseDisplayTask.Commands.Command) -> None:
         if OUTPUT_TO_STDOUT:
             with suppress(RuntimeError):
                 self._display_commands.put_nowait(cmd)
@@ -2030,14 +2030,14 @@ class Comm:
             with suppress(RuntimeError):
                 self._osd_commands.put_nowait(cmd)
 
-    async def dequeue_display_command(self) -> TerminalDisplayTask.Commands.Command:
+    async def dequeue_display_command(self) -> BaseDisplayTask.Commands.Command:
         return await self._display_commands.get()
 
     def enable_osd_queue(self):
         if self._osd_commands is None:
             self._osd_commands = Queue()
 
-    async def dequeue_osd_command(self) -> TerminalDisplayTask.Commands.Command | None:
+    async def dequeue_osd_command(self) -> BaseDisplayTask.Commands.Command | None:
         if self._osd_commands is None:
             await asyncio.sleep(999999)
             return None
@@ -2045,7 +2045,7 @@ class Comm:
 
     def _send_speech_state_command(self):
         self.queue_display_command(
-            TerminalDisplayTask.Commands.UpdateSpeechState(
+            BaseDisplayTask.Commands.UpdateSpeechState(
                 recording=self.is_recording,
                 speaking=self._is_speech_active,
                 hotkey=self._active_hotkey_name,
@@ -2068,7 +2068,7 @@ class Comm:
             self._active_hotkey_name = hotkey_name
             self._is_hotkey_toggle_mode = is_toggle
             self.queue_display_command(
-                TerminalDisplayTask.Commands.SessionStart(
+                BaseDisplayTask.Commands.SessionStart(
                     timestamp=datetime.now(),
                     hotkey=hotkey_name,
                     is_toggle=is_toggle,
@@ -2116,7 +2116,7 @@ class Comm:
         if self._is_post_treatment_active == flag:
             return
         self._is_post_treatment_active = flag
-        self.queue_display_command(TerminalDisplayTask.Commands.UpdatePostState(active=flag))
+        self.queue_display_command(BaseDisplayTask.Commands.UpdatePostState(active=flag))
 
     @property
     def is_indicator_active(self):
@@ -2149,7 +2149,7 @@ class Comm:
         if self._audio_ducker:
             self._audio_ducker.restore()
         self._shutting_down.set()
-        self.queue_display_command(TerminalDisplayTask.Commands.Shutdown())
+        self.queue_display_command(BaseDisplayTask.Commands.Shutdown())
         await self.queue_post_command(PostTreatmentTask.Commands.Shutdown())
         await self.queue_buffer_command(BufferTask.Commands.Shutdown())
         await self.queue_keyboard_command(OutputTask.Commands.Shutdown())
@@ -2779,7 +2779,7 @@ class BaseTranscriptionTask:
         return (self._display_previous_text + "".join(current_transcription)).strip(" ")
 
     def _send_speech_display(self, text: str, final: bool):
-        self.comm.queue_display_command(TerminalDisplayTask.Commands.UpdateSpeechText(text=text, final=final))
+        self.comm.queue_display_command(BaseDisplayTask.Commands.UpdateSpeechText(text=text, final=final))
 
     async def _upsert_buffer_segment(self, text: str) -> int:
         seq = self._active_seq_num
@@ -3516,7 +3516,7 @@ ${current_text}
         self._post_display_text = (final_piece + " ") if final_piece else ""
 
     def _send_post_display(self, text: str, final: bool):
-        self.comm.queue_display_command(TerminalDisplayTask.Commands.UpdatePostText(text=text, final=final))
+        self.comm.queue_display_command(BaseDisplayTask.Commands.UpdatePostText(text=text, final=final))
 
     def _resolve_prompt(self) -> str:
         """Re-read file-based prompt sources and combine all sources in order."""
@@ -3951,7 +3951,15 @@ class BufferTask:
             pass
 
 
-class TerminalDisplayTask:
+class BaseDisplayTask:
+    """Base class for display tasks that track session lifecycle.
+
+    Provides the session state machine (start, finalize, maybe_finalize)
+    and the Commands inner class. Subclasses override ``_dequeue_command``
+    to pull from their own queue, and ``_on_session_end`` to react when
+    a session ends (e.g. print a summary or send IPC).
+    """
+
     class Commands:
         class SessionStart(NamedTuple):
             timestamp: datetime
@@ -3978,19 +3986,14 @@ class TerminalDisplayTask:
         class UpdatePostEnabled(NamedTuple):
             active: bool
 
-        class SessionEnd(NamedTuple):
-            pass
-
         class Shutdown(NamedTuple):
             pass
 
-        Command = SessionStart | UpdateSpeechState | UpdateSpeechText | UpdatePostState | UpdatePostText | UpdatePostEnabled | SessionEnd | Shutdown
+        Command = SessionStart | UpdateSpeechState | UpdateSpeechText | UpdatePostState | UpdatePostText | UpdatePostEnabled | Shutdown
 
     def __init__(self, comm: Comm, config: Config.App):
         self.comm = comm
         self.config = config
-        self.console = config.console
-        self.live: Live | None = None
         self.session_active = False
         self.session_count = 0
         self.current_timestamp: datetime | None = None
@@ -4008,28 +4011,22 @@ class TerminalDisplayTask:
     def post_enabled(self):
         return self.config.post.configured and self.comm.is_post_enabled
 
+    async def _dequeue_command(self) -> Commands.Command | None:
+        raise NotImplementedError
+
     async def run(self):
         try:
-            with Live(
-                self._renderable(),
-                console=self.console.console,
-                refresh_per_second=8,
-                auto_refresh=False,
-                transient=False,
-            ) as live:
-                self.live = live
-                while True:
-                    cmd = await self.comm.dequeue_display_command()
-                    should_continue = await self._handle_cmd(cmd)
-                    self._refresh()
-                    if not should_continue:
-                        break
+            while True:
+                cmd = await self._dequeue_command()
+                if cmd is None:
+                    continue
+                should_continue = await self._handle_cmd(cmd)
+                if not should_continue:
+                    break
         except CancelledError:
             pass
-        finally:
-            self.live = None
 
-    async def _handle_cmd(self, cmd: TerminalDisplayTask.Commands.Command) -> bool:
+    async def _handle_cmd(self, cmd: Commands.Command) -> bool:
         match cmd:
             case self.Commands.SessionStart(timestamp=timestamp, hotkey=hotkey, is_toggle=is_toggle):
                 self.active_hotkey = hotkey
@@ -4042,7 +4039,11 @@ class TerminalDisplayTask:
                 self.active_hotkey = hotkey
                 self.is_toggle = is_toggle
                 if self.session_active and not (self.is_recording or self.is_speaking):
-                    self.speech_done = bool(self.speech_text)
+                    if not self.speech_text and not self.speech_done:
+                        # Empty session (no speech ever received): finalize immediately.
+                        self._finalize_session()
+                    else:
+                        self.speech_done = bool(self.speech_text)
                 self._maybe_finalize()
 
             case self.Commands.UpdateSpeechText(text=text, final=final):
@@ -4073,10 +4074,7 @@ class TerminalDisplayTask:
                 self._maybe_finalize()
 
             case self.Commands.UpdatePostEnabled():
-                pass  # automatically handled by the refresh calling _post_state_label
-
-            case self.Commands.SessionEnd():
-                pass  # consumed by OsdTask only
+                pass  # subclasses may override _handle_cmd to react
 
             case self.Commands.Shutdown():
                 self._finalize_session(force=True)
@@ -4098,16 +4096,6 @@ class TerminalDisplayTask:
         self.post_done = not self.post_enabled
         self.is_post_active = False
 
-    def _refresh(self):
-        if self.live is None:
-            return
-        self.live.update(self._renderable(), refresh=True)
-
-    def _renderable(self):
-        if self.session_active:
-            return self._build_section(final=False)
-        return Text("Waiting for speech...", style="dim")
-
     def _maybe_finalize(self):
         if self._session_finished():
             self._finalize_session()
@@ -4116,9 +4104,8 @@ class TerminalDisplayTask:
         if not self.session_active:
             return False
         if not self.speech_text:
-            # Empty session (no speech detected): finished as soon as
-            # recording and speaking have both stopped.
-            return not self.is_recording and not self.is_speaking
+            # Empty session: already handled by UpdateSpeechState above.
+            return False
         speech_ready = self.speech_done and not self.is_recording and not self.is_speaking
         if not speech_ready:
             return False
@@ -4135,6 +4122,58 @@ class TerminalDisplayTask:
     def _finalize_session(self, force: bool = False):
         if not self.session_active and not force:
             return
+        self._on_session_end()
+        self.session_active = False
+        self.current_timestamp = None
+        self.speech_text = ""
+        self.speech_done = False
+        self.is_recording = False
+        self.is_speaking = False
+        self.post_text = ""
+        self.post_done = not self.post_enabled
+        self.is_post_active = False
+
+    def _on_session_end(self):
+        """Hook called by ``_finalize_session`` *before* resetting state.
+
+        Subclasses override to print a summary, send IPC, etc.
+        At call time, ``self.speech_text``, ``self.post_text`` and other
+        session attributes still hold the values from the ending session.
+        """
+
+
+class TerminalDisplayTask(BaseDisplayTask):
+
+    def __init__(self, comm: Comm, config: Config.App):
+        super().__init__(comm, config)
+        self.console = config.console
+        self.live: Live | None = None
+
+    async def _dequeue_command(self):
+        return await self.comm.dequeue_display_command()
+
+    async def run(self):
+        try:
+            with Live(
+                self._renderable(),
+                console=self.console.console,
+                refresh_per_second=8,
+                auto_refresh=False,
+                transient=False,
+            ) as live:
+                self.live = live
+                await super().run()
+        except CancelledError:
+            pass
+        finally:
+            self.live = None
+
+    async def _handle_cmd(self, cmd) -> bool:
+        result = await super()._handle_cmd(cmd)
+        self._refresh()
+        return result
+
+    def _on_session_end(self):
         # Print the final section only when there is actual content to show.
         if self.speech_text or self.post_text:
             section = self._build_section(final=True)
@@ -4145,16 +4184,16 @@ class TerminalDisplayTask:
             self.console.print_and_log(content)
             self.console.print_and_log(bottom, log_max_width=50)
             self.console.print_and_log()
-        self.session_active = False
-        self.current_timestamp = None
-        self.speech_text = ""
-        self.speech_done = False
-        self.is_recording = False
-        self.is_speaking = False
-        self.post_text = ""
-        self.post_done = not self.post_enabled
-        self.is_post_active = False
-        self.comm.queue_display_command(self.Commands.SessionEnd())
+
+    def _refresh(self):
+        if self.live is None:
+            return
+        self.live.update(self._renderable(), refresh=True)
+
+    def _renderable(self):
+        if self.session_active:
+            return self._build_section(final=False)
+        return Text("Waiting for speech...", style="dim")
 
     def _build_section(self, *, final: bool) -> Group:
         ts = self.current_timestamp or datetime.now()
@@ -4869,18 +4908,20 @@ class OsdRunner:
                 self.PID_FILE.unlink(missing_ok=True)
 
 
-class OsdTask:
+class OsdTask(BaseDisplayTask):
     """Manages the live transcription OSD overlay daemon.
 
-    Consumes display commands from the OSD queue in :class:`Comm`,
-    translates them to IPC messages, and sends them to the OSD daemon.
+    Inherits the session state machine from :class:`BaseDisplayTask` and
+    forwards each command as an IPC message to the OSD daemon process.
     All errors are caught so the OSD never crashes the main app.
     """
 
-    def __init__(self, comm: Comm, osd_config: Config.Osd):
-        self.comm = comm
-        self.config = osd_config
+    def __init__(self, comm: Comm, config: Config.App):
+        super().__init__(comm, config)
         self._runner: OsdRunner | None = None
+
+    async def _dequeue_command(self):
+        return await self.comm.dequeue_osd_command()
 
     async def run(self):
         try:
@@ -4889,11 +4930,11 @@ class OsdTask:
                 return
 
             self._runner = OsdRunner(
-                width=self.config.width,
-                height=self.config.height,
-                x=self.config.x,
-                y=self.config.y,
-                monitor=self.config.monitor,
+                width=self.config.osd.width,
+                height=self.config.osd.height,
+                x=self.config.osd.x,
+                y=self.config.osd.y,
+                monitor=self.config.osd.monitor,
             )
             if not self._runner._ensure_daemon():
                 errprint("[osd] Failed to start OSD daemon")
@@ -4905,9 +4946,7 @@ class OsdTask:
             self.comm.enable_osd_queue()
 
             try:
-                await self._process_commands()
-            except CancelledError:
-                pass
+                await super().run()
             finally:
                 if self._runner:
                     self._runner.send_message({"type": "shutdown"})
@@ -4917,64 +4956,61 @@ class OsdTask:
         except Exception as exc:
             errprint(f"[osd] OSD overlay error: {exc}")
 
-    async def _process_commands(self):
-        while not self.comm.is_shutting_down:
-            cmd = await self.comm.dequeue_osd_command()
-            if cmd is None:
-                continue
+    async def _handle_cmd(self, cmd) -> bool:
+        result = await super()._handle_cmd(cmd)
+        # Forward command as IPC message to OSD daemon
+        try:
+            match cmd:
+                case self.Commands.SessionStart(timestamp=ts):
+                    self._runner.send_message({
+                        "type": "session_start",
+                        "timestamp": ts.isoformat() if ts else None,
+                    })
+                    self._runner.show()
 
-            try:
-                match cmd:
-                    case TerminalDisplayTask.Commands.SessionStart(timestamp=ts):
-                        self._runner.send_message({
-                            "type": "session_start",
-                            "timestamp": ts.isoformat() if ts else None,
-                        })
-                        self._runner.show()
+                case self.Commands.UpdateSpeechState(recording=rec, speaking=sp):
+                    self._runner.send_message({
+                        "type": "speech_state",
+                        "recording": rec,
+                        "speaking": sp,
+                    })
 
-                    case TerminalDisplayTask.Commands.UpdateSpeechState(recording=rec, speaking=sp):
-                        self._runner.send_message({
-                            "type": "speech_state",
-                            "recording": rec,
-                            "speaking": sp,
-                        })
+                case self.Commands.UpdateSpeechText(text=text, final=final):
+                    self._runner.send_message({
+                        "type": "speech_text",
+                        "text": text,
+                        "final": final,
+                    })
 
-                    case TerminalDisplayTask.Commands.UpdateSpeechText(text=text, final=final):
-                        self._runner.send_message({
-                            "type": "speech_text",
-                            "text": text,
-                            "final": final,
-                        })
+                case self.Commands.UpdatePostState(active=active):
+                    self._runner.send_message({
+                        "type": "post_state",
+                        "active": active,
+                    })
 
-                    case TerminalDisplayTask.Commands.UpdatePostState(active=active):
-                        self._runner.send_message({
-                            "type": "post_state",
-                            "active": active,
-                        })
+                case self.Commands.UpdatePostText(text=text, final=final):
+                    self._runner.send_message({
+                        "type": "post_text",
+                        "text": text,
+                        "final": final,
+                    })
 
-                    case TerminalDisplayTask.Commands.UpdatePostText(text=text, final=final):
-                        self._runner.send_message({
-                            "type": "post_text",
-                            "text": text,
-                            "final": final,
-                        })
+                case self.Commands.UpdatePostEnabled(active=active):
+                    self._runner.send_message({
+                        "type": "post_enabled",
+                        "active": active,
+                    })
 
-                    case TerminalDisplayTask.Commands.UpdatePostEnabled(active=active):
-                        self._runner.send_message({
-                            "type": "post_enabled",
-                            "active": active,
-                        })
+                case self.Commands.Shutdown():
+                    pass  # handled by run()'s finally block
 
-                    case TerminalDisplayTask.Commands.SessionEnd():
-                        self._runner.send_message({"type": "session_end"})
+        except Exception as e:
+            errprint(f"[osd] Error processing command: {e}")
+        return result
 
-                    case TerminalDisplayTask.Commands.Shutdown():
-                        self._runner.send_message({"type": "shutdown"})
-                        self._runner.hide()
-                        break
-
-            except Exception as e:
-                errprint(f"[osd] Error processing command: {e}")
+    def _on_session_end(self):
+        if self._runner:
+            self._runner.send_message({"type": "session_end"})
 
 
 async def main_async():
@@ -5031,7 +5067,7 @@ async def main_async():
 
             if app_config.osd.enabled:
                 if OsdRunner.is_available():
-                    osd_task = OsdTask(comm, app_config.osd)
+                    osd_task = OsdTask(comm, app_config)
                     tg.create_task(osd_task.run())
                 else:
                     errprint(f"[osd] OSD overlay enabled but dependencies not available: {OsdRunner.get_unavailable_reason()}")
