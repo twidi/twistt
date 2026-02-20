@@ -1081,7 +1081,11 @@ class TranscriptionOSD:
             self._text_state["post_enabled"] = msg.get("active", True)
 
         elif msg_type == "session_end":
-            GLib.timeout_add(2000, self._session_end_hide)
+            has_content = self._text_state.get("speech_text") or self._text_state.get("post_text")
+            if has_content:
+                GLib.timeout_add(2000, self._session_end_hide)
+            else:
+                self._session_end_hide()
 
         elif msg_type == "shutdown":
             self._hide()

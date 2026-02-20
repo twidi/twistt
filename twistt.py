@@ -3531,6 +3531,10 @@ ${current_text}
         previous_text: str,
         stream_output: bool,
     ) -> AsyncIterator[str | None]:
+        if not text.strip():
+            yield text
+            yield None
+            return
         system_message = self._render_template(
             self.SYSTEM_TEMPLATE,
             {"user_prompt": self._resolve_prompt()},
@@ -4101,7 +4105,9 @@ class TerminalDisplayTask:
         if not self.session_active:
             return False
         if not self.speech_text:
-            return False
+            # Empty session (no speech detected): finished as soon as
+            # recording and speaking have both stopped.
+            return not self.is_recording and not self.is_speaking
         speech_ready = self.speech_done and not self.is_recording and not self.is_speaking
         if not speech_ready:
             return False
@@ -4118,26 +4124,16 @@ class TerminalDisplayTask:
     def _finalize_session(self, force: bool = False):
         if not self.session_active and not force:
             return
-        if force and not (self.speech_text or self.post_text):
-            self.session_active = False
-            self.current_timestamp = None
-            self.speech_text = ""
-            self.speech_done = False
-            self.is_recording = False
-            self.is_speaking = False
-            self.post_text = ""
-            self.post_done = not self.post_enabled
-            self.is_post_active = False
-            self.comm.queue_display_command(self.Commands.SessionEnd())
-            return
-        section = self._build_section(final=True)
-        # Extract components: top_rule, content, bottom_rule
-        top, content, bottom = section.renderables
-        # Print with different widths: rules at 50, content at 5000 (default)
-        self.console.print_and_log(top, log_max_width=50)
-        self.console.print_and_log(content)
-        self.console.print_and_log(bottom, log_max_width=50)
-        self.console.print_and_log()
+        # Print the final section only when there is actual content to show.
+        if self.speech_text or self.post_text:
+            section = self._build_section(final=True)
+            # Extract components: top_rule, content, bottom_rule
+            top, content, bottom = section.renderables
+            # Print with different widths: rules at 50, content at 5000 (default)
+            self.console.print_and_log(top, log_max_width=50)
+            self.console.print_and_log(content)
+            self.console.print_and_log(bottom, log_max_width=50)
+            self.console.print_and_log()
         self.session_active = False
         self.current_timestamp = None
         self.speech_text = ""
