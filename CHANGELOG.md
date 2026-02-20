@@ -7,6 +7,11 @@ Since this project does not use versioned releases, entries are organized by dat
 
 ## 2026-02-20
 
+### Added
+
+- Configurable OSD spectrum analyzer height via `TWISTT_OSD_SPECTRUM_HEIGHT` (`--osd-spectrum-height`, 0-100%, default 28)
+- Configurable OSD global opacity via `TWISTT_OSD_OPACITY` (`--osd-opacity`, 0.0-1.0, default 0.9)
+
 ### Fixed
 
 - Empty sessions (hotkey toggled without speaking) left the OSD overlay stuck on "Processing" indefinitely. Empty sessions are now finalized immediately with a silent cleanup
@@ -17,6 +22,7 @@ Since this project does not use versioned releases, entries are organized by dat
 ### Changed
 
 - OSD overlay now hides immediately when a session ends, instead of lingering for 2 seconds
+- OSD visual refresh: removed border, increased font sizes, improved text and indicator opacity for better readability
 
 ## 2026-02-12
 

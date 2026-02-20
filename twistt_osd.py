@@ -178,7 +178,9 @@ class OSDRenderer:
     DB_FLOOR = -60.0  # dB floor for absolute scaling (silence threshold)
     LEVEL_INDICATOR_WIDTH = 30  # px reserved for the dB level indicator
 
-    def __init__(self):
+    def __init__(self, spectrum_height: int = 28, opacity: float = 0.9):
+        self._spectrum_height_pct = max(0, min(100, spectrum_height)) / 100
+        self._opacity = max(0.0, min(1.0, opacity))
         self._bar_heights = np.zeros(self.NUM_BARS)
         self._peak_heights = np.zeros(self.NUM_BARS)
         self._peak_velocities = np.zeros(self.NUM_BARS)
@@ -196,13 +198,15 @@ class OSDRenderer:
         samples: np.ndarray | None,
         text_state: dict,
     ):
+        cr.push_group()
+
         padding = 14
 
         # 1. Background
         self._draw_background(cr, width, height)
 
-        # 2. Spectrum (top 30%)
-        spectrum_h = height * 0.28
+        # 2. Spectrum
+        spectrum_h = height * self._spectrum_height_pct
         self._draw_spectrum(
             cr, padding, 10, width - 2 * padding, spectrum_h, samples, level
         )
@@ -220,6 +224,9 @@ class OSDRenderer:
         indicator_y = height - 16
         self._draw_state_indicator(cr, padding, indicator_y, text_state)
 
+        cr.pop_group_to_source()
+        cr.paint_with_alpha(self._opacity)
+
     # ── background ─────────────────────────────────────────────────
 
     def _draw_background(self, cr: cairo.Context, w: float, h: float):
@@ -228,8 +235,8 @@ class OSDRenderer:
 
         # Dark semi-transparent fill
         gradient = cairo.LinearGradient(0, 0, 0, h)
-        gradient.add_color_stop_rgba(0, 0.04, 0.04, 0.08, 0.93)
-        gradient.add_color_stop_rgba(1, 0.07, 0.07, 0.12, 0.89)
+        gradient.add_color_stop_rgba(0, 0.04, 0.04, 0.08, 1.0)
+        gradient.add_color_stop_rgba(1, 0.07, 0.07, 0.12, 1.0)
         cr.set_source(gradient)
         cr.fill_preserve()
 
@@ -238,16 +245,7 @@ class OSDRenderer:
         highlight.add_color_stop_rgba(0, 1.0, 1.0, 1.0, 0.05)
         highlight.add_color_stop_rgba(1, 1.0, 1.0, 1.0, 0.0)
         cr.set_source(highlight)
-        cr.fill_preserve()
-
-        # Gradient border
-        border = cairo.LinearGradient(0, 0, w, h)
-        border.add_color_stop_rgba(0.0, 0.15, 0.70, 1.0, 0.25)
-        border.add_color_stop_rgba(0.5, 0.10, 0.90, 0.70, 0.20)
-        border.add_color_stop_rgba(1.0, 0.00, 1.00, 0.55, 0.25)
-        cr.set_source(border)
-        cr.set_line_width(1.2)
-        cr.stroke()
+        cr.fill()
 
     # ── spectrum ───────────────────────────────────────────────────
 
@@ -459,7 +457,7 @@ class OSDRenderer:
         db_text = f"{db_display:.0f}"
 
         layout = PangoCairo.create_layout(cr)
-        font = Pango.FontDescription.from_string("Sans 7")
+        font = Pango.FontDescription.from_string("Sans 9")
         layout.set_font_description(font)
         layout.set_text(db_text, -1)
         _, logical = layout.get_pixel_extents()
@@ -540,7 +538,7 @@ class OSDRenderer:
                 cr, x, cur_y, w, speech_text_h,
                 speech_text,
                 glow_color=(0.20, 0.78, 1.0),
-                alpha=1.0 if not speech_final else 0.55,
+                alpha=1.0 if not speech_final else 0.9,
                 show_cursor=active and not speech_final,
             )
         elif session_active:
@@ -562,7 +560,7 @@ class OSDRenderer:
                     cr, x, cur_y, w, post_text_h,
                     post_text,
                     glow_color=(0.60, 0.30, 0.90),
-                    alpha=1.0 if not post_final else 0.55,
+                    alpha=1.0 if not post_final else 0.9,
                     show_cursor=is_post_active and not post_final,
                 )
             elif is_post_active:
@@ -577,13 +575,13 @@ class OSDRenderer:
         color: tuple[float, float, float],
     ) -> float:
         layout = PangoCairo.create_layout(cr)
-        font = Pango.FontDescription.from_string("Sans 9")
+        font = Pango.FontDescription.from_string("Sans 11")
         font.set_weight(Pango.Weight.SEMIBOLD)
         layout.set_font_description(font)
         layout.set_text(label, -1)
         _, logical = layout.get_pixel_extents()
 
-        cr.set_source_rgba(*color, 0.65)
+        cr.set_source_rgba(*color, 0.80)
         cr.move_to(x, y)
         PangoCairo.show_layout(cr, layout)
 
@@ -671,10 +669,10 @@ class OSDRenderer:
 
     def _draw_placeholder(self, cr: cairo.Context, x: float, y: float, text: str):
         layout = PangoCairo.create_layout(cr)
-        font = Pango.FontDescription.from_string("Sans Italic 12")
+        font = Pango.FontDescription.from_string("Sans Italic 13")
         layout.set_font_description(font)
         layout.set_text(text, -1)
-        cr.set_source_rgba(0.40, 0.50, 0.60, 0.40)
+        cr.set_source_rgba(0.40, 0.50, 0.60, 0.70)
         cr.move_to(x, y)
         PangoCairo.show_layout(cr, layout)
 
@@ -703,18 +701,18 @@ class OSDRenderer:
             return
 
         t = time.time()
-        pulse = 0.65 + 0.35 * math.sin(t * 4.0)
-        font = Pango.FontDescription.from_string("Sans 9")
+        pulse = 0.75 + 0.25 * math.sin(t * 4.0)
+        font = Pango.FontDescription.from_string("Sans 11")
         cx = x
 
         for color, label in active_states:
             # Outer glow
-            cr.set_source_rgba(*color, 0.15 * pulse)
+            cr.set_source_rgba(*color, 0.40 * pulse)
             cr.arc(cx + 7, y, 9, 0, 2 * math.pi)
             cr.fill()
 
             # Inner dot
-            cr.set_source_rgba(*color, 0.85 * pulse)
+            cr.set_source_rgba(*color, 1.0 * pulse)
             cr.arc(cx + 7, y, 4.5, 0, 2 * math.pi)
             cr.fill()
 
@@ -722,8 +720,9 @@ class OSDRenderer:
             layout = PangoCairo.create_layout(cr)
             layout.set_font_description(font)
             layout.set_text(label, -1)
-            cr.set_source_rgba(*color, 0.70 * pulse)
-            cr.move_to(cx + 18, y - 6)
+            _, logical = layout.get_pixel_extents()
+            cr.set_source_rgba(*color, 1.0 * pulse)
+            cr.move_to(cx + 18, y - logical.height / 2)
             PangoCairo.show_layout(cr, layout)
 
             # Advance x for next indicator (dot width + label width + gap)
@@ -750,14 +749,14 @@ class OSDRenderer:
 class OSDWindow(Gtk.Window):
     """GTK4 layer-shell overlay window for the transcription OSD."""
 
-    def __init__(self, width: int = 550, height: int = 220, pos_x: int = 50, pos_y: int = 3, monitor: int | None = None):
+    def __init__(self, width: int = 550, height: int = 220, pos_x: int = 50, pos_y: int = 3, monitor: int | None = None, spectrum_height: int = 28, opacity: float = 0.9):
         super().__init__()
         self._width = width
         self._height = height
         self._pos_x = max(0, min(100, pos_x))
         self._pos_y = max(0, min(100, pos_y))
         self._monitor_index = monitor
-        self._renderer = OSDRenderer()
+        self._renderer = OSDRenderer(spectrum_height=spectrum_height, opacity=opacity)
         self._audio_level = 0.0
         self._audio_samples: np.ndarray | None = None
         self._text_state: dict = {}
@@ -888,7 +887,7 @@ class TranscriptionOSD:
     for spectrum visualization, and renders with Cairo at 60fps.
     """
 
-    def __init__(self, width: int = 550, height: int = 220, pos_x: int = 50, pos_y: int = 3, monitor: int | None = None, daemon: bool = False):
+    def __init__(self, width: int = 550, height: int = 220, pos_x: int = 50, pos_y: int = 3, monitor: int | None = None, spectrum_height: int = 28, opacity: float = 0.9, daemon: bool = False):
         self.main_loop: GLib.MainLoop | None = None
         self.window: OSDWindow | None = None
         self.audio_monitor: AudioMonitor | None = None
@@ -899,6 +898,8 @@ class TranscriptionOSD:
         self._pos_x = pos_x
         self._pos_y = pos_y
         self._monitor = monitor
+        self._spectrum_height = spectrum_height
+        self._opacity = opacity
         self._should_stop = False
 
         # Timers
@@ -927,7 +928,7 @@ class TranscriptionOSD:
         Gtk.init()
         _load_css()
 
-        self.window = OSDWindow(self._width, self._height, self._pos_x, self._pos_y, self._monitor)
+        self.window = OSDWindow(self._width, self._height, self._pos_x, self._pos_y, self._monitor, self._spectrum_height, self._opacity)
 
         self._start_socket_server()
         self._initial_visibility()
@@ -1250,6 +1251,18 @@ def main():
         default=None,
         help="Monitor index (0, 1, 2...). Unset = compositor default / follows mouse",
     )
+    parser.add_argument(
+        "--spectrum-height",
+        type=int,
+        default=28,
+        help="Spectrum analyzer height as %% of window height, 0-100 (default: 28)",
+    )
+    parser.add_argument(
+        "--opacity",
+        type=float,
+        default=0.9,
+        help="Global overlay opacity, 0.0-1.0 (default: 0.9)",
+    )
     args = parser.parse_args()
 
     # PID file
@@ -1268,6 +1281,8 @@ def main():
         pos_x=args.pos_x,
         pos_y=args.pos_y,
         monitor=args.monitor,
+        spectrum_height=args.spectrum_height,
+        opacity=args.opacity,
         daemon=args.daemon,
     )
 

@@ -422,6 +422,8 @@ class Config:
         x: int  # horizontal position in % (0-100), center of window
         y: int  # vertical position in % (0-100), center of window
         monitor: int | None  # monitor index (0, 1, 2...) or None for default
+        spectrum_height: int  # spectrum analyzer height as % of window height (0-100)
+        opacity: float  # global overlay opacity (0.0-1.0)
 
     class App(NamedTuple):
         console: ConsoleWithLogging
@@ -476,6 +478,8 @@ class CommandLineParser:
         "osd_x": f"{ENV_PREFIX}OSD_X",
         "osd_y": f"{ENV_PREFIX}OSD_Y",
         "osd_monitor": f"{ENV_PREFIX}OSD_MONITOR",
+        "osd_spectrum_height": f"{ENV_PREFIX}OSD_SPECTRUM_HEIGHT",
+        "osd_opacity": f"{ENV_PREFIX}OSD_OPACITY",
     }
 
     @classmethod
@@ -850,6 +854,18 @@ class CommandLineParser:
             help=f"OSD monitor index (0, 1, 2...). Unset = follows mouse (env: {prefix}OSD_MONITOR)",
         )
         parser.add_argument(
+            "--osd-spectrum-height",
+            type=int,
+            default=default.get("OSD_SPECTRUM_HEIGHT", 28),
+            help=f"OSD spectrum analyzer height as %% of window height, 0-100 (default: 28) (env: {prefix}OSD_SPECTRUM_HEIGHT)",
+        )
+        parser.add_argument(
+            "--osd-opacity",
+            type=float,
+            default=default.get("OSD_OPACITY", 0.9),
+            help=f"OSD global overlay opacity, 0.0-1.0 (default: 0.9) (env: {prefix}OSD_OPACITY)",
+        )
+        parser.add_argument(
             "--log",
             default=default.get("LOG", cls._UNDEFINED),
             help=f"Path to log file. Default: {config_dir / 'twistt.log'} (env: {prefix}LOG)",
@@ -1023,6 +1039,8 @@ class CommandLineParser:
             "OSD_X": int(cls.get_env("OSD_X", "50")),
             "OSD_Y": int(cls.get_env("OSD_Y", "3")),
             "OSD_MONITOR": int(cls.get_env("OSD_MONITOR")) if cls.get_env("OSD_MONITOR") else None,
+            "OSD_SPECTRUM_HEIGHT": int(cls.get_env("OSD_SPECTRUM_HEIGHT", "28")),
+            "OSD_OPACITY": float(cls.get_env("OSD_OPACITY", "0.9")),
             "LOG": cls.get_env("LOG"),
             "CONFIG_PATH": config_path.as_posix(),
         }
@@ -1314,14 +1332,16 @@ class CommandLineParser:
         if osd_enabled:
             if OsdRunner.is_available():
                 monitor_info = f"monitor {args.osd_monitor}" if args.osd_monitor is not None else "follows mouse"
+                spectrum_info = f", spectrum [yellow]{args.osd_spectrum_height}%[/yellow]"
+                opacity_info = f", opacity [yellow]{args.osd_opacity}[/yellow]"
                 if args.osd_monitor is not None:
-                    config_table.add_row("OSD overlay", f"[green]Enabled[/green] - [yellow]{args.osd_width}x{args.osd_height}[/yellow] at [yellow]{args.osd_x}%x{args.osd_y}%[/yellow] ({monitor_info})")
+                    config_table.add_row("OSD overlay", f"[green]Enabled[/green] - [yellow]{args.osd_width}x{args.osd_height}[/yellow] at [yellow]{args.osd_x}%x{args.osd_y}%[/yellow] ({monitor_info}{spectrum_info}{opacity_info})")
                 else:
                     pos_info = ""
                     if args.osd_x != 50 or args.osd_y != 3:
                         errprint("WARNING: --osd-x/--osd-y are ignored without --osd-monitor (cannot compute position without a known monitor)")
                         pos_info = " [red](--osd-x/--osd-y ignored)[/red]"
-                    config_table.add_row("OSD overlay", f"[green]Enabled[/green] - [yellow]{args.osd_width}x{args.osd_height}[/yellow] ({monitor_info}){pos_info}")
+                    config_table.add_row("OSD overlay", f"[green]Enabled[/green] - [yellow]{args.osd_width}x{args.osd_height}[/yellow] ({monitor_info}{spectrum_info}{opacity_info}){pos_info}")
             else:
                 config_table.add_row("OSD overlay", f"[yellow]Enabled but dependencies not available ({OsdRunner.get_unavailable_reason()})[/yellow]")
         else:
@@ -1471,6 +1491,8 @@ class CommandLineParser:
                 x=args.osd_x,
                 y=args.osd_y,
                 monitor=args.osd_monitor,
+                spectrum_height=args.osd_spectrum_height,
+                opacity=args.osd_opacity,
             ),
         )
 
@@ -4678,7 +4700,7 @@ class OsdRunner:
     SOCKET_PATH = Path(user_data_dir("twistt")) / "osd.sock"
     _OSD_SCRIPT = Path(__file__).resolve().parent / "twistt_osd.py"
 
-    def __init__(self, width: int = 550, height: int = 220, x: int = 50, y: int = 3, monitor: int | None = None):
+    def __init__(self, width: int = 550, height: int = 220, x: int = 50, y: int = 3, monitor: int | None = None, spectrum_height: int = 28, opacity: float = 0.9):
         self._process: subprocess.Popen | None = None
         self._socket: socket.socket | None = None
         self._orphaned_daemon_pid: int | None = None
@@ -4687,6 +4709,8 @@ class OsdRunner:
         self._x = x
         self._y = y
         self._monitor = monitor
+        self._spectrum_height = spectrum_height
+        self._opacity = opacity
 
     # Cache for dependency check (class-level)
     _deps_available: bool | None = None
@@ -4832,6 +4856,8 @@ class OsdRunner:
                 "--height", str(self._height),
                 "--pos-x", str(self._x),
                 "--pos-y", str(self._y),
+                "--spectrum-height", str(self._spectrum_height),
+                "--opacity", str(self._opacity),
             ]
             if self._monitor is not None:
                 cmd.extend(["--monitor", str(self._monitor)])
@@ -4978,6 +5004,8 @@ class OsdTask(BaseDisplayTask):
                 x=self.config.osd.x,
                 y=self.config.osd.y,
                 monitor=self.config.osd.monitor,
+                spectrum_height=self.config.osd.spectrum_height,
+                opacity=self.config.osd.opacity,
             )
             if not self._runner._ensure_daemon():
                 errprint("[osd] Failed to start OSD daemon")
