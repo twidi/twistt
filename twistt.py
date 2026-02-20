@@ -3628,6 +3628,16 @@ ${current_text}
                         delta = chunk.choices[0].delta.content
                         if not delta:
                             continue
+                        # If this delta looks like a multi-word chunk (contains internal
+                        # space) and the previous token didn't end with whitespace, insert
+                        # a joining space so the tokens don't get glued together.
+                        if (
+                            token_buffer
+                            and " " in delta.strip()
+                            and not token_buffer[-1][-1:].isspace()
+                            and not delta[0:1].isspace()
+                        ):
+                            delta = " " + delta
                         token_buffer.append(delta)
                         token_count += 1
                         if stream_output and (

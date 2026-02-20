@@ -12,6 +12,7 @@ Since this project does not use versioned releases, entries are organized by dat
 - Empty sessions (hotkey toggled without speaking) left the OSD overlay stuck on "Processing" indefinitely: the display task considered a session without speech text as never finished, so `SessionEnd` was never sent to the OSD. Empty sessions are now finalized immediately with a silent cleanup (no terminal output)
 - Post-treatment now skips the LLM API call when the input text is empty or whitespace-only, avoiding unnecessary requests
 - Hotkey could be re-activated while the previous session was still processing (WebSocket teardown, post-treatment, or keyboard output in progress), causing overlapping sessions and mixed pipeline commands. A `session_finishing` flag now covers the entire window from recording stop to full pipeline idle — including the gap between WebSocket close and post-treatment start where no other flag was set. The hotkey is ignored during this window, with a console message `[Ignored: previous session still processing]`
+- Missing spaces between words in post-treatment output with some LLM providers: providers that stream full phrases as single chunks (instead of sub-word tokens) caused `"".join()` to glue consecutive chunks without whitespace. Multi-word chunks are now detected (contain an internal space) and a joining space is prepended when the previous chunk didn't end with one
 
 ### Changed
 
