@@ -1918,6 +1918,7 @@ class Comm:
         self._is_keyboard_busy = False
         self._is_post_treatment_active = False
         self._is_indicator_active = False
+        self._is_session_finishing = False
         self._shutting_down = Event()
         self._is_buffer_active = buffer_active
         self._active_hotkey_name: str | None = None
@@ -2080,6 +2081,10 @@ class Comm:
             self._recording.clear()
             self._active_hotkey_name = None
             self._is_hotkey_toggle_mode = False
+            # Mark the session as finishing: the transcription task may still
+            # need to close the WebSocket and queue post-treatment / buffer
+            # commands.  The flag is cleared once the full pipeline is idle.
+            self._is_session_finishing = True
         self._send_speech_state_command()
 
     def switch_to_toggle_mode(self, hotkey_name: str):
@@ -2097,9 +2102,15 @@ class Comm:
 
     def toggle_speech_active(self, flag: bool):
         if self._is_speech_active == flag:
+            # Even when the flag didn't change, a False→False call
+            # (e.g. empty session) may need to clear session_finishing.
+            if not flag:
+                self._maybe_clear_session_finishing()
             return
         self._is_speech_active = flag
         self._send_speech_state_command()
+        if not flag:
+            self._maybe_clear_session_finishing()
 
     @property
     def is_keyboard_busy(self):
@@ -2107,6 +2118,8 @@ class Comm:
 
     def toggle_keyboard_busy(self, flag: bool):
         self._is_keyboard_busy = flag
+        if not flag:
+            self._maybe_clear_session_finishing()
 
     @property
     def is_post_treatment_active(self):
@@ -2114,9 +2127,13 @@ class Comm:
 
     def toggle_post_treatment_active(self, flag: bool):
         if self._is_post_treatment_active == flag:
+            if not flag:
+                self._maybe_clear_session_finishing()
             return
         self._is_post_treatment_active = flag
         self.queue_display_command(BaseDisplayTask.Commands.UpdatePostState(active=flag))
+        if not flag:
+            self._maybe_clear_session_finishing()
 
     @property
     def is_indicator_active(self):
@@ -2138,8 +2155,24 @@ class Comm:
     @property
     def is_session_active(self):
         """True while any part of the pipeline is still working
-        (transcription, post-treatment, or keyboard output)."""
-        return self.is_recording or self.is_speech_active or self.is_post_treatment_active or self.is_keyboard_busy
+        (transcription, post-treatment, or keyboard output).
+        Also true during the finishing window between recording stop
+        and full pipeline idle (covers WebSocket teardown and
+        pending post-treatment that hasn't started yet)."""
+        return (
+            self.is_recording
+            or self.is_speech_active
+            or self.is_post_treatment_active
+            or self.is_keyboard_busy
+            or self._is_session_finishing
+        )
+
+    def _maybe_clear_session_finishing(self):
+        """Clear the session-finishing flag once the full pipeline is idle."""
+        if self._is_session_finishing and not (
+            self.is_recording or self.is_speech_active or self.is_post_treatment_active or self.is_keyboard_busy
+        ):
+            self._is_session_finishing = False
 
     @property
     def is_transcribing(self):
