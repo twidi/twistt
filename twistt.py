@@ -3804,12 +3804,13 @@ ${current_text}
                         delta = chunk.choices[0].delta.content
                         if not delta:
                             continue
-                        # If this delta looks like a multi-word chunk (contains internal
-                        # space) and the previous token didn't end with whitespace, insert
-                        # a joining space so the tokens don't get glued together.
+                        # If either this delta or the previous one looks like a
+                        # multi-word chunk (contains an internal space) and there
+                        # is no whitespace at the boundary, insert a joining space
+                        # so the tokens don't get glued together.
                         if (
                             token_buffer
-                            and " " in delta.strip()
+                            and (" " in delta.strip() or " " in token_buffer[-1].strip())
                             and not token_buffer[-1][-1:].isspace()
                             and not delta[0:1].isspace()
                         ):
