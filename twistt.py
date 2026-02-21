@@ -37,7 +37,7 @@ import threading
 import time
 import urllib.parse
 from asyncio import CancelledError, Event, PriorityQueue, Queue, create_task
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime
 from enum import Enum, StrEnum
@@ -397,6 +397,7 @@ class Config:
         model: str
         api_key: str | None
         correct: bool
+        speculative: bool
 
     class Output(NamedTuple):
         mode: OutputMode
@@ -458,6 +459,7 @@ class CommandLineParser:
         "post_model": f"{ENV_PREFIX}POST_TREATMENT_MODEL",
         "post_provider": f"{ENV_PREFIX}POST_TREATMENT_PROVIDER",
         "post_correct": f"{ENV_PREFIX}POST_TREATMENT_CORRECT",
+        "post_speculative": f"{ENV_PREFIX}POST_TREATMENT_SPECULATIVE",
         "no_post": f"{ENV_PREFIX}POST_TREATMENT_DISABLED",
         "cerebras_api_key": f"{ENV_PREFIX}CEREBRAS_API_KEY",
         "openrouter_api_key": f"{ENV_PREFIX}OPENROUTER_API_KEY",
@@ -698,6 +700,20 @@ class CommandLineParser:
         parser.add_argument(
             "-npc",
             dest="post_correct",
+            action="store_false",
+            help=argparse.SUPPRESS,
+        )
+        parser.add_argument(
+            "-ps",
+            "--post-speculative",
+            action=argparse.BooleanOptionalAction,
+            default=default.get("POST_TREATMENT_SPECULATIVE", cls._UNDEFINED),
+            help=f"Speculatively run post-treatment on each segment in full output mode "
+            f"(use -nps as an alias to --no-post-speculative) (env: {prefix}POST_TREATMENT_SPECULATIVE)",
+        )
+        parser.add_argument(
+            "-nps",
+            dest="post_speculative",
             action="store_false",
             help=argparse.SUPPRESS,
         )
@@ -1019,6 +1035,7 @@ class CommandLineParser:
             "POST_TREATMENT_MODEL": cls.get_env("POST_TREATMENT_MODEL", "gpt-4o-mini"),
             "POST_TREATMENT_PROVIDER": cls.get_env("POST_TREATMENT_PROVIDER", PostTreatmentTask.Provider.OPENAI.value),
             "POST_TREATMENT_CORRECT": cls.get_env_bool("POST_TREATMENT_CORRECT"),
+            "POST_TREATMENT_SPECULATIVE": cls.get_env_bool("POST_TREATMENT_SPECULATIVE"),
             "POST_TREATMENT_DISABLED": cls.get_env_bool("POST_TREATMENT_DISABLED"),
             "CEREBRAS_API_KEY": cls.get_env("CEREBRAS_API_KEY", prefix_optional=True),
             "OPENROUTER_API_KEY": cls.get_env("OPENROUTER_API_KEY", prefix_optional=True),
@@ -1466,6 +1483,7 @@ class CommandLineParser:
                 if post_provider is PostTreatmentTask.Provider.OPENROUTER
                 else args.cerebras_api_key,
                 correct=args.post_correct and post_treatment_configured,
+                speculative=args.post_speculative and post_treatment_configured and output_mode.is_full,
             ),
             output=Config.Output(
                 mode=output_mode,
@@ -1632,7 +1650,7 @@ class CommandLineParser:
                     # Interactive prompt: save the first device name
                     overrides[env_key] = input_devices[0].name
                 continue
-            if dest in {"post_correct", "use_typing", "no_post", "no_indicator", "no_tray_icon", "no_ducking", "no_osd"}:
+            if dest in {"post_correct", "post_speculative", "use_typing", "no_post", "no_indicator", "no_tray_icon", "no_ducking", "no_osd"}:
                 overrides[env_key] = "true" if getattr(args, dest) else "false"
                 continue
             value = getattr(args, dest, None)
@@ -1945,6 +1963,10 @@ class Comm:
         self._is_buffer_active = buffer_active
         self._active_hotkey_name: str | None = None
         self._is_hotkey_toggle_mode: bool = False
+        self._speculative_cancel_requested: bool = False
+        self._speculative_source_text: str | None = None
+        self._speculative_result: str | None = None
+        self._speculative_in_progress: bool = False
         self._audio_ducker: AudioDucker | None = None
         if ducking_config and ducking_config.enabled and AudioDucker.is_available():
             self._audio_ducker = AudioDucker(reduction_percent=ducking_config.reduction_percent)
@@ -2156,6 +2178,32 @@ class Comm:
         self.queue_display_command(BaseDisplayTask.Commands.UpdatePostState(active=flag))
         if not flag:
             self._maybe_clear_session_finishing()
+
+    def request_speculative_cancel(self):
+        """Signal the post-treatment task to cancel in-progress speculative processing."""
+        self._speculative_cancel_requested = True
+
+    @property
+    def speculative_cancel_requested(self) -> bool:
+        return self._speculative_cancel_requested
+
+    def update_speculative_state(
+        self,
+        source_text: str | None,
+        result: str | None,
+        in_progress: bool,
+    ):
+        """Update the shared speculative processing state."""
+        self._speculative_source_text = source_text
+        self._speculative_result = result
+        self._speculative_in_progress = in_progress
+
+    def clear_speculative_state(self):
+        """Reset all speculative processing state."""
+        self._speculative_cancel_requested = False
+        self._speculative_source_text = None
+        self._speculative_result = None
+        self._speculative_in_progress = False
 
     @property
     def is_indicator_active(self):
@@ -2731,7 +2779,18 @@ class BaseTranscriptionTask:
             full_text = "".join(previous_transcriptions)
             if self.comm.is_post_enabled:
                 self.comm.toggle_post_treatment_active(True)
-                await self.comm.queue_post_command(PostTreatmentTask.Commands.ProcessFullText(text=full_text, stream_output=True))
+                if self.config.post.speculative:
+                    await self.comm.queue_post_command(
+                        PostTreatmentTask.Commands.PromoteOrProcess(
+                            text=full_text, stream_output=True,
+                        )
+                    )
+                else:
+                    await self.comm.queue_post_command(
+                        PostTreatmentTask.Commands.ProcessFullText(
+                            text=full_text, stream_output=True,
+                        )
+                    )
             else:
                 seq = self.seq_counter
                 self.seq_counter += 1
@@ -2928,9 +2987,16 @@ class BaseTranscriptionTask:
             else:
                 await self._upsert_buffer_segment(final_text)
         else:
-            # in full mode, post-treatment runs only after the key is released
-            # (via _queue_full_mode_result), so we don't activate the indicator here
-            pass
+            # In full mode, post-treatment normally runs only after key release.
+            # With speculative mode, start post-processing on accumulated text now
+            # so the result may be ready when the user releases the hotkey.
+            if self.config.post.speculative and self.comm.is_post_enabled:
+                full_text_so_far = previous_text + final_text
+                self.comm.request_speculative_cancel()
+                self.comm.toggle_post_treatment_active(True)
+                await self.comm.queue_post_command(
+                    PostTreatmentTask.Commands.ProcessSpeculative(text=full_text_so_far)
+                )
 
         previous_transcriptions.append(final_text)
         self._display_previous_text = "".join(previous_transcriptions)
@@ -3014,7 +3080,7 @@ class OpenAITranscriptionTask(BaseTranscriptionTask):
         This is called from on_data (on each message received) to ensure
         the commit is sent as soon as recording stops, not just on timeout.
         """
-        if not self.comm.is_recording and not self._commit_sent_after_stop and self._ws:
+        if not self.comm.is_recording and not self._commit_sent_after_stop and self._ws and self.comm.is_speech_active:
             await self._ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
             self._commit_sent_after_stop = True
             self._recording_stopped_at = time.perf_counter()
@@ -3380,7 +3446,7 @@ class MistralTranscriptionTask(BaseTranscriptionTask):
                     # No message within timeout — check if we should stop
                     if self._recording_stopped_at is not None:
                         delay = time.perf_counter() - self._recording_stopped_at
-                        if delay > self.STOP_TIMEOUT_SECONDS:
+                        if delay > self.STOP_TIMEOUT_SECONDS or not self.comm.is_speech_active:
                             debug("MISTRAL: stop timeout reached, finalizing")
                             if current_transcription:
                                 await self._handle_done_segment(
@@ -3489,6 +3555,15 @@ ${current_text}
             text: str
             stream_output: bool
 
+        class ProcessSpeculative(NamedTuple):
+            """Speculatively post-process accumulated full text during recording."""
+            text: str
+
+        class PromoteOrProcess(NamedTuple):
+            """At toggle-off: promote speculative result or fall back to classic."""
+            text: str
+            stream_output: bool
+
         class Shutdown(NamedTuple):
             pass
 
@@ -3498,6 +3573,8 @@ ${current_text}
         self.client = self._build_client()
         self._buffer_seq_counter = 1_000_000
         self._post_display_text = ""
+        self._speculative_source_text: str | None = None
+        self._speculative_result: str | None = None
 
     @property
     def _use_post_correction(self) -> bool:
@@ -3514,6 +3591,7 @@ ${current_text}
                 async with self.comm.dequeue_post_command() as cmd:
                     match cmd:
                         case self.Commands.Shutdown():
+                            self._clear_speculative_state()
                             break
 
                         case self.Commands.ProcessSegment() if self.comm.is_post_enabled:
@@ -3521,6 +3599,12 @@ ${current_text}
 
                         case self.Commands.ProcessFullText() if self.comm.is_post_enabled:
                             await self._handle_full_text(cmd)
+
+                        case self.Commands.ProcessSpeculative() if self.comm.is_post_enabled:
+                            await self._handle_speculative(cmd)
+
+                        case self.Commands.PromoteOrProcess() if self.comm.is_post_enabled:
+                            await self._handle_promote_or_process(cmd)
 
         except CancelledError:
             pass
@@ -3573,6 +3657,75 @@ ${current_text}
     def _send_post_display(self, text: str, final: bool):
         self.comm.queue_display_command(BaseDisplayTask.Commands.UpdatePostText(text=text, final=final))
 
+    def _clear_speculative_state(self):
+        """Reset local and shared speculative state."""
+        self._speculative_source_text = None
+        self._speculative_result = None
+        self.comm.clear_speculative_state()
+
+    async def _handle_speculative(self, cmd: Commands.ProcessSpeculative):
+        """Speculatively post-process accumulated full text during recording.
+
+        Results are stored for potential promotion at toggle-off.
+        Display updates use final=False to prevent session finalization.
+        """
+        self.comm._speculative_cancel_requested = False
+        self._speculative_source_text = cmd.text
+        self._speculative_result = None
+        self._post_display_text = ""
+
+        self.comm.update_speculative_state(source_text=cmd.text, result=None, in_progress=True)
+
+        display_chunks: list[str] = []
+        cancelled = False
+
+        async for piece in self._post_process(
+            cmd.text, "", True,
+            cancel_check=lambda: self.comm.speculative_cancel_requested,
+        ):
+            if piece is None:
+                break
+            if self.comm.speculative_cancel_requested:
+                cancelled = True
+                break
+            display_chunks.append(piece)
+            self._send_post_display("".join(display_chunks).strip(" "), False)
+
+        if cancelled or self.comm.speculative_cancel_requested:
+            self._speculative_source_text = None
+            self._speculative_result = None
+            self.comm.update_speculative_state(None, None, False)
+            return
+
+        result = "".join(display_chunks) or cmd.text.strip(" ")
+        self._speculative_result = result
+        self.comm.update_speculative_state(source_text=cmd.text, result=result, in_progress=False)
+        self._send_post_display(result, False)  # Never final=True for speculative
+        self._post_display_text = (result + " ") if result else ""
+
+    async def _handle_promote_or_process(self, cmd: Commands.PromoteOrProcess):
+        """Promote speculative result if it matches, else fall back to full processing."""
+        if (
+            self._speculative_result is not None
+            and self._speculative_source_text == cmd.text
+        ):
+            # Speculative result matches: promote it
+            result = self._speculative_result
+            self._send_post_display(result, True)  # final=True → session can finalize
+            await self.comm.queue_buffer_command(
+                BufferTask.Commands.InsertSegment(
+                    seq_num=self._next_buffer_seq(), text=result,
+                )
+            )
+            self._post_display_text = (result + " ") if result else ""
+        else:
+            # No match: fall back to classic full-text processing
+            await self._handle_full_text(
+                self.Commands.ProcessFullText(text=cmd.text, stream_output=cmd.stream_output)
+            )
+
+        self._clear_speculative_state()
+
     def _resolve_prompt(self) -> str:
         """Re-read file-based prompt sources and combine all sources in order."""
         parts = []
@@ -3596,6 +3749,7 @@ ${current_text}
         text: str,
         previous_text: str,
         stream_output: bool,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> AsyncIterator[str | None]:
         if not text.strip():
             yield text
@@ -3661,6 +3815,11 @@ ${current_text}
                         ):
                             delta = " " + delta
                         token_buffer.append(delta)
+                        if cancel_check is not None and cancel_check():
+                            if token_buffer:
+                                yield "".join(token_buffer)
+                            yield None
+                            return
                         token_count += 1
                         if stream_output and (
                             token_count >= self.STREAMING_TOKEN_BUFFER_SIZE or delta.endswith((" ", ".", ",", "!", "?", "\n", ":", ";"))
@@ -4126,7 +4285,9 @@ class BaseDisplayTask:
                 if self.is_post_active:
                     self.post_done = False
                 else:
-                    if not self.post_enabled or self.post_text or not self.session_active:
+                    if self.config.output.mode.is_full and self.config.post.speculative:
+                        pass  # Wait for UpdatePostText(final=True) from promotion
+                    elif not self.post_enabled or self.post_text or not self.session_active:
                         self.post_done = True
                 self._maybe_finalize()
 

@@ -162,6 +162,8 @@ TWISTT_POST_TREATMENT_MODEL=gpt-4o-mini  # Model for post-treatment
 TWISTT_POST_TREATMENT_PROVIDER=openai  # Provider: openai, cerebras, or openrouter
 # Post-treatment correct mode (apply corrections in-place with keyboard; requires batch output mode)
 TWISTT_POST_TREATMENT_CORRECT=false
+# Speculative post-treatment: run post-treatment on each segment during recording (only in full output mode)
+TWISTT_POST_TREATMENT_SPECULATIVE=false
 # Disable post-treatment entirely (ignores prompts/files)
 TWISTT_POST_TREATMENT_DISABLED=false
 
@@ -191,6 +193,7 @@ TWISTT_OPENROUTER_API_KEY=sk-or-...  # Required if using openrouter provider
 | `-pm, --post-model`                            | `TWISTT_POST_TREATMENT_MODEL`                       | gpt-4o-mini                   | Model for post-treatment                                                                                                                                                                                                |
 | `-pp, --post-provider`                         | `TWISTT_POST_TREATMENT_PROVIDER`                    | openai                        | Provider for post-treatment (openai, cerebras, openrouter)                                                                                                                                                              |
 | `-pc, --post-correct, -npc, --no-post-correct` | `TWISTT_POST_TREATMENT_CORRECT`                     | false                         | Apply post-treatment by correcting already-output text in-place (only in batch output mode)                                                                                                                             |
+| `-ps, --post-speculative, -nps, --no-post-speculative` | `TWISTT_POST_TREATMENT_SPECULATIVE`          | false                         | Speculatively run post-treatment on each segment during recording (only in full output mode)                                                                                                                            |
 | `-np, --no-post`                               | `TWISTT_POST_TREATMENT_DISABLED`                    | false                         | Disable post-treatment regardless of prompts or files                                                                                                                                                                   |
 | `-kcb, --cerebras-api-key`                     | `TWISTT_CEREBRAS_API_KEY` or `CEREBRAS_API_KEY`     | -                             | Cerebras API key                                                                                                                                                                                                        |
 | `-kor, --openrouter-api-key`                   | `TWISTT_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` | -                             | OpenRouter API key                                                                                                                                                                                                      |
@@ -485,6 +488,10 @@ TWISTT_POST_TREATMENT_PROMPT="base.txt"
 
 # Use full output mode (wait for hotkey release to output/process)
 ./twistt.py --output-mode full
+
+# Speculative post-treatment in full mode: start post-processing during recording
+# so results are ready instantly when the hotkey is released
+./twistt.py --output-mode full --post-prompt "Fix grammar" --post-speculative
 
 # Type ASCII characters directly (slower; non-ASCII characters are still handled via clipboard)
 ./twistt.py --use-typing

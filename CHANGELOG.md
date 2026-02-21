@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Since this project does not use versioned releases, entries are organized by date.
 
+## 2026-02-21
+
+### Added
+
+- Speculative post-treatment in full output mode (`--post-speculative`): post-processing starts on each completed segment during recording, so results are ready instantly when the hotkey is released
+
+### Fixed
+
+- Unnecessary 2-second delay when releasing the hotkey with no speech in progress (OpenAI and Mistral providers)
+
 ## 2026-02-20
 
 ### Added
