@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Since this project does not use versioned releases, entries are organized by date.
 
+## 2026-02-22
+
+### Reverted
+
+- Multi-word chunk space insertion heuristic for post-treatment streaming: the fix introduced for some LLM providers caused more problems than it solved and has been removed
+
 ## 2026-02-21
 
 ### Added
