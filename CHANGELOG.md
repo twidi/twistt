@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Since this project does not use versioned releases, entries are organized by date.
 
+## 2026-05-15
+
+### Fixed
+
+- OpenAI transcription migrated to the GA Realtime API: removes the deprecated `OpenAI-Beta: realtime=v1` header and the `transcription_session.update` event, both of which now return `beta_api_shape_disabled` errors as OpenAI rolls out the deprecation announced for 2026-04-30. Session config now uses the nested `session.audio.input.*` shape
+
 ## 2026-02-22
 
 ### Reverted

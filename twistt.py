@@ -3036,32 +3036,40 @@ class OpenAITranscriptionTask(BaseTranscriptionTask):
     def ws_headers(self) -> dict[str, str]:
         return {
             "Authorization": f"Bearer {self.config.transcription.api_key}",
-            "OpenAI-Beta": "realtime=v1",
         }
 
     @cached_property
     def _first_message(self) -> str:
+        transcription = {
+            "model": self.config.transcription.model.value,
+        }
+        if self.config.transcription.language:
+            transcription["language"] = self.config.transcription.language
         data = {
-            "type": "transcription_session.update",
+            "type": "session.update",
             "session": {
-                "input_audio_format": "pcm16",
-                "turn_detection": {
-                    "type": "server_vad",
-                    "threshold": 0.5,
-                    "prefix_padding_ms": 300,
-                    "silence_duration_ms": self.config.transcription.silence_duration_ms,
-                },
-                "input_audio_transcription": {
-                    "model": self.config.transcription.model.value,
-                },
-                "input_audio_noise_reduction": {
-                    "type": "near_field",
+                "type": "transcription",
+                "audio": {
+                    "input": {
+                        "format": {
+                            "type": "audio/pcm",
+                            "rate": self.SAMPLE_RATE,
+                        },
+                        "turn_detection": {
+                            "type": "server_vad",
+                            "threshold": 0.5,
+                            "prefix_padding_ms": 300,
+                            "silence_duration_ms": self.config.transcription.silence_duration_ms,
+                        },
+                        "transcription": transcription,
+                        "noise_reduction": {
+                            "type": "near_field",
+                        },
+                    },
                 },
                 "include": ["item.input_audio_transcription.logprobs"],
             },
         }
-        if self.config.transcription.language:
-            data["session"]["input_audio_transcription"]["language"] = self.config.transcription.language
         return json.dumps(data)
 
     def _reset_stop_state(self):
