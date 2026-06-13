@@ -37,6 +37,7 @@ import threading
 import time
 import urllib.parse
 from asyncio import CancelledError, Event, PriorityQueue, Queue, create_task
+from collections import deque
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime
@@ -333,6 +334,17 @@ F_KEY_CODES = {
 
 DEBUG_TO_STDOUT = os.getenv("TWISTT_DEBUG", "false").lower() == "true"
 OUTPUT_TO_STDOUT = not DEBUG_TO_STDOUT
+
+# Audio capture block duration (ms). The mic stream delivers fixed 40ms blocks
+# regardless of sample rate, so a pre-roll length in milliseconds maps to a
+# fixed number of blocks across all providers.
+AUDIO_BLOCK_MS = 40
+# Pre-roll: how much audio captured BEFORE the hotkey press we prepend to a
+# session. Gives the OpenAI server VAD a real silence→speech lead-in so it
+# stops clipping the first word(s). Also helps Deepgram's VAD; harmless for
+# Mistral (no VAD, just a little leading silence).
+PREROLL_MS = 1000
+PREROLL_MAX_BLOCKS = PREROLL_MS // AUDIO_BLOCK_MS
 
 
 def debug(*args) -> None:
@@ -1946,6 +1958,10 @@ class CommandLineParser:
 class Comm:
     def __init__(self, post_enabled: bool = True, buffer_active: bool = True, ducking_config: Config.Ducking | None = None):
         self._audio_chunks = janus.Queue()
+        # Rolling buffer of the most recent mic blocks, kept even when not
+        # recording, so we can prepend ~1s of pre-key audio at session start.
+        self._preroll: deque[bytes] = deque(maxlen=PREROLL_MAX_BLOCKS)
+        self._preroll_lock = threading.Lock()
         self._is_post_enabled = post_enabled
         self._post_commands = Queue()
         self._buffer_commands = PriorityQueue()
@@ -1974,6 +1990,30 @@ class Comm:
     def queue_audio_chunks(self, data: bytes):
         with suppress(SyncQueueShutDown):
             self._audio_chunks.sync_q.put_nowait(data)
+
+    def store_preroll(self, data: bytes):
+        """Append a mic block to the rolling pre-roll buffer (called from the
+        sounddevice callback thread on every block, recording or not)."""
+        with self._preroll_lock:
+            self._preroll.append(data)
+
+    def _flush_preroll(self):
+        """Move the buffered pre-key audio to the front of the audio queue.
+
+        Must run before is_recording is set so the live chunks (queued via the
+        callback's call_soon_threadsafe) land after this pre-roll.
+        """
+        with self._preroll_lock:
+            chunks = list(self._preroll)
+            self._preroll.clear()
+        for chunk in chunks:
+            self.queue_audio_chunks(chunk)
+
+    def _clear_preroll(self):
+        """Drop the buffered audio (e.g. the just-spoken tail) at session end so
+        a fast re-trigger doesn't prepend stale speech to the next session."""
+        with self._preroll_lock:
+            self._preroll.clear()
 
     @property
     def is_buffer_active(self) -> bool:
@@ -2109,6 +2149,9 @@ class Comm:
         if flag:
             if self._audio_ducker:
                 self._audio_ducker.duck()
+            # Prepend the pre-key audio BEFORE flipping is_recording, so live
+            # chunks queue after the pre-roll (clean silence→speech lead-in).
+            self._flush_preroll()
             self._recording.set()
             self._active_hotkey_name = hotkey_name
             self._is_hotkey_toggle_mode = is_toggle
@@ -2123,6 +2166,8 @@ class Comm:
             if self._audio_ducker:
                 self._audio_ducker.restore()
             self._recording.clear()
+            # Drop the just-spoken tail so a fast re-trigger won't prepend it.
+            self._clear_preroll()
             self._active_hotkey_name = None
             self._is_hotkey_toggle_mode = False
             # Mark the session as finishing: the transcription task may still
@@ -2639,7 +2684,7 @@ class CaptureTask:
             sample_rate = DeepgramTranscriptionTask.SAMPLE_RATE
         stream = sd.RawInputStream(
             samplerate=sample_rate,
-            blocksize=int(sample_rate * 40 / 1000),
+            blocksize=int(sample_rate * AUDIO_BLOCK_MS / 1000),
             dtype="int16",
             channels=1,
             callback=self._callback,
@@ -2659,8 +2704,6 @@ class CaptureTask:
     def _callback(self, indata, frames, timeinfo, status):  # pragma: no cover - sounddevice callback
         if self.comm.is_shutting_down:
             return
-        if not self.comm.is_transcribing:
-            return
         try:
             data = np.frombuffer(indata, dtype=np.int16)
             if self.config.capture.gain != 1.0:
@@ -2668,6 +2711,14 @@ class CaptureTask:
                 audio_bytes = amplified.astype(np.int16).tobytes()
             else:
                 audio_bytes = data.tobytes()
+
+            # Always feed the pre-roll ring buffer so the moment recording
+            # starts we can prepend ~1s of real audio captured BEFORE the key
+            # press, giving the server VAD a clean silence→speech lead-in.
+            self.comm.store_preroll(audio_bytes)
+
+            if not self.comm.is_transcribing:
+                return
 
             def _put():
                 with suppress(RuntimeError):
