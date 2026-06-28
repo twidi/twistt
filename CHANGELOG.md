@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Since this project does not use versioned releases, entries are organized by date.
 
+## 2026-06-28
+
+### Fixed
+
+- OSD overlay was capturing pointer events, blocking clicks on UI elements positioned underneath it. The overlay is now click-through: an empty Wayland input region is set on the layer-shell surface, so clicks pass through to the window below while the overlay stays fully visible
+
+## 2026-06-13
+
+### Fixed
+
+- First word(s) clipped when speaking immediately on hotkey press: with OpenAI/Deepgram server-side VAD, the lack of a silence lead-in placed the speech onset a beat late. A continuous ~1s pre-roll ring buffer of recent mic audio is now kept at all times and prepended to the audio queue at session start, giving the VAD a real silence→speech lead-in (and recovering any speech that leaked just before the key registered). The buffer is cleared on stop so a fast re-trigger can't prepend the previous utterance's tail
+
 ## 2026-05-15
 
 ### Fixed

@@ -834,6 +834,16 @@ class OSDWindow(Gtk.Window):
         self.set_resizable(False)
         self.set_default_size(self._width, self._height)
         self.add_css_class("twistt-osd-window")
+        # Make the overlay click-through: an empty input region means the
+        # Wayland surface declares no pointer-sensitive area, so clicks pass
+        # through to whatever window sits underneath. Re-applied on every map
+        # (the window is shown/hidden repeatedly via set_visible()).
+        self.connect("map", self._on_map_click_through)
+
+    def _on_map_click_through(self, _widget):
+        surface = self.get_surface()
+        if surface is not None:
+            surface.set_input_region(cairo.Region())
 
     def _setup_drawing_area(self):
         self.drawing_area = Gtk.DrawingArea()
