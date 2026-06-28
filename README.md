@@ -643,9 +643,10 @@ Twistt includes an optional on-screen display (OSD) overlay that shows a live vi
 - **Live transcript**: Real-time speech text with fade-out scrolling, blinking cursor, and section labels
 - **Post-treatment display**: Shows post-processed text in a separate section when enabled
 - **State indicators**: Pulsing labels showing current state (Recording, Transcribing, Post-processing)
+- **Cancel / Reset buttons**: Two buttons in the bottom-right corner (shown only during a session). **Cancel** (✕) aborts the transcription — it wipes everything already pasted (text and indicator) and stops the active mode. **Reset** (↻) does the same wipe but immediately resumes in the same mode (toggle or push-to-talk), to restart your phrase from scratch. The rest of the overlay stays click-through; only these two buttons catch clicks
 - **Glass-morphism UI**: Semi-transparent dark background with gradient borders
 
-The OSD is enabled by default and runs as a separate daemon process under the system Python (`/usr/bin/python3`), communicating with the main application via Unix socket IPC.
+The OSD is enabled by default and runs as a separate daemon process under the system Python (`/usr/bin/python3`), communicating with the main application via Unix socket IPC. The overlay is click-through except for the Cancel/Reset buttons.
 
 **System dependencies (Wayland/Hyprland only):**
 

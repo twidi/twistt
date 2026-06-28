@@ -163,6 +163,26 @@ class AudioMonitor:
             return self.samples.copy()
 
 
+# ── Button geometry ───────────────────────────────────────────────────
+
+# Cancel/Reset buttons live in the bottom-right corner. This is the single
+# source of truth shared by drawing, hit-testing and the input region.
+BTN_SIZE = 27
+BTN_GAP = 8
+BTN_MARGIN = 10
+
+
+def compute_button_rects(width: int, height: int) -> dict[str, tuple[int, int, int, int]]:
+    """Return {'reset': (x, y, w, h), 'cancel': (x, y, w, h)} in widget coords."""
+    y = height - BTN_SIZE - BTN_MARGIN
+    cancel_x = width - BTN_MARGIN - BTN_SIZE
+    reset_x = cancel_x - BTN_GAP - BTN_SIZE
+    return {
+        "reset": (reset_x, y, BTN_SIZE, BTN_SIZE),
+        "cancel": (cancel_x, y, BTN_SIZE, BTN_SIZE),
+    }
+
+
 # ── Cairo Renderer ────────────────────────────────────────────────────
 
 
@@ -223,6 +243,11 @@ class OSDRenderer:
         # 5. State indicator
         indicator_y = height - 16
         self._draw_state_indicator(cr, padding, indicator_y, text_state)
+
+        # 6. Cancel/Reset buttons (only during an active session). Drawn inside
+        # the group so they inherit the overlay's global opacity.
+        if text_state.get("session_active", False):
+            self._draw_buttons(cr, width, height)
 
         cr.pop_group_to_source()
         cr.paint_with_alpha(self._opacity)
@@ -729,6 +754,44 @@ class OSDRenderer:
             label_w, _ = layout.get_pixel_size()
             cx += 18 + label_w + 16
 
+    # ── buttons ────────────────────────────────────────────────────
+
+    def _draw_buttons(self, cr: cairo.Context, width: float, height: float):
+        rects = compute_button_rects(width, height)
+        for name, (x, y, w, h) in rects.items():
+            # Pill background
+            self._rounded_rect(cr, x, y, w, h, 8)
+            cr.set_source_rgba(0.55, 0.63, 0.78, 0.12)
+            cr.fill()
+            self._rounded_rect(cr, x, y, w, h, 8)
+            cr.set_source_rgba(0.60, 0.69, 0.84, 0.20)
+            cr.set_line_width(1.0)
+            cr.stroke()
+
+            cx, cy = x + w / 2, y + h / 2
+            cr.set_line_width(2.0)
+            cr.set_line_cap(cairo.LINE_CAP_ROUND)
+            cr.set_source_rgba(0.80, 0.83, 0.90, 0.85)
+
+            if name == "cancel":
+                r = 4.5
+                cr.move_to(cx - r, cy - r)
+                cr.line_to(cx + r, cy + r)
+                cr.move_to(cx + r, cy - r)
+                cr.line_to(cx - r, cy + r)
+                cr.stroke()
+            else:  # reset: circular arrow with a small arrowhead at the gap
+                r = 5.0
+                cr.arc(cx, cy, r, math.radians(60), math.radians(360))
+                cr.stroke()
+                ax = cx + r * math.cos(math.radians(60))
+                ay = cy + r * math.sin(math.radians(60))
+                cr.move_to(ax, ay)
+                cr.line_to(ax - 3, ay - 1)
+                cr.move_to(ax, ay)
+                cr.line_to(ax + 1, ay - 3)
+                cr.stroke()
+
     # ── helpers ────────────────────────────────────────────────────
 
     @staticmethod
@@ -760,6 +823,9 @@ class OSDWindow(Gtk.Window):
         self._audio_level = 0.0
         self._audio_samples: np.ndarray | None = None
         self._text_state: dict = {}
+        self._buttons_active = False
+        # Called with "reset" | "cancel" when a button is clicked.
+        self.on_action = None
 
         self._setup_layer_shell()
         self._setup_window()
@@ -836,14 +902,29 @@ class OSDWindow(Gtk.Window):
         self.add_css_class("twistt-osd-window")
         # Make the overlay click-through: an empty input region means the
         # Wayland surface declares no pointer-sensitive area, so clicks pass
-        # through to whatever window sits underneath. Re-applied on every map
-        # (the window is shown/hidden repeatedly via set_visible()).
+        # through to whatever window sits underneath. When buttons are active,
+        # the region is restricted to the button rects so only they catch
+        # input. Re-applied on every map (the window is shown/hidden via
+        # set_visible()).
         self.connect("map", self._on_map_click_through)
 
     def _on_map_click_through(self, _widget):
+        self._apply_input_region()
+
+    def set_buttons_active(self, active: bool):
+        """Toggle whether the cancel/reset buttons catch pointer input."""
+        self._buttons_active = active
+        self._apply_input_region()
+
+    def _apply_input_region(self):
         surface = self.get_surface()
-        if surface is not None:
-            surface.set_input_region(cairo.Region())
+        if surface is None:
+            return
+        region = cairo.Region()
+        if self._buttons_active:
+            for x, y, w, h in compute_button_rects(self._width, self._height).values():
+                region.union(cairo.RectangleInt(int(x), int(y), int(w), int(h)))
+        surface.set_input_region(region)
 
     def _setup_drawing_area(self):
         self.drawing_area = Gtk.DrawingArea()
@@ -851,6 +932,20 @@ class OSDWindow(Gtk.Window):
         self.drawing_area.set_content_height(self._height)
         self.drawing_area.set_draw_func(self._on_draw)
         self.set_child(self.drawing_area)
+
+        click = Gtk.GestureClick()
+        click.set_button(1)  # left mouse button
+        click.connect("pressed", self._on_button_pressed)
+        self.drawing_area.add_controller(click)
+
+    def _on_button_pressed(self, _gesture, _n_press, x, y):
+        if not self._buttons_active:
+            return
+        for name, (bx, by, bw, bh) in compute_button_rects(self._width, self._height).items():
+            if bx <= x <= bx + bw and by <= y <= by + bh:
+                if self.on_action:
+                    self.on_action(name)
+                return
 
     def _on_draw(self, area, cr, width, height):
         self._renderer.draw(
@@ -939,6 +1034,7 @@ class TranscriptionOSD:
         _load_css()
 
         self.window = OSDWindow(self._width, self._height, self._pos_x, self._pos_y, self._monitor, self._spectrum_height, self._opacity)
+        self.window.on_action = self._send_action
 
         self._start_socket_server()
         self._initial_visibility()
@@ -1051,6 +1147,18 @@ class TranscriptionOSD:
             self._client_conn = None
         self._recv_buffer = b""
 
+    def _send_action(self, action: str):
+        """Send a button action back to the main process over the socket."""
+        if self._client_conn is None:
+            return
+        try:
+            data = OSDProtocol.encode_message({"type": "action", "action": action})
+            self._client_conn.setblocking(True)
+            self._client_conn.sendall(data)
+            self._client_conn.setblocking(False)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            self._disconnect_client()
+
     def _handle_message(self, msg: dict):
         msg_type = msg.get("type", "")
 
@@ -1066,6 +1174,8 @@ class TranscriptionOSD:
                 "session_active": True,
             })
             self._show()
+            if self.window:
+                self.window.set_buttons_active(True)
 
         elif msg_type == "speech_state":
             self._text_state["is_recording"] = msg.get("recording", False)
@@ -1119,6 +1229,9 @@ class TranscriptionOSD:
             return
 
         self.visible = True
+        # Activate the buttons' input region when a session is active; the
+        # map handler re-applies it once the surface exists.
+        self.window.set_buttons_active(self._text_state.get("session_active", False))
         self.window.set_visible(True)
 
         # Start audio monitoring
@@ -1143,6 +1256,7 @@ class TranscriptionOSD:
             return
 
         self.visible = False
+        self.window.set_buttons_active(False)
         self.window.set_visible(False)
 
         if self._update_timer_id:
