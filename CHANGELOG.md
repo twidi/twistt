@@ -7,10 +7,6 @@ Since this project does not use versioned releases, entries are organized by dat
 
 ## 2026-06-28
 
-### Added
-
-- Cancel (✕) and Reset (↻) buttons in the OSD overlay (bottom-right corner). Cancel aborts the in-progress transcription — it wipes everything already pasted (including the text inserted so far in batch mode and the indicator) and stops the active mode, as if the toggle were switched off or the push-to-talk key released. Reset does the same wipe but immediately resumes in the same mode (toggle re-armed, or push-to-talk kept alive while held), letting you restart your phrase from scratch. The rest of the overlay stays click-through; only the two buttons catch clicks, and they only appear while a session is active
-
 ### Fixed
 
 - OSD overlay was capturing pointer events, blocking clicks on UI elements positioned underneath it. The overlay is now click-through: an empty Wayland input region is set on the layer-shell surface, so clicks pass through to the window below while the overlay stays fully visible

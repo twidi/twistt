@@ -1974,14 +1974,8 @@ class Comm:
         self._is_keyboard_busy = False
         self._is_post_treatment_active = False
         self._is_indicator_active = False
-        self._indicator_reset = False
         self._is_session_finishing = False
         self._shutting_down = Event()
-        self._abort = Event()
-        self._transcription_idle = Event()
-        self._transcription_idle.set()  # idle until a session starts
-        self._hotkey_queue: Queue | None = None
-        self._hotkey_loop = None
         self._is_buffer_active = buffer_active
         self._active_hotkey_name: str | None = None
         self._is_hotkey_toggle_mode: bool = False
@@ -2128,115 +2122,6 @@ class Comm:
         if self._osd_commands is None:
             self._osd_commands = Queue()
 
-    def register_hotkey_queue(self, loop, queue):
-        """Let overlay actions be injected into HotKeyTask's event loop."""
-        self._hotkey_loop = loop
-        self._hotkey_queue = queue
-
-    def dispatch_overlay_action(self, action: str):
-        """Entry point for OSD button actions (called from the reader thread
-        via call_soon_threadsafe). Inject the action as a synthetic item into
-        HotKeyTask's event queue so the toggle/PTT state machine handles it."""
-        if self._hotkey_queue is not None and self._hotkey_loop is not None:
-            self._hotkey_loop.call_soon_threadsafe(
-                self._hotkey_queue.put_nowait, ("__overlay__", action)
-            )
-
-    @property
-    def is_aborting(self) -> bool:
-        return self._abort.is_set()
-
-    def wait_for_abort(self):
-        return create_task(self._abort.wait())
-
-    def set_transcription_idle(self, flag: bool):
-        """Marked idle while the transcription task waits for recording, busy
-        while a session is running. Used by abort_session to wait for the task
-        to unwind before clearing the abort flag."""
-        if flag:
-            self._transcription_idle.set()
-        else:
-            self._transcription_idle.clear()
-
-    async def wait_transcription_idle(self, timeout: float = 2.0):
-        with suppress(TimeoutError):
-            await asyncio.wait_for(self._transcription_idle.wait(), timeout)
-
-    async def wait_post_idle(self, timeout: float = 2.0):
-        """Wait until the post-treatment task is idle (no in-flight LLM stream
-        and no queued commands) so it can't paste after the abort flag clears.
-        The post task sets is_post_treatment_active False itself once it has
-        observed the abort and drained its queue."""
-        start = time.perf_counter()
-        while time.perf_counter() - start < timeout:
-            if not self._is_post_treatment_active and self._post_commands.empty():
-                return
-            await asyncio.sleep(0.02)
-
-    async def wait_keyboard_idle(self, timeout: float = 2.0):
-        """Wait until the buffer and keyboard queues have drained (used to let
-        the text wipe finish before clearing the abort / re-triggering)."""
-        start = time.perf_counter()
-        # Give the buffer task a moment to pick up the queued Reset and enqueue
-        # the erasing keystrokes before we start polling for idle.
-        await asyncio.sleep(0.05)
-        while time.perf_counter() - start < timeout:
-            if (
-                self._buffer_commands.empty()
-                and self._keyboard_commands.empty()
-                and not self._is_keyboard_busy
-            ):
-                return
-            await asyncio.sleep(0.02)
-
-    def toggle_recording_internal_stop(self):
-        """Force-stop recording for an abort, without the normal finalization
-        that would paste the result."""
-        if self._recording.is_set():
-            if self._audio_ducker:
-                self._audio_ducker.restore()
-            self._recording.clear()
-            self._clear_preroll()
-        self._active_hotkey_name = None
-        self._is_hotkey_toggle_mode = False
-        self._send_speech_state_command()
-
-    async def abort_session(self, restart: bool):
-        """Tear down the in-progress session. Cancel wipes and stops; reset
-        (handled by HotKeyTask) re-triggers afterwards. Full pipeline teardown
-        and text wipe are layered in by later tasks."""
-        if not self.is_session_active:
-            return
-        self._abort.set()
-        try:
-            # Stop streaming post-treatment and audio, stop recording.
-            self.request_speculative_cancel()
-            self.toggle_recording_internal_stop()
-            self.empty_audio_chunks()
-            # Wait for BOTH the transcription task and the post-treatment task
-            # to observe the abort and unwind (close the WS / stop the LLM
-            # stream without pasting) before clearing the flag. The post task
-            # flips is_post_treatment_active itself, so don't force it here —
-            # that would let wait_post_idle return before it actually stopped.
-            await self.wait_transcription_idle()
-            await self.wait_post_idle()
-            self.toggle_speech_active(False)
-            self._is_session_finishing = False
-            # Wipe everything already pasted (transcript + indicator), then let
-            # the keystrokes drain before clearing the abort flag.
-            await self.queue_buffer_command(BufferTask.Commands.Reset())
-            await self.wait_keyboard_idle()
-            # The indicator segment was wiped too; tell the indicator task to
-            # forget it so it re-inserts the indicator after a reset re-trigger.
-            self.request_indicator_reset()
-            # End the session on the terminal + OSD displays (the normal "done"
-            # path was suppressed). For reset, the re-triggered SessionStart
-            # finalizes the old session itself, so don't double-finalize here.
-            if not restart:
-                self.queue_display_command(BaseDisplayTask.Commands.AbortSession())
-        finally:
-            self._abort.clear()
-
     async def dequeue_osd_command(self) -> BaseDisplayTask.Commands.Command | None:
         if self._osd_commands is None:
             await asyncio.sleep(999999)
@@ -2371,17 +2256,6 @@ class Comm:
 
     def toggle_indicator_active(self, flag: bool):
         self._is_indicator_active = flag
-
-    def request_indicator_reset(self):
-        """Tell the indicator task to forget it inserted the indicator, so it
-        re-inserts it after the buffer was wiped on abort."""
-        self._indicator_reset = True
-
-    def consume_indicator_reset(self) -> bool:
-        if self._indicator_reset:
-            self._indicator_reset = False
-            return True
-        return False
 
     @property
     def is_shutting_down(self):
@@ -2651,10 +2525,6 @@ class HotKeyTask:
         toggle_stop_time = 0.0
         toggle_cooldown = 0.5
         key_down_time = 0.0
-        ptt_aborted = False  # PTT cancel: swallow the held key until release
-
-        # Allow overlay button actions to be injected into this loop.
-        self.comm.register_hotkey_queue(asyncio.get_running_loop(), self._event_queue)
 
         reader_tasks = []
         for device in self._active_devices:
@@ -2669,49 +2539,6 @@ class HotKeyTask:
 
                 if self.comm.is_shutting_down:
                     break
-
-                # Overlay button action injected from the OSD return channel.
-                if device == "__overlay__":
-                    action = event  # "cancel" | "reset"
-                    if not self.comm.is_session_active:
-                        debug(f"[HotKey] overlay '{action}' ignored: no active session")
-                        continue
-                    current_time = time.perf_counter()
-                    restart = action == "reset"
-                    # Past the recording phase (PTT key already released, only
-                    # post-treatment still running) there is nothing to resume
-                    # and no held key — treat reset as a plain cancel.
-                    if not self.comm.is_recording:
-                        restart = False
-                    was_toggle = is_toggle_mode
-                    name = None
-                    if active_hotkey is not None:
-                        name = next((k.upper() for k, v in F_KEY_CODES.items() if v == active_hotkey), None)
-                    debug(f"[HotKey] overlay action: {action} (toggle={was_toggle})")
-                    await self.comm.abort_session(restart=restart)
-                    if restart:
-                        # Reset: re-trigger immediately in the same mode. abort_session
-                        # has brought is_session_active to False, so this starts clean.
-                        if was_toggle:
-                            is_toggle_mode = True
-                            self.comm.toggle_recording(True, name, True)
-                        else:
-                            # PTT still physically held: keep it alive (key_down_time
-                            # unchanged so release is treated as a normal PTT stop).
-                            hotkey_pressed = True
-                            self.comm.toggle_recording(True, name, False)
-                    else:
-                        # Cancel: stop the active mode.
-                        if is_toggle_mode:
-                            is_toggle_mode = False
-                            active_hotkey = None
-                            hotkey_pressed = False
-                            toggle_stop_time = current_time
-                        elif hotkey_pressed:
-                            # PTT: neutralize the still-held key until its release.
-                            ptt_aborted = True
-                    continue
-
                 if event.type != ecodes.EV_KEY:
                     continue
                 key_event = categorize(event)
@@ -2724,19 +2551,6 @@ class HotKeyTask:
                         f"[HotKey] {state_name} scancode={scancode} device={device.name}"
                         f" | state: pressed={hotkey_pressed} toggle={is_toggle_mode} active={active_hotkey}"
                     )
-
-                    # After a PTT cancel the key is still physically held;
-                    # swallow its events until release, then re-arm.
-                    if ptt_aborted:
-                        if scancode == active_hotkey and key_event.keystate == self.KEY_UP:
-                            debug("[HotKey] PTT abort: hold released, re-armed")
-                            ptt_aborted = False
-                            hotkey_pressed = False
-                            active_hotkey = None
-                            last_release_time[scancode] = current_time
-                        else:
-                            debug("[HotKey] PTT abort: swallowing held-key event")
-                        continue
 
                     if active_hotkey is not None and scancode != active_hotkey:
                         debug(f"[HotKey] Ignored: different hotkey active ({active_hotkey})")
@@ -2955,7 +2769,6 @@ class BaseTranscriptionTask:
 
     async def run(self):
         while not self.comm.is_shutting_down:
-            self.comm.set_transcription_idle(True)
             recording_wait = self.comm.wait_for_recording_task()
             stop_wait = self.comm.wait_for_shutdown_task()
             try:
@@ -2974,7 +2787,6 @@ class BaseTranscriptionTask:
                 break
             if not self.comm.is_recording:
                 continue
-            self.comm.set_transcription_idle(False)
             self._display_previous_text = ""
             previous_transcriptions: list[str] = []
             current_transcription: list[str] = []
@@ -3035,17 +2847,6 @@ class BaseTranscriptionTask:
                 self.seq_counter += 1
                 await self.comm.queue_buffer_command(BufferTask.Commands.InsertSegment(seq_num=seq, text=full_text))
 
-    @staticmethod
-    def _abort_socket(ws) -> None:
-        """Drop a websockets connection's TCP transport immediately, without a
-        close handshake. On abort the session is discarded, so there's no point
-        waiting up to 2×close_timeout (~2s) for a handshake the server won't
-        complete promptly — that delay would stall the whole cancel/restart.
-        Works for both the raw websockets path and Mistral's SDK connection,
-        whose ._websocket is also a websockets ClientConnection."""
-        with suppress(Exception):
-            ws.transport.abort()
-
     async def _run_session(self, previous_transcriptions: list[str], current_transcription: list[str]):
         """Run a single transcription session. Override for custom connection handling."""
         async with websockets.connect(
@@ -3060,32 +2861,16 @@ class BaseTranscriptionTask:
 
             sender_task = create_task(self._sender(ws))
             receiver_task = create_task(self._receiver(ws, previous_transcriptions, current_transcription))
-            abort_waiter = self.comm.wait_for_abort()
-            # Wait for the receiver to finish (DONE event or stop condition) OR
-            # for an abort; then cancel the remaining tasks. On abort, the ws is
-            # closed and the result is NOT queued.
-            done: set = set()
+            # Wait for receiver to finish (it ends on DONE event or stop condition),
+            # then cancel the sender immediately — no need to keep sending audio chunks
             try:
-                done, _ = await asyncio.wait(
-                    {receiver_task, abort_waiter},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
+                await receiver_task
             finally:
-                for t in (sender_task, receiver_task, abort_waiter):
-                    t.cancel()
-                for t in (sender_task, receiver_task, abort_waiter):
-                    with suppress(CancelledError):
-                        await t
-            # In full mode, queue the InsertSegment NOW, before the ws close
-            # handshake — but never when aborting. Detect the abort via the
-            # race winner so a late clear of the flag can't reintroduce a paste.
-            aborted = abort_waiter in done
-            if not aborted and not self.comm.is_aborting:
-                await self._queue_full_mode_result(previous_transcriptions)
-            elif aborted or self.comm.is_aborting:
-                # On abort, drop the TCP socket immediately so close() returns
-                # instantly instead of stalling on the close handshake.
-                self._abort_socket(ws)
+                sender_task.cancel()
+                with suppress(CancelledError):
+                    await sender_task
+            # In full mode, queue the InsertSegment NOW, before the ws close handshake
+            await self._queue_full_mode_result(previous_transcriptions)
 
     async def send_audio_chunk(self, ws, chunk: bytes):
         pass
@@ -3176,8 +2961,6 @@ class BaseTranscriptionTask:
         self.comm.toggle_speech_active(True)
 
     async def _handle_new_delta(self, text: str | None, current_transcription: list[str]):
-        if self.comm.is_aborting:
-            return
         if not text:
             return
         self.comm.toggle_speech_active(True)
@@ -3194,8 +2977,6 @@ class BaseTranscriptionTask:
         self._chars_since_stream = 0
 
     async def _handle_update_last_delta(self, text: str | None, current_transcription: list[str]):
-        if self.comm.is_aborting:
-            return
         if text is None:
             return
         self.comm.toggle_speech_active(True)
@@ -3216,8 +2997,6 @@ class BaseTranscriptionTask:
         previous_transcriptions: list[str],
         current_transcription: list[str],
     ):
-        if self.comm.is_aborting:
-            return
         self._has_transcript_since_done_segment = False
         if text is None:
             text = "".join(current_transcription)
@@ -3719,8 +3498,6 @@ class MistralTranscriptionTask(BaseTranscriptionTask):
             while True:
                 if self.comm.is_shutting_down:
                     break
-                if self.comm.is_aborting:
-                    break
 
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=self.CHUNK_TIMEOUT)
@@ -3770,14 +3547,9 @@ class MistralTranscriptionTask(BaseTranscriptionTask):
             sender_task.cancel()
             with suppress(CancelledError):
                 await sender_task
-            if self.comm.is_aborting:
-                # Drop the socket so the SDK's close() handshake can't stall
-                # the abort (the SDK keeps a websockets ClientConnection here).
-                self._abort_socket(getattr(connection, "_websocket", None))
             await connection.close()
 
-            if not self.comm.is_aborting:
-                await self._queue_full_mode_result(previous_transcriptions)
+            await self._queue_full_mode_result(previous_transcriptions)
 
 
 class PostTreatmentTask:
@@ -3876,8 +3648,6 @@ ${current_text}
         try:
             while not self.comm.is_shutting_down:
                 async with self.comm.dequeue_post_command() as cmd:
-                    if self.comm.is_aborting and not isinstance(cmd, self.Commands.Shutdown):
-                        continue
                     match cmd:
                         case self.Commands.Shutdown():
                             self._clear_speculative_state()
@@ -4072,10 +3842,6 @@ ${current_text}
             create_kwargs["extra_headers"] = self.OPENROUTER_EXTRA_HEADERS
         last_exception: BaseException | None = None
         for attempt in range(self.STREAM_MAX_RETRIES):
-            if self.comm.is_aborting:
-                # Abort raised before the stream started: emit nothing.
-                yield None
-                return
             stream: AsyncIterator | None = None
             has_emitted_piece = False
             token_buffer: list[str] = []
@@ -4098,11 +3864,6 @@ ${current_text}
                         if not delta:
                             continue
                         token_buffer.append(delta)
-                        if self.comm.is_aborting:
-                            # Abort: stop streaming and emit nothing (the text
-                            # is being wiped anyway).
-                            yield None
-                            return
                         if cancel_check is not None and cancel_check():
                             if token_buffer:
                                 yield "".join(token_buffer)
@@ -4192,11 +3953,6 @@ class BufferTask:
             corrected_text: str
             position_cursor_at: BufferTask.PositionCursorAt | None = None
 
-        class Reset(NamedTuple):
-            # High seq so it sorts after real segments and the indicator
-            # (2_000_000_000), before Shutdown (3_000_000_000).
-            seq_num: int = 2_500_000_000
-
         class Shutdown(NamedTuple):
             seq_num: int = 3_000_000_000
 
@@ -4213,20 +3969,6 @@ class BufferTask:
 
         async def _enqueue(self, command):
             await self.comm.queue_keyboard_command(command)
-
-        async def reset_all(self):
-            """Erase everything already pasted and forget all segments. Used to
-            wipe the cursor area on session abort. self.text mirrors exactly
-            what was sent to the target app, so backspacing its length removes
-            transcript, post-treatment and the indicator alike."""
-            async with self.lock:
-                if self.text:
-                    await self._move_cursor_to(len(self.text))
-                    await self._enqueue(OutputTask.Commands.DeleteCharsBackward(len(self.text)))
-                self.text = ""
-                self.cursor = 0
-                self.segments = {}
-                self.segment_order = []
 
         async def output_transcription(self, text: str):
             if not text:
@@ -4441,18 +4183,9 @@ class BufferTask:
                 self._idle_cursor_task = create_task(self._idle_cursor_monitor())
             while not self.comm.is_shutting_down:
                 cmd = await self.comm.dequeue_buffer_command()
-                # While aborting, drop everything except the wipe and shutdown
-                # so no late segment re-pastes after the text has been erased.
-                if self.comm.is_aborting and not isinstance(
-                    cmd, (self.Commands.Reset, self.Commands.Shutdown)
-                ):
-                    continue
                 match cmd:
                     case self.Commands.Shutdown():
                         break
-
-                    case self.Commands.Reset():
-                        await self.manager.reset_all()
 
                     case self.Commands.InsertSegment(
                         seq_num=seq_num,
@@ -4526,13 +4259,10 @@ class BaseDisplayTask:
         class UpdatePostEnabled(NamedTuple):
             active: bool
 
-        class AbortSession(NamedTuple):
-            pass
-
         class Shutdown(NamedTuple):
             pass
 
-        Command = SessionStart | UpdateSpeechState | UpdateSpeechText | UpdatePostState | UpdatePostText | UpdatePostEnabled | AbortSession | Shutdown
+        Command = SessionStart | UpdateSpeechState | UpdateSpeechText | UpdatePostState | UpdatePostText | UpdatePostEnabled | Shutdown
 
     def __init__(self, comm: Comm, config: Config.App):
         self.comm = comm
@@ -4620,13 +4350,6 @@ class BaseDisplayTask:
 
             case self.Commands.UpdatePostEnabled():
                 pass  # subclasses may override _handle_cmd to react
-
-            case self.Commands.AbortSession():
-                # Session was cancelled: end it now regardless of the usual
-                # "done" conditions (the final segment was suppressed). Use
-                # force=False so it's a no-op if an earlier UpdateSpeechState
-                # already finalized it (avoids a double session-end).
-                self._finalize_session()
 
             case self.Commands.Shutdown():
                 self._finalize_session(force=True)
@@ -4855,15 +4578,6 @@ class IndicatorTask:
             self.comm.toggle_indicator_active(False)
 
     async def _maybe_update(self):
-        # Don't touch the buffer mid-abort (commands would be dropped while
-        # current_text drifts). After the wipe, forget the inserted indicator
-        # so it gets re-inserted for the restarted session.
-        if self.comm.is_aborting:
-            return
-        if self.comm.consume_indicator_reset():
-            self.initialized = False
-            self.current_text = ""
-
         desired = self._build_indicator_text()
         if desired:
             self.comm.toggle_indicator_active(True)
@@ -5200,10 +4914,6 @@ class OsdRunner:
         self._process: subprocess.Popen | None = None
         self._socket: socket.socket | None = None
         self._orphaned_daemon_pid: int | None = None
-        self._reader_thread: threading.Thread | None = None
-        self._reader_stop = False
-        self._on_action = None
-        self._loop = None
         self._width = width
         self._height = height
         self._x = x
@@ -5448,52 +5158,8 @@ class OsdRunner:
                     self._socket.close()
                 self._socket = None
 
-    def start_reader(self, loop, on_action):
-        """Start a background thread reading actions sent back by the OSD.
-
-        ``on_action`` is invoked (via ``loop.call_soon_threadsafe``) with the
-        action string ("reset"|"cancel") for each frame received.
-        """
-        self._loop = loop
-        self._on_action = on_action
-        if self._reader_thread is None:
-            self._reader_stop = False
-            self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
-            self._reader_thread.start()
-
-    def _reader_loop(self):
-        buf = b""
-        while not self._reader_stop:
-            sock = self._socket
-            if sock is None:
-                time.sleep(0.2)
-                continue
-            try:
-                data = sock.recv(4096)
-            except OSError:
-                time.sleep(0.2)
-                continue
-            if not data:
-                time.sleep(0.2)
-                continue
-            buf += data
-            while len(buf) >= 4:
-                (length,) = struct.unpack("!I", buf[:4])
-                if len(buf) < 4 + length:
-                    break
-                payload = buf[4:4 + length]
-                buf = buf[4 + length:]
-                try:
-                    msg = json.loads(payload.decode("utf-8"))
-                except Exception:
-                    continue
-                if msg.get("type") == "action" and self._on_action and self._loop:
-                    action = msg.get("action")
-                    self._loop.call_soon_threadsafe(self._on_action, action)
-
     def stop(self):
         try:
-            self._reader_stop = True
             if self._socket:
                 with suppress(Exception):
                     self._socket.close()
@@ -5559,11 +5225,6 @@ class OsdTask(BaseDisplayTask):
             await asyncio.sleep(0.5)
 
             self.comm.enable_osd_queue()
-
-            # Start the return channel (OSD button clicks → main process).
-            loop = asyncio.get_running_loop()
-            self._runner._connect_socket()
-            self._runner.start_reader(loop, self.comm.dispatch_overlay_action)
 
             try:
                 await super().run()
